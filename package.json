@@ -1,0 +1,11 @@
+{
+  "name": "ccload-web",
+  "private": true,
+  "scripts": {
+    "web:build": "node build-web.mjs",
+    "web:build:check": "node build-web.mjs --check"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

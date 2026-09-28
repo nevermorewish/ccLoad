@@ -27,7 +27,7 @@ LDFLAGS = -s -w \
 	-X '$(VERSION_PKG).BuildTime=$(BUILD_TIME)' \
 	-X $(VERSION_PKG).BuiltBy=$(BUILT_BY)
 
-.PHONY: help build docker-build web-test verify-web race-fast race www-setup www-run www-release generate-plist inject-env-vars install-service uninstall-service start stop restart status logs clean
+.PHONY: help build docker-build web-build web-test verify-web race-fast race www-setup www-run www-release generate-plist inject-env-vars install-service uninstall-service start stop restart status logs clean
 
 # 默认目标
 help:
@@ -36,6 +36,7 @@ help:
 	@echo "可用命令:"
 	@echo "  build             - 构建二进制文件"
 	@echo "  docker-build      - 构建 Docker 镜像（自动注入版本信息）"
+	@echo "  web-build         - 使用 Node.js 构建并压缩管理后台资源"
 	@echo "  web-test          - 运行 web 前端 node:test 测试"
 	@echo "  verify-web        - 执行 web 前端验证"
 	@echo "  race-fast         - 运行高价值 race 测试子集"
@@ -74,6 +75,9 @@ docker-build:
 
 web-test: www-setup
 	@node --test web/assets/js/*.test.js
+
+web-build:
+	@npm ci && npm run web:build
 
 verify-web: web-test
 

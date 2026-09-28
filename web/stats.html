@@ -10,21 +10,10 @@
   <meta name="theme-color" content="#3b82f6">
   <title data-i18n="stats.title">调用统计 - Claude Code & Codex Proxy</title>
   <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
-  <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
-  <link rel="stylesheet" href="/web/assets/css/channels.css?v=__VERSION__">
-  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/echarts.min.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/template-engine.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/date-range-selector.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/filter-state.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/filter-query.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/page-filters.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/stats.js?v=__VERSION__"></script>
+  <link rel="stylesheet" data-ccload-bundle href="/web/assets/bundles/stats.css?v=__VERSION__">
+
+  <script defer data-ccload-bundle src="/web/assets/bundles/stats.js?v=__VERSION__"></script>
+
 </head>
 <body>
   <div class="app-container">
@@ -63,7 +52,7 @@
                 </button>
               </div>
             </h3>
-            
+
             <!-- 统计表格 -->
             <script>
               // 立即恢复视图状态，避免闪烁
