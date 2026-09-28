@@ -2,23 +2,85 @@ version: '3.8'
 
 services:
   ccload:
-    image: ghcr.io/caidaoli/ccload:latest
+    image: crpi-dzjyl2rfnlfugj1m.cn-shanghai.personal.cr.aliyuncs.com/frogclaw/ccload:latest
     container_name: ccload
     user: root
     restart: unless-stopped
     ports:
-      # 宿主机端口:容器端口。只改左边即可对外换端口，不要改右边
-      - "8080:8080"
-    # 所有配置统一写在 .env 里（从 .env.docker.example 复制）。
-    # 文件不存在时 Compose 直接报错拒绝启动，不会用弱默认密码跑起来。
-    env_file:
-      - .env
+      # 宿主机端口:容器端口；右侧端口须与 PORT 和健康检查一致
+      - "5001:5001"
+    # 所有 Docker 配置直接在此修改，无需 .env 文件。
+    # 配置值包含字面量 $ 时须写成 $$，例如密码 abc$def 写成 abc$$def。
+    environment:
+      # 管理后台密码（必填，留空时服务拒绝启动）
+      CCLOAD_PASS: "ea98276354345f643158b814993d60398b61ac6046fcc4be"
+      PORT: "5001"
+      TZ: Asia/Shanghai
+      # PostgreSQL 运行在同一 Compose 网络中，使用服务名和容器端口连接。
+      CCLOAD_POSTGRES: "postgresql://ccload:a9abd7167a515ff9a4ad32c73de8186328480bf7f66008871728a07a94e61c9d@postgres:5501/ccload?sslmode=disable"
+      GIN_MODE: release
+
+      # API 令牌也可在 http://localhost:5001/web/tokens.html 管理。
+      # 格式：token 或 token|描述，多个令牌用英文逗号分隔。
+      # CCLOAD_API_TOKENS: "token1|production,token2|development"
+
+      # 外部数据库（MySQL 和 PostgreSQL 只能设置一个）
+      # CCLOAD_MYSQL: "user:password@tcp(mysql:3306)/ccload?charset=utf8mb4&parseTime=True&loc=Local"
+      # 混合存储：同时设置外部数据库和此项，SQLite 作为本地缓存。
+      # CCLOAD_ENABLE_SQLITE_REPLICA: "1"
+      # SQLite 空库日志导入天数：默认 7，-1 全量，0 不恢复日志。
+      # CCLOAD_SQLITE_LOG_DAYS: "7"
+      # Journal 模式：WAL（默认）、DELETE、TRUNCATE、PERSIST、MEMORY、OFF。
+      # SQLITE_JOURNAL_MODE: TRUNCATE
+
+      # 禁用上游 TLS 校验（仅限临时排障或受控内网环境）
+      # CCLOAD_ALLOW_INSECURE_TLS: "0"
+      # 可信代理 CIDR，逗号分隔；none 表示不信任任何代理。
+      # TRUSTED_PROXIES: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+      # 模型目录及 Claude Code CLI 版本缓存须位于持久化卷内。
+      # CCLOAD_MODEL_CATALOG_CACHE: /app/data/model-catalog.json
+      # 每小时同步 Claude Code 版本；无法访问 GitHub 时可设为 false。
+      # CCLOAD_ANTHROPIC_CLI_VERSION_SYNC: "true"
+      # CCLOAD_ANTHROPIC_CLI_VERSION_CACHE: /app/data/anthropic-cli-version.json
+      # Cursor SDK Bridge 通常无需设置，镜像已内置。
+      # CURSOR_SDK_BRIDGE_BIN: /app/cursor-sdk-bridge
+
+      # 并发、请求体上限、冷却、日志保留及重试等系统设置在
+      # http://localhost:5001/web/settings.html 管理。
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--tries=1", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--tries=1", "http://localhost:5001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  postgres:
+    image: postgres:15
+    container_name: ccload-postgres
+    restart: unless-stopped
+    # 与 ipp-new-api 的 Compose 配置一致，显式指定 PostgreSQL 监听端口。
+    command: ["postgres", "-p", "5501"]
+    environment:
+      POSTGRES_USER: ccload
+      POSTGRES_PASSWORD: a9abd7167a515ff9a4ad32c73de8186328480bf7f66008871728a07a94e61c9d
+      POSTGRES_DB: ccload
+      TZ: Asia/Shanghai
+    ports:
+      - "5501:5501"
+    volumes:
+      - ccload_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ccload -d ccload -p 5501"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  ccload_pg_data:
 
