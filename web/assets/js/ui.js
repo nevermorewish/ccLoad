@@ -141,6 +141,7 @@ window.WebAuth = window.WebAuth || {
 (function () {
   const NAVS = [
     { key: 'index', labelKey: 'nav.overview', href: '/web/index.html', icon: iconHome },
+    { key: 'monitor', labelKey: 'nav.monitor', href: '/web/monitor.html', icon: iconTrend },
     { key: 'channels', labelKey: 'nav.channels', href: '/web/channels.html', icon: iconSettings },
     { key: 'tokens', labelKey: 'nav.tokens', href: '/web/tokens.html', icon: iconKey },
     { key: 'stats', labelKey: 'nav.stats', href: '/web/stats.html', icon: iconBars },

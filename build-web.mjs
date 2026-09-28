@@ -13,6 +13,7 @@ const pageFiles = [
   'channels.html',
   'index.html',
   'login.html',
+  'monitor.html',
   'logs.html',
   'model-test.html',
   'settings.html',

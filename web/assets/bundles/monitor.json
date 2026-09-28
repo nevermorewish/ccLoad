@@ -1,0 +1,14 @@
+{
+  "scripts": [
+    "/web/assets/locales/zh-CN.js?v=__VERSION__",
+    "/web/assets/locales/en.js?v=__VERSION__",
+    "/web/assets/js/i18n.js?v=__VERSION__",
+    "/web/assets/js/web-auth.js?v=__VERSION__",
+    "/web/assets/js/ui.js?v=__VERSION__",
+    "/web/assets/js/monitor.js?v=__VERSION__"
+  ],
+  "stylesheets": [
+    "/web/assets/css/styles.css?v=__VERSION__",
+    "/web/assets/css/monitor.css?v=__VERSION__"
+  ]
+}

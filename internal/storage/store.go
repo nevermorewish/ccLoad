@@ -13,6 +13,8 @@ import (
 // [REFACTOR] 2025-12：合并子接口，所有方法平铺
 // 理由：8个子接口无任何地方被独立使用，所有消费者都依赖完整 Store
 type Store interface {
+	UpdateChannelMonitorSchedule(ctx context.Context, id int64, schedule model.ChannelMonitorSchedule) error
+	ListChannelMonitorStats(ctx context.Context, since, until time.Time) ([]model.ChannelMonitorStats, error)
 	// === Channel Management ===
 	ListConfigs(ctx context.Context) ([]*model.Config, error)
 	GetConfig(ctx context.Context, id int64) (*model.Config, error)

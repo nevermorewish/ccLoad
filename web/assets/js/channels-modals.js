@@ -1207,6 +1207,7 @@ function updateBatchChannelSelectionUI() {
     'batchEnableChannelsBtn',
     'batchDisableChannelsBtn',
     'batchExportChannelsBtn',
+    'batchExportChannelsJsonBtn',
     'batchDeleteChannelsBtn',
     'batchRefreshOAuthUsageBtn',
     'batchRefreshMergeBtn',

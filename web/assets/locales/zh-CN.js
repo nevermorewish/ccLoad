@@ -65,6 +65,7 @@ window.I18N_LOCALES['zh-CN'] = {
   // 导航
   // ============================================================
   'nav.overview': '概览',
+  'nav.monitor': '渠道监控',
   'nav.channels': '渠道管理',
   'nav.tokens': 'API令牌',
   'nav.stats': '调用统计',

@@ -109,10 +109,14 @@ func (s *Server) runScheduledChannelChecks(ctx context.Context, now time.Time) e
 }
 
 func (s *Server) runScheduledChannelCheck(ctx context.Context, cfg *model.Config, apiKeys []*model.APIKey, content string) {
+	s.runChannelMonitorCheck(ctx, cfg, apiKeys, content, model.LogSourceScheduledCheck)
+}
+
+func (s *Server) runChannelMonitorCheck(ctx context.Context, cfg *model.Config, apiKeys []*model.APIKey, content, source string) {
 	modelName, skipReason := selectScheduledCheckModel(cfg)
 	if skipReason != "" {
 		log.Printf("[WARN] [channel-check] 跳过渠道 #%d %s：%s", cfg.ID, cfg.Name, skipReason)
-		s.persistDetectionLog(ctx, detectionSkipLog(cfg, model.LogSourceScheduledCheck, modelName, skipReason))
+		s.persistDetectionLog(ctx, detectionSkipLog(cfg, source, modelName, skipReason))
 		return
 	}
 	if len(s.enumerateModelRows(cfg, modelName)) == 0 {
@@ -136,7 +140,7 @@ func (s *Server) runScheduledChannelCheck(ctx context.Context, cfg *model.Config
 	if selectErr != nil {
 		log.Printf("[WARN] [channel-check] 跳过渠道 #%d %s：%v", cfg.ID, cfg.Name, selectErr)
 		if !isExpectedScheduledCheckStop(selectErr) {
-			s.persistDetectionLog(ctx, detectionSkipLog(cfg, model.LogSourceScheduledCheck, modelName, selectErr.Error()))
+			s.persistDetectionLog(ctx, detectionSkipLog(cfg, source, modelName, selectErr.Error()))
 		}
 		return
 	}
@@ -145,7 +149,7 @@ func (s *Server) runScheduledChannelCheck(ctx context.Context, cfg *model.Config
 	if err != nil {
 		log.Printf("[WARN] [channel-check] 跳过渠道 #%d %s：%v", cfg.ID, cfg.Name, err)
 		if !isExpectedScheduledCheckStop(err) {
-			s.persistDetectionLog(ctx, detectionSkipLog(cfg, model.LogSourceScheduledCheck, modelName, err.Error()))
+			s.persistDetectionLog(ctx, detectionSkipLog(cfg, source, modelName, err.Error()))
 		}
 		return
 	}
@@ -159,7 +163,7 @@ func (s *Server) runScheduledChannelCheck(ctx context.Context, cfg *model.Config
 	}
 	logModel, logThinking := channelTestLogIdentity(req.Model, req.ThinkingEffort)
 	result := s.executeChannelTestWithCooldown(ctx, runtimeCfg, keySelection.keyIndex, keySelection.requestCredential, req, keySelection.updatePersistedCooldown)
-	s.persistDetectionLog(ctx, detectionLogFromResult(cfg, model.LogSourceScheduledCheck, logModel, channelTestActualModel(result, req.Model), keySelection.apiKey, "", logThinking, result))
+	s.persistDetectionLog(ctx, detectionLogFromResult(cfg, source, logModel, channelTestActualModel(result, req.Model), keySelection.apiKey, "", logThinking, result))
 	logScheduledChannelCheckResult(cfg, keySelection.keyIndex, req.Model, result)
 }
 

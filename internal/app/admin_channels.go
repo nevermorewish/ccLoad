@@ -26,6 +26,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/errgroup"
 )
 
 // ==================== 渠道CRUD管理 ====================
@@ -91,23 +92,37 @@ type channelCooldownSnapshot struct {
 
 func (s *Server) loadChannelCooldownSnapshot(ctx context.Context) channelCooldownSnapshot {
 	snapshot := channelCooldownSnapshot{}
-	var err error
-
-	snapshot.channels, err = s.getAllChannelCooldowns(ctx)
-	if err != nil {
-		log.Printf("[WARN] 批量查询渠道冷却状态失败: %v", err)
-		snapshot.channels = make(map[int64]time.Time)
-	}
-	snapshot.keys, err = s.getAllKeyCooldowns(ctx)
-	if err != nil {
-		log.Printf("[WARN] 批量查询Key冷却状态失败: %v", err)
-		snapshot.keys = make(map[int64]map[int]time.Time)
-	}
-	snapshot.models, err = s.getAllModelCooldowns(ctx)
-	if err != nil {
-		log.Printf("[WARN] 批量查询模型冷却状态失败: %v", err)
-		snapshot.models = make(map[int64]map[string]time.Time)
-	}
+	// These snapshots are independent reads. Fetch them together so a cold
+	// cache does not add three database round trips to every channel-list load.
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		var err error
+		snapshot.channels, err = s.getAllChannelCooldowns(groupCtx)
+		if err != nil {
+			log.Printf("[WARN] 批量查询渠道冷却状态失败: %v", err)
+			snapshot.channels = make(map[int64]time.Time)
+		}
+		return nil
+	})
+	group.Go(func() error {
+		var err error
+		snapshot.keys, err = s.getAllKeyCooldowns(groupCtx)
+		if err != nil {
+			log.Printf("[WARN] 批量查询Key冷却状态失败: %v", err)
+			snapshot.keys = make(map[int64]map[int]time.Time)
+		}
+		return nil
+	})
+	group.Go(func() error {
+		var err error
+		snapshot.models, err = s.getAllModelCooldowns(groupCtx)
+		if err != nil {
+			log.Printf("[WARN] 批量查询模型冷却状态失败: %v", err)
+			snapshot.models = make(map[int64]map[string]time.Time)
+		}
+		return nil
+	})
+	_ = group.Wait()
 	return snapshot
 }
 

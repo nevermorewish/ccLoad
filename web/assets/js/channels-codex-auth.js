@@ -2138,12 +2138,28 @@ function resetActiveChannelUsageAutoRefreshState() {
   activeChannelUsageAutoRefreshPendingIDs.clear();
 }
 
-// Every list load refreshes the displayed channels again; only an in-flight
-// request for the same channel is skipped.
+function channelNeedsAutomaticUsageRefresh(channel) {
+  if (!channel || typeof channel !== 'object') return true;
+  const authType = String(channel.auth_type || channel.authType || '').trim().toLowerCase();
+  // Keep compatibility with callers that only provide channel IDs or a
+  // partial response; the server still performs the final eligibility check.
+  if (!authType) return true;
+  if (authType === 'api_key') {
+    return channel.management_account?.credential_configured === true;
+  }
+  return ['antigravity_oauth', 'zai_oauth', 'codebuddy_oauth', 'cursor_oauth', 'zed_oauth']
+    .includes(authType);
+}
+
+// Every list load refreshes eligible displayed channels; API-key channels
+// without a management account do not need the expensive stats/config scan
+// behind the active-usage endpoint.
 async function maybeAutoRefreshActiveChannelUsage(channelIDs, fetcher = fetchWithAuth) {
   const readOnly = typeof isTokenChannelsReadOnly === 'function' && isTokenChannelsReadOnly();
   if (readOnly) return null;
   const pendingIDs = Array.from(new Set((Array.isArray(channelIDs) ? channelIDs : [])
+    .filter(channelNeedsAutomaticUsageRefresh)
+    .map(channel => typeof channel === 'object' ? channel.id : channel)
     .map(Number)
     .filter(channelID => Number.isInteger(channelID) && channelID > 0)))
     .filter(channelID => !activeChannelUsageAutoRefreshPendingIDs.has(channelID));

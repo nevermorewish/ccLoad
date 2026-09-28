@@ -54,7 +54,7 @@ async function loadChannels(options = {}) {
       updateChannelsPagination();
     }
     if (options.refreshUsage !== false && typeof maybeAutoRefreshActiveChannelUsage === 'function') {
-      void maybeAutoRefreshActiveChannelUsage(channels.map(channel => channel.id));
+      void maybeAutoRefreshActiveChannelUsage(channels);
     }
   } catch (e) {
     if (loadSequence !== channelsLoadSequence) return;
@@ -64,12 +64,19 @@ async function loadChannels(options = {}) {
   }
 }
 
-// CRUD 操作后同时刷新列表分页与筛选下拉全集
+// CRUD 操作后先刷新当前列表，让按钮尽快恢复可用；筛选下拉全集在后台更新。
+// 筛选选项来自全量渠道扫描，数据量较大时不应阻塞保存/删除结果的显示。
 async function reloadChannelsList(options = {}) {
-  await Promise.all([
-    loadChannelsFilterOptions(options),
-    loadChannels(options)
-  ]);
+  const filterOptionsPromise = loadChannelsFilterOptions(options);
+  await loadChannels(options);
+  if (options.waitForFilterOptions === true || options.throwOnError === true) {
+    await filterOptionsPromise;
+  } else {
+    filterOptionsPromise.catch(() => {
+      // loadChannelsFilterOptions already reports the error; avoid an
+      // unhandled rejection when the caller only needs the list refresh.
+    });
+  }
 }
 
 // 加载渠道筛选下拉全集，与列表的分页和全部筛选条件彻底解耦

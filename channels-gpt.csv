@@ -1,0 +1,7 @@
+﻿name,api_key,urls,model_entries_json,protocol_transform_mode,auth_type,enabled
+gpt-ff.zwenooo.link,sk-UtASj7LBBMIAw962jzWZ0qqeU9VmOyUhikO5bpwNh3jRtmCr,"[{""url"":""https://ff.zwenooo.link/"",""protocols"":[""openai""]}]","[{""model"":""gpt""}]",auto,api_key,true
+gpt-right.codes,sk-9162d2a74c484c038be71196fbc9a718,"[{""url"":""https://www.right.codes/"",""protocols"":[""openai""]}]","[{""model"":""gpt""}]",auto,api_key,true
+gpt-v2api.top,sk-UTaovPzDZbP85QFJ7V5kDGrxJXMyAcK9tpBVIb02OBqnEQvj,"[{""url"":""https://v2api.top/"",""protocols"":[""openai""]}]","[{""model"":""gpt""}]",auto,api_key,true
+gpt-ai8.my,sk-8uY8M4NYhOyW0Kqk28zJClf79UG5Ooii59goz97bk6fKEKS0,"[{""url"":""https://ai8.my/"",""protocols"":[""openai""]}]","[{""model"":""gpt""}]",auto,api_key,true
+gpt-huskyapi.com,sk-IbL6VI9tXtSeGVtM31vlh42Z4QHIsTtXOQA35fiyx6zH0R0L,"[{""url"":""https://huskyapi.com/"",""protocols"":[""openai""]}]","[{""model"":""gpt""}]",auto,api_key,true
+gpt-api.hdgsb.com,sk-j82RCnhTxA9dow63l5AiL1juhhM96mWvrnePVTJhGP9Ehz0H,"[{""url"":""https://api.hdgsb.com/"",""protocols"":[""openai""]}]","[{""model"":""gpt""}]",auto,api_key,true

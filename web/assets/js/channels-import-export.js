@@ -17,6 +17,63 @@ function setupImportExport() {
       if (window.resumeBackgroundAnimation) window.resumeBackgroundAnimation();
     });
   }
+
+  const importJsonBtn = document.getElementById('importJsonBtn');
+  const importJsonInput = document.getElementById('importJsonInput');
+  if (importJsonBtn && importJsonInput) {
+    importJsonBtn.addEventListener('click', () => importJsonInput.click());
+    importJsonInput.addEventListener('change', (event) => handleImportChannelsJSON(event, importJsonBtn));
+    importJsonInput.addEventListener('cancel', () => { importJsonInput.value = ''; });
+  }
+
+  const exportJsonBtn = document.getElementById('exportJsonBtn');
+  if (exportJsonBtn) exportJsonBtn.addEventListener('click', () => exportChannelsJSON());
+}
+
+async function downloadChannelsJSON(ids = []) {
+  const query = ids.length ? `?ids=${ids.join(',')}` : '';
+  const res = await fetchWithAuth(`/admin/channels/export.json${query}`);
+  if (!res.ok) throw new Error(await res.text() || `JSON 导出失败 (HTTP ${res.status})`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `channels-${formatTimestampForFilename()}.json`;
+  document.body.appendChild(link); link.click(); document.body.removeChild(link); URL.revokeObjectURL(url);
+}
+
+async function exportChannelsJSON() {
+  const button = document.getElementById('exportJsonBtn');
+  if (button) button.disabled = true;
+  try { await downloadChannelsJSON(); if (window.showSuccess) window.showSuccess('JSON 导出成功'); }
+  catch (err) { if (window.showError) window.showError(err.message || 'JSON 导出失败'); }
+  finally { if (button) button.disabled = false; }
+}
+
+async function exportSelectedChannelsJSON() {
+  const ids = typeof getSelectedChannelIDs === 'function' ? getSelectedChannelIDs() : [];
+  if (!ids.length) { if (window.showWarning) window.showWarning(window.t('channels.batchNoSelection')); return; }
+  const button = document.getElementById('batchExportChannelsJsonBtn');
+  if (button) button.disabled = true;
+  try { await downloadChannelsJSON(ids); if (window.showSuccess) window.showSuccess('JSON 导出成功'); }
+  catch (err) { if (window.showError) window.showError(err.message || 'JSON 导出失败'); }
+  finally { if (button) button.disabled = false; }
+}
+
+async function handleImportChannelsJSON(event, importBtn) {
+  const input = event.target;
+  if (!input.files || !input.files.length) return;
+  const formData = new FormData(); formData.append('file', input.files[0]);
+  if (importBtn) importBtn.disabled = true;
+  try {
+    const resp = await fetchAPIWithAuth('/admin/channels/import.json', { method: 'POST', body: formData });
+    if (!resp.success) throw new Error(resp.error || 'JSON 导入失败');
+    const summary = resp.data || {};
+    if (window.showSuccess) window.showSuccess(`JSON 导入完成：新增 ${summary.created || 0}，更新 ${summary.updated || 0}`);
+    await reloadChannelsList();
+  } catch (err) {
+    if (window.showError) window.showError(err.message || 'JSON 导入失败');
+  } finally { if (importBtn) importBtn.disabled = false; input.value = ''; }
 }
 
 async function exportSelectedChannelsCSV() {
@@ -131,5 +188,5 @@ async function handleImportCSV(event, importBtn) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { setupImportExport, exportSelectedChannelsCSV, handleImportCSV };
+  module.exports = { setupImportExport, exportSelectedChannelsCSV, handleImportCSV, exportChannelsJSON, exportSelectedChannelsJSON, handleImportChannelsJSON };
 }

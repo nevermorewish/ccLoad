@@ -7,7 +7,7 @@
   const EXPIRY_KEY = 'ccload_token_expiry';
   const ROLE_KEY = 'ccload_web_role';
   const API_TOKEN_ROLE = 'api_token';
-  const API_TOKEN_NAV = new Set(['index', 'stats', 'trend', 'logs']);
+  const API_TOKEN_NAV = new Set(['index', 'monitor', 'stats', 'trend', 'logs']);
 
   function buildLoginPayload(mode, credential) {
     if (mode === API_TOKEN_ROLE) return { mode, token: credential };

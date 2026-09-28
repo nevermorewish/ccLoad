@@ -135,6 +135,7 @@ function initChannelsPageActions() {
         'batch-disable-channels': () => batchDisableSelectedChannels(),
         'batch-delete-channels': () => batchDeleteSelectedChannels(),
         'batch-export-channels': () => exportSelectedChannelsCSV(),
+        'batch-export-channels-json': () => exportSelectedChannelsJSON(),
         'batch-refresh-oauth-usage': () => batchRefreshSelectedOAuthUsage(),
         'batch-refresh-channels-merge': () => batchRefreshSelectedChannelsMerge(),
         'batch-refresh-channels-replace': () => batchRefreshSelectedChannelsReplace(),
@@ -192,7 +193,7 @@ function initChannelsPageActions() {
 function applyChannelsAccessMode() {
   const readOnly = isTokenChannelsReadOnly();
   document.body.classList.toggle('channels-readonly', readOnly);
-  for (const id of ['addChannelBtn', 'oauthLoginBtn', 'oauthCredentialImportBtn', 'oauthCredentialCleanupOpenBtn', 'importCsvBtn', 'batchFloatingMenu']) {
+  for (const id of ['addChannelBtn', 'oauthLoginBtn', 'oauthCredentialImportBtn', 'oauthCredentialCleanupOpenBtn', 'importCsvBtn', 'importJsonBtn', 'exportJsonBtn', 'batchFloatingMenu']) {
     const el = document.getElementById(id);
     if (el) el.hidden = readOnly;
   }
@@ -286,12 +287,13 @@ window.initPageBootstrap({
       saveChannelsFilters();
     }
 
-    // 并行化第二批：筛选选项、渠道列表与统计互不依赖
+    // 先显示渠道列表。统计聚合可能扫描较多日志，放到后台填充，避免
+    // 首屏和刚点击保存/删除后的界面被统计请求阻塞。
     await Promise.all([
       loadChannelsFilterOptions(),
-      loadChannels(),
-      loadChannelStats()
+      loadChannels()
     ]);
+    void loadChannelStats().catch(() => {});
     highlightFromHash();
     window.addEventListener('hashchange', highlightFromHash);
 

@@ -65,6 +65,7 @@ window.I18N_LOCALES['en'] = {
   // Navigation
   // ============================================================
   'nav.overview': 'Overview',
+  'nav.monitor': 'Channel Monitor',
   'nav.channels': 'Channels',
   'nav.tokens': 'API Tokens',
   'nav.stats': 'Statistics',

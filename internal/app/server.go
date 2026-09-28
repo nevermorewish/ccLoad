@@ -1777,11 +1777,16 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 	admin.Use(s.authService.RequireAdminAuth())
 	{
 		// 渠道管理
+		admin.GET("/channel-monitor", s.HandleChannelMonitor)
+		admin.PUT("/channels/:id/monitor-schedule", s.HandleChannelMonitorSchedule)
+		admin.POST("/channels/:id/monitor-run", s.HandleChannelMonitorRun)
 		admin.GET("/channels", s.HandleChannels)
 		admin.POST("/channels", s.HandleChannels)
 		admin.GET("/channels/filter-options", s.HandleChannelsFilterOptions)
 		admin.GET("/channels/export", s.HandleExportChannelsCSV)
 		admin.POST("/channels/import", s.HandleImportChannelsCSV)
+		admin.GET("/channels/export.json", s.HandleExportChannelsJSON)
+		admin.POST("/channels/import.json", s.HandleImportChannelsJSON)
 		admin.POST("/oauth/credentials/import", s.HandleImportOAuthCredentials)
 		admin.POST("/oauth/credentials/import/stream", s.HandleImportOAuthCredentialsStream)
 		admin.POST("/oauth/credentials/import/jobs", s.HandleStartOAuthCredentialImportJob)
