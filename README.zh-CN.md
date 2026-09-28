@@ -833,6 +833,21 @@ curl -X POST http://localhost:8080/admin/channels/:id/management-account/checkin
 
 渠道数量较多时，可用 CSV 导入导出批量维护配置：
 
+渠道页面同时支持 JSON 备份。JSON 会保存渠道设置、模型映射、API Key、OAuth 凭证和监测计划；导入时按渠道名称创建或更新，可用于跨实例迁移。
+
+**JSON 导出**：
+```bash
+curl -H "Authorization: Bearer your_token" \
+  http://localhost:8080/admin/channels/export.json > channels.json
+```
+
+**JSON 导入**：
+```bash
+curl -X POST -H "Authorization: Bearer your_token" \
+  -F "file=@channels.json" \
+  http://localhost:8080/admin/channels/import.json
+```
+
 **导出配置**:
 ```bash
 # Web界面: 访问 /web/channels.html，点击"导出CSV"按钮

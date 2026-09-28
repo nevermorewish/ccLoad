@@ -33,7 +33,7 @@ function setupImportExport() {
 async function downloadChannelsJSON(ids = []) {
   const query = ids.length ? `?ids=${ids.join(',')}` : '';
   const res = await fetchWithAuth(`/admin/channels/export.json${query}`);
-  if (!res.ok) throw new Error(await res.text() || `JSON 导出失败 (HTTP ${res.status})`);
+  if (!res.ok) throw new Error(await res.text() || window.t('channels.import.exportHttpFailed', { status: res.status }));
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -45,8 +45,8 @@ async function downloadChannelsJSON(ids = []) {
 async function exportChannelsJSON() {
   const button = document.getElementById('exportJsonBtn');
   if (button) button.disabled = true;
-  try { await downloadChannelsJSON(); if (window.showSuccess) window.showSuccess('JSON 导出成功'); }
-  catch (err) { if (window.showError) window.showError(err.message || 'JSON 导出失败'); }
+  try { await downloadChannelsJSON(); if (window.showSuccess) window.showSuccess(window.t('channels.exportJsonSuccess')); }
+  catch (err) { if (window.showError) window.showError(err.message || window.t('channels.exportJsonFailed')); }
   finally { if (button) button.disabled = false; }
 }
 
@@ -55,8 +55,8 @@ async function exportSelectedChannelsJSON() {
   if (!ids.length) { if (window.showWarning) window.showWarning(window.t('channels.batchNoSelection')); return; }
   const button = document.getElementById('batchExportChannelsJsonBtn');
   if (button) button.disabled = true;
-  try { await downloadChannelsJSON(ids); if (window.showSuccess) window.showSuccess('JSON 导出成功'); }
-  catch (err) { if (window.showError) window.showError(err.message || 'JSON 导出失败'); }
+  try { await downloadChannelsJSON(ids); if (window.showSuccess) window.showSuccess(window.t('channels.exportJsonSuccess')); }
+  catch (err) { if (window.showError) window.showError(err.message || window.t('channels.exportJsonFailed')); }
   finally { if (button) button.disabled = false; }
 }
 
@@ -67,12 +67,12 @@ async function handleImportChannelsJSON(event, importBtn) {
   if (importBtn) importBtn.disabled = true;
   try {
     const resp = await fetchAPIWithAuth('/admin/channels/import.json', { method: 'POST', body: formData });
-    if (!resp.success) throw new Error(resp.error || 'JSON 导入失败');
+    if (!resp.success) throw new Error(resp.error || window.t('channels.importJsonFailed'));
     const summary = resp.data || {};
-    if (window.showSuccess) window.showSuccess(`JSON 导入完成：新增 ${summary.created || 0}，更新 ${summary.updated || 0}`);
+    if (window.showSuccess) window.showSuccess(window.t('channels.importJsonSuccess', { created: summary.created || 0, updated: summary.updated || 0 }));
     await reloadChannelsList();
   } catch (err) {
-    if (window.showError) window.showError(err.message || 'JSON 导入失败');
+    if (window.showError) window.showError(err.message || window.t('channels.importJsonFailed'));
   } finally { if (importBtn) importBtn.disabled = false; input.value = ''; }
 }
 

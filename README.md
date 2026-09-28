@@ -816,6 +816,21 @@ The "Advanced" button in the channel editor opens a secondary modal that lets yo
 
 Supports CSV format for channel config import/export:
 
+The channel page also supports a portable JSON backup. JSON export includes channel settings, model mappings, API keys, OAuth credentials, and monitoring schedules; importing the file creates or updates channels by name.
+
+**JSON Export**:
+```bash
+curl -H "Authorization: Bearer your_token" \
+  http://localhost:8080/admin/channels/export.json > channels.json
+```
+
+**JSON Import**:
+```bash
+curl -X POST -H "Authorization: Bearer your_token" \
+  -F "file=@channels.json" \
+  http://localhost:8080/admin/channels/import.json
+```
+
 **Export Config**:
 ```bash
 # Web interface: Visit /web/channels.html, click "Export CSV" button

@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
+	"ccLoad/internal/cooldown"
 	"ccLoad/internal/model"
 	"github.com/gin-gonic/gin"
 )
@@ -134,6 +135,7 @@ func (s *Server) HandleImportChannelsJSON(c *gin.Context) {
 		return
 	}
 	channels := make([]*model.ChannelWithKeys, 0, len(doc.Channels))
+	seenNames := make(map[string]struct{}, len(doc.Channels))
 	for i := range doc.Channels {
 		record := &doc.Channels[i]
 		if record.Config.Config == nil {
@@ -142,23 +144,61 @@ func (s *Server) HandleImportChannelsJSON(c *gin.Context) {
 		}
 		cfg := record.Config.Config
 		cfg.ID = 0 // Portable backups match existing channels by name.
+		cfg.Name = strings.TrimSpace(cfg.Name)
+		if cfg.Name == "" {
+			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("第%d个渠道缺少名称", i+1))
+			return
+		}
+		if _, exists := seenNames[cfg.Name]; exists {
+			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 在文件中重复", cfg.Name))
+			return
+		}
+		seenNames[cfg.Name] = struct{}{}
 		cfg.OAuthCredential = record.Config.OAuthCredential
 		cfg.AuthType = model.NormalizeAuthType(cfg.AuthType)
 		if cfg.AuthType == "" {
 			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的 auth_type 无效", cfg.Name))
 			return
 		}
-		if err := cfg.URLs.Normalize(); err != nil {
+		if urls, err := validateChannelURLConfigs(cfg.URLs, cfg.AuthType); err != nil {
 			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的 URL 无效: %v", cfg.Name, err))
 			return
+		} else {
+			cfg.URLs = urls
 		}
-		if _, err := model.ValidateModelEntries(cfg.ModelEntries); err != nil {
+		if len(cfg.ModelEntries) == 0 {
+			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 缺少模型", cfg.Name))
+			return
+		}
+		if entries, err := model.ValidateModelEntries(cfg.ModelEntries); err != nil {
 			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的模型无效: %v", cfg.Name, err))
+			return
+		} else {
+			cfg.ModelEntries = entries
+		}
+		if err := cfg.NormalizeAvailableTime(); err != nil {
+			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的可用时间无效: %v", cfg.Name, err))
+			return
+		}
+		if cfg.CooldownDetectionRules != nil {
+			if err := cooldown.NormalizeCooldownDetectionRules(cfg.CooldownDetectionRules); err != nil {
+				RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的冷却规则无效: %v", cfg.Name, err))
+				return
+			}
+		}
+		if math.IsNaN(cfg.DailyCostLimit) || cfg.DailyCostLimit < 0 || math.IsNaN(cfg.CostMultiplier) || cfg.CostMultiplier < 0 {
+			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的费用设置无效", cfg.Name))
 			return
 		}
 		if err := cfg.NormalizeScheduledCheckSchedule(); err != nil {
 			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的监测计划无效: %v", cfg.Name, err))
 			return
+		}
+		if cfg.ScheduledCheckModel != "" {
+			if _, reason := selectScheduledCheckModel(cfg); reason != "" {
+				RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的定时检测模型无效: %s", cfg.Name, reason))
+				return
+			}
 		}
 		if cfg.AuthType != model.AuthTypeAPIKey && strings.TrimSpace(cfg.OAuthCredential) == "" {
 			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 缺少 OAuth 凭证", cfg.Name))
@@ -168,7 +208,38 @@ func (s *Server) HandleImportChannelsJSON(c *gin.Context) {
 			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("OAuth 渠道 %q 不能包含 API Keys", cfg.Name))
 			return
 		}
+		if cfg.AuthType != model.AuthTypeAPIKey {
+			credential, err := normalizeCSVImportOAuthCredential(cfg.AuthType, cfg.OAuthCredential)
+			if err != nil {
+				RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的 OAuth 凭证无效: %v", cfg.Name, err))
+				return
+			}
+			cfg.OAuthCredential = credential
+		} else {
+			if len(record.APIKeys) == 0 {
+				RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 缺少 API Key", cfg.Name))
+				return
+			}
+			if cfg.OAuthCredential != "" {
+				if _, err := model.ParseChannelManagementEnvelope(cfg.OAuthCredential); err != nil {
+					RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的管理账号无效: %v", cfg.Name, err))
+					return
+				}
+			}
+		}
 		for keyIndex := range record.APIKeys {
+			if strings.TrimSpace(record.APIKeys[keyIndex].APIKey) == "" {
+				RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的第%d个 API Key 为空", cfg.Name, keyIndex+1))
+				return
+			}
+			if !model.IsValidKeyStrategy(record.APIKeys[keyIndex].KeyStrategy) || record.APIKeys[keyIndex].CostMultiplier < 0 {
+				RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的第%d个 API Key 配置无效", cfg.Name, keyIndex+1))
+				return
+			}
+			if record.APIKeys[keyIndex].ModelScopeEmpty && len(record.APIKeys[keyIndex].AllowedModels) > 0 {
+				RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的第%d个 API Key 模型范围无效", cfg.Name, keyIndex+1))
+				return
+			}
 			record.APIKeys[keyIndex].KeyIndex = keyIndex
 			record.APIKeys[keyIndex].ChannelID = 0
 		}
@@ -183,11 +254,19 @@ func (s *Server) HandleImportChannelsJSON(c *gin.Context) {
 		RespondError(c, http.StatusBadRequest, err)
 		return
 	}
+	if s.urlSelector != nil {
+		for _, channel := range channels {
+			s.urlSelector.PruneChannel(channel.Config.ID, channel.Config.GetURLs())
+			s.cleanupOrphanedURLStates(c.Request.Context(), channel.Config.ID, channel.Config.GetURLs())
+		}
+	}
+	for _, channel := range channels {
+		if channel.Config.UsesOAuth() {
+			s.invalidateOAuthCredential(channel.Config.ID, channel.Config.GetAuthType())
+		}
+	}
 	s.InvalidateChannelListCache()
 	s.InvalidateAllAPIKeysCache()
 	s.invalidateCooldownCache()
 	RespondJSON(c, http.StatusOK, ChannelImportSummary{Created: created, Updated: updated, Processed: len(channels)})
 }
-
-// Keep strconv referenced in older Go build tags where the filename helper is inlined.
-var _ = strconv.IntSize

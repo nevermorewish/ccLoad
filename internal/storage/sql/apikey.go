@@ -702,6 +702,19 @@ func (s *SQLStore) ImportChannelBatch(ctx context.Context, channels []*model.Cha
 			}
 
 			config.ID = channelID
+			if cwk.FullConfig {
+				if err := config.NormalizeAvailableTime(); err != nil {
+					return fmt.Errorf("import channel %s: %w", config.Name, err)
+				}
+				customRules, err := marshalCustomRequestRules(config.CustomRequestRules)
+				if err != nil {
+					return fmt.Errorf("import channel %s: %w", config.Name, err)
+				}
+				if _, err := s.execTx(ctx, tx, `UPDATE channels SET daily_cost_limit = ?, cost_multiplier = ?, custom_request_rules = ?, proxy_url = ?, available_time_start = ?, available_time_end = ? WHERE id = ?`,
+					config.DailyCostLimit, normalizeCostMultiplier(config.CostMultiplier), customRules, config.ProxyURL, config.AvailableTimeStart, config.AvailableTimeEnd, channelID); err != nil {
+					return fmt.Errorf("import channel %s settings: %w", config.Name, err)
+				}
+			}
 			importedIDs = append(importedIDs, channelID)
 			var persistedAuthType string
 			if err := s.queryRowTx(ctx, tx, `SELECT auth_type FROM channels WHERE id = ?`, channelID).Scan(&persistedAuthType); err != nil {
