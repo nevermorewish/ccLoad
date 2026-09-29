@@ -4,6 +4,7 @@ import { getSession, getToken } from "../lib/auth";
 import type { Channel, Session } from "../types";
 
 type Entry = { model: string; redirect_model?: string; disabled?: boolean };
+type TestMode = "channel" | "model" | "chat" | "image";
 type Key = {
   key_index?: number;
   api_key?: string;
@@ -154,6 +155,7 @@ export function ModelTestPage() {
   const [tokenResult, setTokenResult] = useState("");
   const [tokenBusy, setTokenBusy] = useState(false);
   const [channelRows, setChannelRows] = useState<Channel[]>([]);
+  const [testMode, setTestMode] = useState<TestMode>("channel");
   const [channelId, setChannelId] = useState<number | "">("");
   const [model, setModel] = useState("");
   const [protocol, setProtocol] = useState("openai");
@@ -821,6 +823,11 @@ export function ModelTestPage() {
           <p className="muted">连通性、聊天、图片生成和模型批量测试</p>
         </div>
       </header>
+      <div className="mode-tabs" role="tablist" aria-label="模型测试模式">
+        {([['channel', '渠道模式'], ['model', '模型模式'], ['chat', '聊天模式'], ['image', '图片模式']] as const).map(([value, label]) => (
+          <button key={value} type="button" role="tab" aria-selected={testMode === value} className={testMode === value ? 'mode-tab active' : 'mode-tab'} onClick={() => setTestMode(value)}>{label}</button>
+        ))}
+      </div>
       <div className="card">
         <div className="toolbar">
           <select
@@ -912,11 +919,12 @@ export function ModelTestPage() {
             className="btn"
             disabled={busy || !channelId || !model}
             onClick={() => void send()}
+            style={{ display: testMode === "chat" ? "none" : undefined }}
           >
             聊天请求
           </button>
         </div>
-        <div className="toolbar">
+        <div className="toolbar" style={{ display: testMode === "image" ? undefined : "none" }}>
           <input
             className="input compact"
             type="number"
@@ -1133,7 +1141,7 @@ export function ModelTestPage() {
           <pre className="result-pre">{JSON.stringify(result, null, 2)}</pre>
         )}
       </div>
-      <div className="card">
+      <div className="card" style={{ display: testMode === "chat" ? undefined : "none" }}>
         <div className="toolbar">
           <h2>聊天记录</h2>
           <label className="muted">
@@ -1250,7 +1258,7 @@ export function ModelTestPage() {
           ))}
         </div>
       </div>
-      <div className="card">
+      <div className="card" style={{ display: testMode === "model" ? undefined : "none" }}>
         <h2>模型目录编辑</h2>
         <div className="toolbar">
           <button

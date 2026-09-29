@@ -20,6 +20,7 @@ const TokensPage = lazy(() => import('./pages/tokens-page').then((module) => ({ 
 const SettingsPage = lazy(() => import('./pages/settings-page').then((module) => ({ default: module.SettingsPage })))
 const OAuthPage = lazy(() => import('./pages/oauth-page').then((module) => ({ default: module.OAuthPage })))
 const ModelCatalogPage = lazy(() => import('./pages/model-catalog-page').then((module) => ({ default: module.ModelCatalogPage })))
+const OAuthJobsPage = lazy(() => import('./pages/oauth-jobs-page').then((module) => ({ default: module.OAuthJobsPage })))
 
 function usePageData<T>(loader: () => Promise<T>, initial: T) {
   const [data, setData] = useState<T>(initial)
@@ -343,7 +344,7 @@ const tokensRoute = createRoute({ getParentRoute: () => rootRoute, path: '/token
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/settings', component: SettingsPage })
 const oauthRoute = createRoute({ getParentRoute: () => rootRoute, path: '/oauth', component: OAuthPage })
 const modelCatalogRoute = createRoute({ getParentRoute: () => rootRoute, path: '/model-catalog', component: ModelCatalogPage })
-const oauthJobsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/oauth-jobs', component: OAuthJobs })
+const oauthJobsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/oauth-jobs', component: OAuthJobsPage })
 const loginRoute = createRoute({ getParentRoute: () => rootRoute, path: '/login', component: Login })
 const routeTree = rootRoute.addChildren([dashboardRoute, channelsRoute, monitorRoute, statsRoute, trendRoute, modelTestRoute, logsRoute, tokensRoute, settingsRoute, oauthRoute, modelCatalogRoute, oauthJobsRoute, loginRoute])
 const router = createRouter({ routeTree, basepath: '/web', defaultPreload: 'intent' })

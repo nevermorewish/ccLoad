@@ -60,6 +60,12 @@ button { cursor: pointer; }
 .advanced-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .advanced-textarea { min-height: 150px; resize: vertical; display: block; }
 .job-events { display: grid; gap: 4px; max-height: 240px; overflow: auto; padding: 10px; border: 1px solid #263244; border-radius: 7px; background: #0b1120; font: 12px ui-monospace, monospace; white-space: pre-wrap; }
+.job-summary { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0; color: #cbd5e1; font-size: 13px; }
+.mode-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid #263244; }
+.mode-tab { border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: #9ca3af; background: transparent; padding: 10px 14px; }
+.mode-tab:hover, .mode-tab.active { color: #e5e7eb; border-bottom-color: #2563eb; }
+:root[data-resolved-theme="light"] .mode-tabs { border-color: #d1d5db; }
+:root[data-resolved-theme="light"] .mode-tab:hover, :root[data-resolved-theme="light"] .mode-tab.active { color: #111827; }
 @media (max-width: 900px) { .advanced-grid { grid-template-columns: 1fr; } }
 .input, .select { min-height: 38px; border: 1px solid #374151; border-radius: 7px; color: #e5e7eb; background: #0f172a; padding: 8px 10px; }
 .btn { min-height: 38px; border: 1px solid #374151; border-radius: 7px; color: #e5e7eb; background: #1f2937; padding: 8px 14px; }
