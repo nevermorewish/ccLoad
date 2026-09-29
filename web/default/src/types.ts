@@ -2,6 +2,10 @@ export interface Session {
   role?: string
   show_channels?: boolean
   authenticated?: boolean
+  allowed_models?: string[]
+  description?: string
+  default_test_content?: string
+  [key: string]: unknown
 }
 
 export interface Channel {
