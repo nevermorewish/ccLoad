@@ -151,7 +151,14 @@ func (s *Server) HandleStats(c *gin.Context) {
 		return
 	}
 
-	channelHealth := s.fillHealthTimeline(c.Request.Context(), stats, startTime, endTime, &lf, isToday)
+	// The health timeline is useful for the detail view but is considerably more
+	// expensive than the aggregate table. Allow the UI to render the table first
+	// and hydrate the timeline with a second request.
+	includeHealth := c.DefaultQuery("include_health", "true") != "false" && c.Query("include_health") != "0"
+	var channelHealth map[int][]model.HealthPoint
+	if includeHealth {
+		channelHealth = s.fillHealthTimeline(c.Request.Context(), stats, startTime, endTime, &lf, isToday)
+	}
 	if hideTokenChannels(c) {
 		channelHealth = nil
 		for i := range stats {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { getJSON } from '../lib/api'
 import type { StatsEntry } from '../types'
 
@@ -8,8 +8,22 @@ type FilterOptions = { channel_names?: string[]; models?: string[] }
 export function StatsPage() {
   const [range, setRange] = useState('today'); const [channel, setChannel] = useState(''); const [model, setModel] = useState(''); const [protocol, setProtocol] = useState(''); const [token, setToken] = useState(''); const [start, setStart] = useState(''); const [end, setEnd] = useState(''); const [exact, setExact] = useState(false); const [hideZero, setHideZero] = useState(false)
   const [sort, setSort] = useState<SortKey>('total'); const [direction, setDirection] = useState<'asc' | 'desc' | 'none'>('none'); const [rows, setRows] = useState<StatsEntry[]>([]); const [rpm, setRpm] = useState<Record<string, number>>({}); const [options, setOptions] = useState<FilterOptions>({}); const [loading, setLoading] = useState(false); const [error, setError] = useState<string | null>(null)
-  const queryParams = () => ({ range, channel_name: exact && channel ? channel : undefined, channel_name_like: !exact && channel ? channel : undefined, model: exact && model ? model : undefined, model_like: !exact && model ? model : undefined, client_protocol: protocol || undefined, auth_token_id: token || undefined, start_time: range === 'custom' ? start : undefined, end_time: range === 'custom' ? end : undefined })
-  const refresh = async () => { setLoading(true); setError(null); try { const result = await getJSON<{ stats?: StatsEntry[]; rpm_stats?: Record<string, number> }>('/dashboard/stats', queryParams()); setRows(result.stats ?? []); setRpm(result.rpm_stats ?? {}) } catch (cause) { setError(cause instanceof Error ? cause.message : '加载统计失败') } finally { setLoading(false) } }
+  const requestVersion = useRef(0)
+  const queryParams = (includeHealth = false) => ({ range, channel_name: exact && channel ? channel : undefined, channel_name_like: !exact && channel ? channel : undefined, model: exact && model ? model : undefined, model_like: !exact && model ? model : undefined, client_protocol: protocol || undefined, auth_token_id: token || undefined, start_time: range === 'custom' ? start : undefined, end_time: range === 'custom' ? end : undefined, include_health: includeHealth })
+  const refresh = async () => {
+    const version = ++requestVersion.current
+    setLoading(true); setError(null)
+    try {
+      // Render the aggregate table immediately. Health buckets are hydrated in
+      // the background because they require a separate grouped log query.
+      const result = await getJSON<{ stats?: StatsEntry[]; rpm_stats?: Record<string, number> }>('/dashboard/stats', queryParams(false))
+      if (version !== requestVersion.current) return
+      setRows(result.stats ?? []); setRpm(result.rpm_stats ?? {}); setLoading(false)
+      void getJSON<{ stats?: StatsEntry[] }>('/dashboard/stats', queryParams(true)).then((health) => {
+        if (version === requestVersion.current && health.stats) setRows(health.stats)
+      }).catch(() => { /* The aggregate table is still useful without the timeline. */ })
+    } catch (cause) { if (version === requestVersion.current) { setError(cause instanceof Error ? cause.message : '加载统计失败'); setLoading(false) } }
+  }
   const loadOptions = async () => { try { setOptions(await getJSON<FilterOptions>('/dashboard/stats/filter-options', queryParams())) } catch { setOptions({}) } }
   useEffect(() => { void refresh(); void loadOptions() }, [range])
   const filtered = useMemo(() => {
