@@ -47,6 +47,9 @@ func (s *SQLStore) ListChannelMonitorStats(ctx context.Context, since, until tim
 		}
 		last := &result[len(result)-1]
 		last.Recent = append(last.Recent, probe)
+		if last.LastError == "" && !(probe.StatusCode == 0 && probe.Duration == 0) && (probe.StatusCode < 200 || probe.StatusCode >= 300) {
+			last.LastError = probe.Message
+		}
 	}
 	return result, rows.Err()
 }

@@ -21,5 +21,6 @@ type ChannelMonitorStats struct {
 	Samples        int64                 `json:"samples"`
 	Successes      int64                 `json:"successes"`
 	AverageLatency float64               `json:"average_latency"`
+	LastError      string                `json:"last_error,omitempty"`
 	Recent         []ChannelMonitorProbe `json:"recent"`
 }

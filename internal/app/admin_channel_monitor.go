@@ -40,16 +40,33 @@ func monitorStatus(cfg *model.Config, stat model.ChannelMonitorStats) string {
 	if !cfg.Enabled {
 		return "disabled"
 	}
-	for _, probe := range stat.Recent {
+	if stat.Samples == 0 || len(stat.Recent) == 0 {
+		return "unknown"
+	}
+	var latest *model.ChannelMonitorProbe
+	for index := range stat.Recent {
+		probe := &stat.Recent[index]
+		// status_code=0 and duration=0 is a scheduler skip record, not a failed probe.
 		if probe.StatusCode == 0 && probe.Duration == 0 {
 			continue
 		}
-		if probe.StatusCode >= 200 && probe.StatusCode < 300 {
-			return "online"
-		}
+		latest = probe
+		break
+	}
+	if latest == nil {
+		return "unknown"
+	}
+	if latest.StatusCode < 200 || latest.StatusCode >= 300 {
 		return "offline"
 	}
-	return "unknown"
+	if latest.Duration >= 3 || stat.AverageLatency >= 3 {
+		return "degraded"
+	}
+	// A successful latest probe with recent failures is reachable but unstable.
+	if stat.Successes < stat.Samples {
+		return "degraded"
+	}
+	return "online"
 }
 
 func (s *Server) HandleChannelMonitor(c *gin.Context) {
