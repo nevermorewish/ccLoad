@@ -10,7 +10,7 @@ export default defineConfig(({ envMode }) => {
   const serverUrl =
     process.env.VITE_REACT_APP_SERVER_URL ||
     env.rawPublicVars.VITE_REACT_APP_SERVER_URL ||
-    'http://localhost:5001'
+    'http://localhost:8080'
   const isProd = envMode === 'production'
   const proxyPaths = [
     '/admin',
