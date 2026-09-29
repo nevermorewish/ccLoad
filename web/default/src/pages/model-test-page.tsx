@@ -169,6 +169,8 @@ export function ModelTestPage() {
   const [result, setResult] = useState<unknown>(null);
   const [chat, setChat] = useState<ChatMessage[]>(savedChat.messages);
   const [selected, setSelected] = useState<string[]>([]);
+  const [modelModeSelected, setModelModeSelected] = useState<string[]>([]);
+  const [modelModeFilter, setModelModeFilter] = useState("");
   const [manualModels, setManualModels] = useState("");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [batch, setBatch] = useState<Array<Record<string, unknown>>>([]);
@@ -316,6 +318,11 @@ export function ModelTestPage() {
       ),
     ),
   );
+  const modelModeRows = channelRows.flatMap((row) => (Array.isArray(row.models) ? row.models : []).map((entry) => {
+    const modelName = typeof entry === "string" ? entry : String((entry as { model?: unknown }).model ?? "");
+    const modelEntry = typeof entry === "string" ? { model: entry } : entry as Entry;
+    return { key: `${row.id}:${modelName}`, channelId: row.id, channel: row.name, model: modelName, disabled: Boolean(modelEntry.disabled), redirect_model: modelEntry.redirect_model };
+  })).filter((entry) => entry.model && (!modelModeFilter.trim() || entry.model.toLowerCase().includes(modelModeFilter.trim().toLowerCase()) || entry.channel.toLowerCase().includes(modelModeFilter.trim().toLowerCase())));
   const generatedImages = findGeneratedImages(result);
   const loadEntries = async () => {
     if (!channelId) return;
@@ -567,14 +574,9 @@ export function ModelTestPage() {
     }
   };
   const runBatch = async () => {
-    const targets = selected.flatMap((name) =>
-      channelRows
-        .filter(
-          (row) =>
-            Array.isArray(row.models) && row.models.map(String).includes(name),
-        )
-        .map((row) => ({ channelId: row.id, channel: row.name, model: name })),
-    );
+    const targets = testMode === "model"
+      ? modelModeRows.filter((row) => modelModeSelected.includes(row.key)).map(({ key: _key, disabled: _disabled, redirect_model: _redirect, ...target }) => target)
+      : selected.flatMap((name) => channelRows.filter((row) => Array.isArray(row.models) && row.models.map(String).includes(name)).map((row) => ({ channelId: row.id, channel: row.name, model: name })));
     setBusy(true);
     setBatch([]);
     setBatchStatus("");
@@ -1260,6 +1262,14 @@ export function ModelTestPage() {
       </div>
       <div className="card" style={{ display: testMode === "model" ? undefined : "none" }}>
         <h2>模型目录编辑</h2>
+        <div className="toolbar">
+          <input className="input" value={modelModeFilter} onChange={(event) => setModelModeFilter(event.target.value)} placeholder="筛选渠道或模型" />
+          <label className="muted"><input type="checkbox" checked={modelModeRows.length > 0 && modelModeSelected.length === modelModeRows.length} onChange={(event) => setModelModeSelected(event.target.checked ? modelModeRows.map((row) => row.key) : [])} /> 全选结果</label>
+        </div>
+        <div className="table-wrap">
+          <table><thead><tr><th>选择</th><th>渠道</th><th>请求模型</th><th>重定向</th><th>状态</th></tr></thead><tbody>{modelModeRows.map((row) => <tr key={row.key}><td><input type="checkbox" checked={modelModeSelected.includes(row.key)} onChange={(event) => setModelModeSelected((current) => event.target.checked ? [...new Set([...current, row.key])] : current.filter((value) => value !== row.key))} /></td><td>{row.channel}</td><td>{row.model}</td><td>{row.redirect_model || '-'}</td><td>{row.disabled ? '停用' : '启用'}</td></tr>)}{modelModeRows.length === 0 && <tr><td colSpan={5}>没有匹配的渠道模型</td></tr>}</tbody></table>
+        </div>
+        <div className="toolbar"><button className="btn btn-primary" disabled={busy || !modelModeSelected.length} onClick={() => void runBatch()}>批量测试选中渠道模型</button><span className="muted">已选择 {modelModeSelected.length} / {modelModeRows.length}</span></div>
         <div className="toolbar">
           <button
             className="btn"
