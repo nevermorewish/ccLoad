@@ -6,11 +6,12 @@ type DebugLog = Record<string, unknown>
 const text = (value: unknown) => String(value ?? '')
 
 export function LogsPage() {
+  const initialQuery = new URLSearchParams(window.location.search)
   const [range, setRange] = useState('today')
   const [start, setStart] = useState('')
   const [end, setEnd] = useState('')
-  const [channel, setChannel] = useState('')
-  const [model, setModel] = useState('')
+  const [channel, setChannel] = useState(initialQuery.get('channel_name') ?? '')
+  const [model, setModel] = useState(initialQuery.get('model') ?? '')
   const [status, setStatus] = useState('')
   const [protocol, setProtocol] = useState('')
   const [token, setToken] = useState('')

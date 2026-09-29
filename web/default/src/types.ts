@@ -17,7 +17,7 @@ export interface Channel {
 
 export interface ChannelForm {
   name: string
-  urls: Array<{ url: string; protocol?: string }>
+  urls: Array<{ url: string; protocol?: string; protocols?: string[]; exact?: boolean }>
   priority: number
   enabled: boolean
   models: Array<string | { model: string; redirect_model?: string; disabled?: boolean }>
