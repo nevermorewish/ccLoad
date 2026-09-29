@@ -349,12 +349,10 @@
       const healthRequest = window.ServiceHealth
         ? window.ServiceHealth.buildRequest(dateRangeQuery, currentRangeHours())
         : null;
-      const [statsResult, healthResult] = await Promise.allSettled([
-        fetchDataWithAuth(`/dashboard/summary?${dateRangeQuery}`),
-        healthRequest
-          ? fetchDataWithAuth(`/dashboard/metrics?${healthRequest.query}`)
-          : Promise.reject(new Error('ServiceHealth unavailable'))
-      ]);
+      // 摘要卡片决定首屏可用性；健康时间线是次要内容，单独后台加载。
+      const statsResult = await fetchDataWithAuth(`/dashboard/summary?${dateRangeQuery}`)
+        .then((value) => ({ status: 'fulfilled', value }))
+        .catch((reason) => ({ status: 'rejected', reason }));
 
       if (generation !== dashboardLoadGeneration) return;
 
@@ -366,19 +364,24 @@
         showError('无法加载统计数据');
       }
 
-      if (healthResult.status === 'fulfilled') {
-        serviceHealthModel = window.ServiceHealth.buildModel(
-          healthResult.value,
-          healthRequest.bucketMinutes
-        );
-        renderServiceHealth(serviceHealthModel);
-      } else {
-        console.error('Failed to load service health:', healthResult.reason);
-        renderServiceHealthUnavailable();
-      }
-
       loadingElements.forEach(element => element.classList.remove('animate-pulse'));
       if (grid) grid.setAttribute('aria-busy', 'false');
+
+      if (healthRequest) {
+        void fetchDataWithAuth(`/dashboard/metrics?${healthRequest.query}`)
+          .then((metrics) => {
+            if (generation !== dashboardLoadGeneration) return;
+            serviceHealthModel = window.ServiceHealth.buildModel(metrics, healthRequest.bucketMinutes);
+            renderServiceHealth(serviceHealthModel);
+          })
+          .catch((error) => {
+            if (generation !== dashboardLoadGeneration) return;
+            console.error('Failed to load service health:', error);
+            renderServiceHealthUnavailable();
+          });
+      } else {
+        renderServiceHealthUnavailable();
+      }
     }
 
     // 更新统计显示

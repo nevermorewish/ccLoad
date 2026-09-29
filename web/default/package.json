@@ -1,0 +1,28 @@
+{
+  "name": "ccload-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "rsbuild dev",
+    "build": "rsbuild build && node scripts/sync-dist.mjs",
+    "build:check": "tsc -b && rsbuild build && node scripts/sync-dist.mjs",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@tanstack/react-router": "^1.168.23",
+    "axios": "^1.13.6",
+    "lucide-react": "^1.7.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "zustand": "^5.0.12"
+  },
+  "devDependencies": {
+    "@rsbuild/core": "^2.0.1",
+    "@rsbuild/plugin-react": "^2.0.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "~5.9.3"
+  }
+}

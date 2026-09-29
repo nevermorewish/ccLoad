@@ -28,9 +28,18 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # ============================================
 # 阶段3: 构建 (仅此处依赖 TARGETPLATFORM)
 # ============================================
+# 前端构建阶段：React/TypeScript/Rsbuild 产物会同步到 web/index.html 和
+# web/static，随后由 Go embed 打进最终二进制，确保镜像构建不依赖开发机的旧产物。
+FROM node:22-alpine AS web-builder
+WORKDIR /app
+COPY web/default/package.json web/default/package-lock.json ./web/default/
+RUN npm --prefix web/default ci
+COPY web/default ./web/default
+RUN npm --prefix web/default run build
+
+# 回到 Go 构建阶段
 FROM deps AS builder
 
-# 版本号参数（带默认值，更健壮）
 ARG VERSION=dev
 ARG COMMIT=unknown
 
@@ -40,6 +49,8 @@ RUN xx-apk add musl-dev gcc
 
 # 复制源代码
 COPY . .
+COPY --from=web-builder /app/web/index.html ./web/index.html
+COPY --from=web-builder /app/web/static ./web/static
 
 # 静态编译
 ENV CGO_ENABLED=0

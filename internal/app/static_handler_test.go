@@ -104,6 +104,34 @@ func TestStaticFileServing(t *testing.T) {
 		}
 	})
 
+	t.Run("history_route_serves_application_shell", func(t *testing.T) {
+		version.Version = "dev"
+		w := serveHTTP(t, r, newRequest(http.MethodGet, "/web/channels", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d, want %d", w.Code, http.StatusOK)
+		}
+		if w.Body.String() != "v=dev" {
+			t.Fatalf("body=%q, want application shell", w.Body.String())
+		}
+	})
+
+	t.Run("legacy_html_route_redirects_to_react_route", func(t *testing.T) {
+		w := serveHTTP(t, r, newRequest(http.MethodGet, "/web/channels.html?id=7", nil))
+		if w.Code != http.StatusFound {
+			t.Fatalf("status=%d, want %d", w.Code, http.StatusFound)
+		}
+		if got := w.Header().Get("Location"); got != "/web/channels?id=7" {
+			t.Fatalf("Location=%q, want %q", got, "/web/channels?id=7")
+		}
+	})
+
+	t.Run("missing_asset_stays_not_found", func(t *testing.T) {
+		w := serveHTTP(t, r, newRequest(http.MethodGet, "/web/missing.js", nil))
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status=%d, want %d", w.Code, http.StatusNotFound)
+		}
+	})
+
 	t.Run("path_traversal_forbidden", func(t *testing.T) {
 		req := newRequest(http.MethodGet, "/web/index.html", nil)
 		req.URL.Path = "/web/../x"

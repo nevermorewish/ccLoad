@@ -119,8 +119,6 @@
         durationSeconds = statsData.duration_seconds || 1; // 防止除零
         rpmStats = statsData.rpm_stats || null;
         isToday = statsData.is_today !== false;
-        populateStatsComboboxOptions();
-
         // 初始化时应用默认排序（优先级→渠道名称→模型名称）
         applyDefaultSorting();
 
@@ -727,7 +725,8 @@
     }
 
     function populateStatsComboboxOptions() {
-      loadStatsFilterOptions();
+      // 筛选选项来自独立聚合查询，不阻塞统计表首屏渲染。
+      void loadStatsFilterOptions().catch(() => {});
     }
 
     function initFilters(restoredFilters) {
@@ -1160,6 +1159,8 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       }
 
       await loadStats();
+      // 表格先显示，筛选选项在下一轮事件循环中加载，避免与首屏渲染竞争。
+      setTimeout(() => populateStatsComboboxOptions(), 0);
       restoreViewState();
 
       // 注册语言切换回调，重新渲染动态内容

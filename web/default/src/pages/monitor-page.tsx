@@ -1,0 +1,18 @@
+import { useEffect, useState } from 'react'
+import { getJSON, putJSON, postJSON } from '../lib/api'
+
+interface Item { id: number; name: string; status?: string; effective_model?: string; last_checked_at?: string; last_error?: string; schedule?: { enabled?: boolean; interval_minutes?: number; start_time?: string; model?: string }; stats?: { success_rate?: number; average_latency?: number } }
+
+export function MonitorPage() {
+  const [items, setItems] = useState<Item[]>([]); const [busy, setBusy] = useState<number | null>(null); const [error, setError] = useState<string | null>(null)
+  const load = async () => { try { const value = await getJSON<{ items?: Item[] }>('/admin/channel-monitor'); setItems(value.items ?? []) } catch (cause) { setError(cause instanceof Error ? cause.message : '加载监控失败') } }
+  useEffect(() => { void load() }, [])
+  const save = async (item: Item, patch: Record<string, unknown>) => { setBusy(item.id); try { await putJSON(`/admin/channels/${item.id}/monitor-schedule`, { ...(item.schedule ?? {}), ...patch }); await load() } catch (cause) { setError(cause instanceof Error ? cause.message : '保存失败') } finally { setBusy(null) } }
+  const run = async (item: Item) => { setBusy(item.id); try { await postJSON(`/admin/channels/${item.id}/monitor-run`); await load() } catch (cause) { setError(cause instanceof Error ? cause.message : '检测失败') } finally { setBusy(null) } }
+  return <><header className="page-header"><div><h1>渠道监控</h1><p className="muted">自动检测渠道状态，可分别设置模型、时间和间隔</p></div><button className="btn" onClick={() => void load()}>刷新</button></header>{error && <div className="card error-text">{error}</div>}<div className="table-wrap"><table><thead><tr><th>渠道</th><th>状态</th><th>模型</th><th>成功率</th><th>最近检测</th><th>自动监测</th><th>操作</th></tr></thead><tbody>{items.map((item) => <MonitorRow key={item.id} item={item} busy={busy === item.id} onSave={save} onRun={run} />)}</tbody></table></div></>
+}
+
+function MonitorRow({ item, busy, onSave, onRun }: { item: Item; busy: boolean; onSave: (item: Item, patch: Record<string, unknown>) => Promise<void>; onRun: (item: Item) => Promise<void> }) {
+  const [enabled, setEnabled] = useState(Boolean(item.schedule?.enabled)); const [interval, setInterval] = useState(Number(item.schedule?.interval_minutes ?? 300)); const [start, setStart] = useState(item.schedule?.start_time ?? '00:00'); const [model, setModel] = useState(item.schedule?.model ?? item.effective_model ?? '')
+  return <tr><td>{item.name}</td><td>{item.status ?? 'unknown'}{item.last_error && <div className="error-text">{item.last_error}</div>}</td><td><input className="input compact" value={model} onChange={(event) => setModel(event.target.value)} placeholder="默认模型" /></td><td>{item.stats?.success_rate == null ? '-' : `${(Number(item.stats.success_rate) * 100).toFixed(1)}%`}</td><td>{item.last_checked_at ? new Date(item.last_checked_at).toLocaleString() : '-'}</td><td><label><input type="checkbox" checked={enabled} disabled={busy} onChange={(event) => { setEnabled(event.target.checked); void onSave(item, { enabled: event.target.checked, interval_minutes: interval, start_time: start, model }) }} /> 启用</label><input className="input compact" type="number" min="1" max="1440" value={interval} onChange={(event) => setInterval(Number(event.target.value))} /><input className="input compact" type="time" value={start} onChange={(event) => setStart(event.target.value)} /><button className="btn" disabled={busy} onClick={() => void onSave(item, { enabled, interval_minutes: interval, start_time: start, model })}>保存</button></td><td><button className="btn" disabled={busy} onClick={() => void onRun(item)}>立即检测</button></td></tr>
+}

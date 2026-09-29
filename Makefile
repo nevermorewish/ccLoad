@@ -77,7 +77,7 @@ web-test: www-setup
 	@node --test web/assets/js/*.test.js
 
 web-build:
-	@npm ci && npm run web:build
+	@npm ci && npm --prefix web/default ci && npm run web:build
 
 verify-web: web-test
 

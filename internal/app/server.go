@@ -1944,7 +1944,10 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 
 	// 默认首页重定向
 	r.GET("/", func(c *gin.Context) {
-		c.Redirect(http.StatusFound, "/web/index.html")
+		c.Redirect(http.StatusFound, "/web/")
+	})
+	r.GET("/web", func(c *gin.Context) {
+		c.Redirect(http.StatusFound, "/web/")
 	})
 }
 

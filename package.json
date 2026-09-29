@@ -2,8 +2,10 @@
   "name": "ccload-web",
   "private": true,
   "scripts": {
-    "web:build": "node build-web.mjs",
-    "web:build:check": "node build-web.mjs --check"
+    "web:dev": "npm --prefix web/default run dev",
+    "web:build": "npm --prefix web/default run build",
+    "web:build:check": "npm --prefix web/default run build:check",
+    "web:typecheck": "npm --prefix web/default run typecheck"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"

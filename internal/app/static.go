@@ -17,6 +17,18 @@ import (
 // 通过 SetEmbedFS 在 main 包中初始化
 var embedFS fs.FS
 
+var legacyFrontendRoutes = map[string]string{
+	"channels.html":   "/web/channels",
+	"monitor.html":    "/web/monitor",
+	"stats.html":      "/web/stats",
+	"trend.html":      "/web/trend",
+	"model-test.html": "/web/model-test",
+	"logs.html":       "/web/logs",
+	"tokens.html":     "/web/tokens",
+	"settings.html":   "/web/settings",
+	"login.html":      "/web/login",
+}
+
 // SetEmbedFS 设置嵌入的静态资源文件系统
 // embedRoot: 嵌入的 embed.FS
 // subDir: 子目录名称（如 "web"），因为 //go:embed web 会保留 web/ 前缀
@@ -48,8 +60,47 @@ func setupStaticFiles(r *gin.Engine) {
 	// 已压缩的文件类型（图片、字体等）在中间件内自动跳过
 	webGroup := r.Group("/web", ZstdMiddleware())
 	webGroup.GET("/*filepath", func(c *gin.Context) {
-		serveStaticFileFrom(c, embedFS)
+		serveFrontendFile(c, embedFS)
 	})
+}
+
+func serveFrontendFile(c *gin.Context, fileSystem fs.FS) {
+	rawPath := strings.TrimPrefix(c.Param("filepath"), "/")
+	if rawPath == ".." || strings.HasPrefix(rawPath, "../") || strings.Contains(rawPath, "/../") {
+		c.Status(http.StatusForbidden)
+		return
+	}
+	reqPath := strings.TrimPrefix(path.Clean(rawPath), "./")
+	if reqPath == "" || reqPath == "." {
+		reqPath = "index.html"
+	}
+	// Keep bookmarks and links emitted by the legacy HTML dashboard working while
+	// moving those pages to the React history routes. Query parameters are kept so
+	// links such as channels.html?id=... still open the same channel context.
+	if route, ok := legacyFrontendRoutes[reqPath]; ok {
+		if query := c.Request.URL.RawQuery; query != "" {
+			route += "?" + query
+		}
+		c.Redirect(http.StatusFound, route)
+		return
+	}
+	if _, err := fs.Stat(fileSystem, reqPath); err == nil {
+		serveStaticFileFrom(c, fileSystem)
+		return
+	}
+	// Rsbuild/TanStack Router uses history routes; unknown extensionless paths
+	// should receive the application shell, while missing assets stay 404.
+	if path.Ext(reqPath) == "" {
+		for index := range c.Params {
+			if c.Params[index].Key == "filepath" {
+				c.Params[index].Value = "/index.html"
+				break
+			}
+		}
+		serveStaticFileFrom(c, fileSystem)
+		return
+	}
+	c.Status(http.StatusNotFound)
 }
 
 // isTestMode 检测是否在 Go 测试环境中运行

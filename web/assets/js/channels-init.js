@@ -287,12 +287,9 @@ window.initPageBootstrap({
       saveChannelsFilters();
     }
 
-    // 先显示渠道列表。统计聚合可能扫描较多日志，放到后台填充，避免
-    // 首屏和刚点击保存/删除后的界面被统计请求阻塞。
-    await Promise.all([
-      loadChannelsFilterOptions(),
-      loadChannels()
-    ]);
+    // 渠道列表是首屏主内容，筛选全集和统计聚合放到后台，避免慢查询阻塞首屏。
+    await loadChannels();
+    void loadChannelsFilterOptions().catch(() => {});
     void loadChannelStats().catch(() => {});
     highlightFromHash();
     window.addEventListener('hashchange', highlightFromHash);
@@ -370,8 +367,6 @@ window.addEventListener('pageshow', async (event) => {
   const urlChannelId = new URLSearchParams(location.search).get('id');
   if (!event.persisted || urlChannelId) return;
 
-  await Promise.all([
-    loadChannelsFilterOptions(),
-    loadChannels()
-  ]);
+  await loadChannels();
+  void loadChannelsFilterOptions().catch(() => {});
 });
