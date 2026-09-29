@@ -61,6 +61,15 @@ button { cursor: pointer; }
 .advanced-textarea { min-height: 150px; resize: vertical; display: block; }
 .job-events { display: grid; gap: 4px; max-height: 240px; overflow: auto; padding: 10px; border: 1px solid #263244; border-radius: 7px; background: #0b1120; font: 12px ui-monospace, monospace; white-space: pre-wrap; }
 .job-summary { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0; color: #cbd5e1; font-size: 13px; }
+.runtime-metrics-grid { display: grid; gap: 14px; }
+.runtime-metrics-section { border-top: 1px solid #263244; padding-top: 14px; }
+.runtime-metrics-section h3 { margin: 0 0 10px; font-size: 14px; text-transform: capitalize; }
+.runtime-metrics-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.runtime-metric-card { display: grid; gap: 5px; min-height: 76px; border: 1px solid #263244; border-radius: 7px; padding: 10px; background: #0f172a; }
+.runtime-metric-card strong { font-size: 18px; color: #e5e7eb; }
+.runtime-metric-card code { color: #64748b; font-size: 10px; }
+:root[data-resolved-theme="light"] .runtime-metric-card { background: #f8fafc; border-color: #d1d5db; }
+:root[data-resolved-theme="light"] .runtime-metric-card strong { color: #111827; }
 .mode-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid #263244; }
 .mode-tab { border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: #9ca3af; background: transparent; padding: 10px 14px; }
 .mode-tab:hover, .mode-tab.active { color: #e5e7eb; border-bottom-color: #2563eb; }

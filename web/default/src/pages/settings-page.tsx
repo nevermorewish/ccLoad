@@ -33,6 +33,15 @@ type PricingEntry = {
   cache_read_price_high?: number;
   cache_write_price_high?: number;
 };
+type RuntimeMetric = { key: string; label: string; format?: "integer" | "bytes" | "duration" | "seconds" | "percent" | "boolean" | "timestamp" };
+const runtimeGroups: Record<string, RuntimeMetric[]> = {
+  process: [{ key: "uptime_seconds", label: "运行时间", format: "duration" }, { key: "concurrency_slots_in_use", label: "当前并发" }, { key: "max_concurrency", label: "最大并发" }, { key: "goroutines", label: "Goroutine" }],
+  resources: [{ key: "cpu_usage_percent", label: "CPU", format: "percent" }, { key: "rss_bytes", label: "RSS", format: "bytes" }, { key: "heap_alloc_bytes", label: "堆内存", format: "bytes" }, { key: "gc_count", label: "GC 次数" }],
+  http_proxy: [{ key: "active_requests", label: "活动请求" }, { key: "completed_requests", label: "完成请求" }, { key: "streaming_requests", label: "流式请求" }, { key: "response_body_bytes", label: "响应字节", format: "bytes" }],
+  logs: [{ key: "backlog_entries", label: "日志积压" }, { key: "dropped_entries", label: "丢弃日志" }, { key: "persistence_failed_entries", label: "持久化失败" }],
+  storage: [{ key: "primary_sync_pending", label: "主库同步积压" }, { key: "primary_sync_failures", label: "主库同步失败" }, { key: "sqlite_read_failures", label: "SQLite 读取失败" }, { key: "analytics_reads_primary", label: "统计读取主库", format: "boolean" }],
+  responses_websocket: [{ key: "downstream_connections", label: "下游连接" }, { key: "rejected_downstream_connections", label: "拒绝下游连接" }, { key: "ttl_expired", label: "TTL 过期" }, { key: "capacity_rejected", label: "容量拒绝" }],
+};
 const pricingFields = [
   "input_price",
   "output_price",
@@ -89,6 +98,30 @@ const readPricing = (value: string): PricingEntry[] => {
       : {}),
   }));
 };
+const runtimeValue = (value: unknown, format?: RuntimeMetric["format"]) => {
+  if (value == null || value === "") return "-";
+  const number = Number(value);
+  if (format === "boolean") return value === true || value === "true" ? "是" : "否";
+  if (!Number.isFinite(number)) return String(value);
+  if (format === "bytes") {
+    const units = ["B", "KiB", "MiB", "GiB"]; let amount = number; let index = 0;
+    while (amount >= 1024 && index < units.length - 1) { amount /= 1024; index += 1; }
+    return `${amount.toFixed(index ? 1 : 0)} ${units[index]}`;
+  }
+  if (format === "duration") { const seconds = Math.round(number); if (seconds >= 3600) return `${Math.floor(seconds / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分`; if (seconds >= 60) return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`; return `${seconds} 秒`; }
+  if (format === "percent") return `${number.toFixed(1)}%`;
+  return Number.isInteger(number) ? number.toLocaleString() : number.toFixed(2);
+};
+function RuntimeMetricsView({ value }: { value: unknown }) {
+  if (!value || typeof value !== "object") return <div className="muted">运行指标不可用</div>;
+  const payload = value as Record<string, unknown>;
+  return <div className="runtime-metrics-grid">{Object.entries(runtimeGroups).flatMap(([domain, metrics]) => {
+    const source = payload[domain];
+    if (!source || typeof source !== "object") return [];
+    const stats = source as Record<string, unknown>;
+    return [<section className="runtime-metrics-section" key={domain}><h3>{domain === "responses_websocket" ? "Responses / WebSocket" : domain}</h3><div className="runtime-metrics-cards">{metrics.map((metric) => <div className="runtime-metric-card" key={metric.key}><span className="muted">{metric.label}</span><strong>{runtimeValue(stats[metric.key], metric.format)}</strong><code>{metric.key}</code></div>)}</div></section>];
+  })}</div>;
+}
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<Setting[]>([]);
@@ -159,6 +192,12 @@ export function SettingsPage() {
         drafts[row.key] ?? String(row.value ?? ""),
       ]),
     );
+    const minCooldown = Number(updates.cooldown_min_seconds ?? drafts.cooldown_min_seconds ?? NaN);
+    const maxCooldown = Number(updates.cooldown_max_seconds ?? drafts.cooldown_max_seconds ?? NaN);
+    if (Number.isFinite(minCooldown) && Number.isFinite(maxCooldown) && (minCooldown < 1 || maxCooldown < 1 || minCooldown > maxCooldown)) {
+      setResult({ error: "冷却最小秒数必须小于或等于最大秒数，且都必须大于 0" });
+      return;
+    }
     if (!window.confirm(`确定保存 ${dirtySettings.length} 项设置吗？`)) return;
     setSaving(true);
     try {
@@ -304,7 +343,7 @@ export function SettingsPage() {
               关闭
             </button>
           </div>
-          <pre className="result-pre">{JSON.stringify(runtime, null, 2)}</pre>
+          <RuntimeMetricsView value={runtime} />
         </div>
       )}
       <div className="advanced-grid">
