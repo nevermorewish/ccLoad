@@ -5,23 +5,38 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"ccLoad/internal/config"
 	"ccLoad/internal/codexauth"
 	"ccLoad/internal/model"
 	"ccLoad/internal/oauthcost"
 	"ccLoad/internal/testutil"
 )
 
+// setChannelMonitorInterval 设置全局监控间隔（分钟）。
+// 间隔是全局设置，调度器不再读取渠道级的 scheduled_check_interval_minutes。
+func setChannelMonitorInterval(t *testing.T, srv *Server, minutes int) {
+	t.Helper()
+	srv.configService.mu.Lock()
+	srv.configService.cache[config.ChannelMonitorIntervalSettingKey] = &model.SystemSetting{
+		Key: config.ChannelMonitorIntervalSettingKey, Value: strconv.Itoa(minutes),
+	}
+	srv.configService.mu.Unlock()
+}
+
 func createScheduledCheckChannel(t *testing.T, srv *Server, cfg *model.Config, keys ...*model.APIKey) *model.Config {
 	t.Helper()
 
+	// 渠道级字段仅为满足既有持久化校验保留；是否执行由全局间隔决定。
 	if cfg.ScheduledCheckIntervalMinutes == 0 {
 		cfg.ScheduledCheckIntervalMinutes = 1
 	}
+	setChannelMonitorInterval(t, srv, 1)
 	created, err := srv.store.CreateConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("CreateConfig failed: %v", err)
@@ -180,8 +195,10 @@ func TestDailyScheduledChecksIndependentChannelsAndChanges(t *testing.T) {
 			fast = cfg
 		}
 	}
+	// 全局间隔 360 分钟：仅 00:00 / 06:00 / 12:00 / 18:00 到期。
+	setChannelMonitorInterval(t, srv, 360)
 	now := time.Now().AddDate(1, 0, 0)
-	now = time.Date(now.Year(), now.Month(), now.Day(), 8, 30, 0, 0, time.Local)
+	now = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
 	done := make(chan error, 1)
 	go func() { done <- srv.runScheduledChannelChecks(ctx, now) }()
 	for range 2 {
@@ -220,15 +237,13 @@ func TestDailyScheduledChecksIndependentChannelsAndChanges(t *testing.T) {
 	if slowCalls.Load() != 1 || fastCalls.Load() != 2 {
 		t.Fatal("missed schedules were replayed")
 	}
-	fast.ScheduledCheckStartTime, fast.ScheduledCheckIntervalMinutes = "15:30", 120
-	if _, err := srv.store.UpdateConfig(ctx, fast.ID, fast); err != nil {
-		t.Fatal(err)
-	}
+	// 改成 60 分钟间隔后，07:00 重新到期。
+	setChannelMonitorInterval(t, srv, 60)
 	if err := srv.runScheduledChannelChecks(ctx, now.Add(7*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if fastCalls.Load() != 3 {
-		t.Fatal("updated schedule did not take effect")
+		t.Fatal("updated monitor interval did not take effect")
 	}
 }
 

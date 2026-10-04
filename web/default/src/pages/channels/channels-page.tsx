@@ -32,6 +32,9 @@ const authLabel = (value: unknown) => AUTH_TYPES.find((item) => item.value === S
 const isOAuthRow = (row: Row) => String(row.auth_type || 'api_key') !== 'api_key'
 const modelNames = (row: Row) => (Array.isArray(row.models) ? row.models : []).map((entry) => typeof entry === 'string' ? entry : String((entry as ModelEntry).model ?? '')).filter(Boolean)
 const errorMessage = (cause: unknown, fallback: string) => cause instanceof Error ? cause.message : fallback
+// 指标列高亮：阈值与旧版一致（首字 5s/15s，耗时 15s/30s，成功率 95%/80%）。
+const timingTone = (seconds?: number, warn = 5, bad = 15) => { const value = Number(seconds); return !Number.isFinite(value) || value <= 0 ? '' : value >= bad ? 'metric-bad' : value >= warn ? 'metric-warn' : 'metric-good' }
+const rateTone = (ratio: number) => !Number.isFinite(ratio) ? '' : ratio >= 0.95 ? 'metric-good' : ratio >= 0.8 ? 'metric-warn' : 'metric-bad'
 
 export function ChannelsPage() {
   const readOnly = useMemo(() => isAPITokenRole(), [])
@@ -400,9 +403,9 @@ export function ChannelsPage() {
     {/* ---------------- 表格 ---------------- */}
     <div className="table-wrap"><table><thead><tr>
       {!readOnly && <th><input type="checkbox" aria-label="全选当前页" checked={allVisibleSelected} onChange={(event) => setSelected((current) => event.target.checked ? [...new Set([...current, ...rows.map((row) => row.id)])] : current.filter((id) => !rows.some((row) => row.id === id)))} /></th>}
-      <th>渠道</th><th>模型</th><th>优先级</th><th>耗时</th><th>用量</th><th>状态</th>{!readOnly && <th>启用</th>}<th>操作</th>
+      <th>渠道</th><th>模型</th><th>优先级</th><th className="metric-col">首字</th><th className="metric-col">耗时</th><th className="metric-col">请求数</th><th className="metric-col">成功率</th><th className="metric-col">成本</th><th>状态</th>{!readOnly && <th>启用</th>}<th>操作</th>
     </tr></thead><tbody>
-      {loading && !rows.length && <tr><td colSpan={9} className="muted">加载中…</td></tr>}
+      {loading && !rows.length && <tr><td colSpan={13} className="muted">加载中…</td></tr>}
       {!loading && !rows.length && <tr><td colSpan={9} className="muted">没有符合条件的渠道</td></tr>}
       {rows.map((row) => {
         const urls = Array.isArray(row.urls) ? row.urls as Array<{ url?: string }> : []
@@ -425,8 +428,11 @@ export function ChannelsPage() {
             {readOnly ? String(row.priority ?? 0) : <input className="input priority-input" type="number" min={-99999} max={9999999} aria-label={`${row.name} 优先级`} value={priorityDrafts[row.id] ?? String(row.priority ?? 0)} onChange={(event) => editPriority(row, event.target.value)} onBlur={() => void flushPriority(row)} onKeyDown={(event) => priorityKey(event, row)} />}
             {effective != null && <span className="table-note" title="健康度模式下的有效优先级">有效 {effective.toFixed(1)}{row.success_rate != null ? ` · 成功率 ${(Number(row.success_rate) * 100).toFixed(1)}%` : ''}</span>}
           </td>
-          <td className="cell-stack"><span>首字 {formatDuration(stat?.avgFirstByteTimeSeconds)}</span><span className="table-note">总耗时 {formatDuration(stat?.avgDurationSeconds)}</span></td>
-          <td className="cell-stack">{stat ? <><span>{stat.success}/{stat.total}{stat.total ? `（${((stat.success / stat.total) * 100).toFixed(1)}%）` : ''}</span><span className="table-note">{formatCost(stat.effectiveCost)}</span></> : <span className="muted">-</span>}</td>
+          <td className="metric-cell metric-ttft">{stat ? <><strong className={timingTone(stat.avgFirstByteTimeSeconds)}>{formatDuration(stat.avgFirstByteTimeSeconds)}</strong><span className="table-note">首字</span></> : <span className="muted">-</span>}</td>
+          <td className="metric-cell metric-duration">{stat ? <><strong className={timingTone(stat.avgDurationSeconds, 15, 30)}>{formatDuration(stat.avgDurationSeconds)}</strong><span className="table-note">耗时</span></> : <span className="muted">-</span>}</td>
+          <td className="metric-cell metric-requests">{stat ? <><strong>{stat.total.toLocaleString()}</strong><span className="table-note">成功 {stat.success.toLocaleString()}</span></> : <span className="muted">-</span>}</td>
+          <td className="metric-cell metric-rate">{stat && stat.total ? <><strong className={rateTone(stat.success / stat.total)}>{((stat.success / stat.total) * 100).toFixed(1)}%</strong><span className="table-note">{stat.total.toLocaleString()} 次</span></> : <span className="muted">-</span>}</td>
+          <td className="metric-cell metric-cost">{stat ? <><strong>{formatCost(stat.effectiveCost)}</strong><span className="table-note">24h</span></> : <span className="muted">-</span>}</td>
           <td>{statusCell(row)}</td>
           {!readOnly && <td><label className="switch"><input type="checkbox" aria-label={`${row.name} 启用`} checked={row.enabled !== false} onChange={() => void toggleEnabled(row)} /> {row.enabled === false ? '停用' : '启用'}</label></td>}
           <td><div className="toolbar" style={{ marginBottom: 0, flexWrap: 'nowrap' }}>

@@ -529,6 +529,10 @@ func validateSettingValue(key, valueType, value string) error {
 			if intVal < 0 || int64(intVal) > maxSettingDurationSeconds {
 				return fmt.Errorf("%s must be between 0 and %d", key, maxSettingDurationSeconds)
 			}
+		case config.ChannelMonitorIntervalSettingKey:
+			if intVal < config.ChannelMonitorIntervalMinMinutes || intVal > config.ChannelMonitorIntervalMaxMinutes {
+				return fmt.Errorf("%s must be between %d and %d", key, config.ChannelMonitorIntervalMinMinutes, config.ChannelMonitorIntervalMaxMinutes)
+			}
 		case "max_concurrency",
 			"max_body_bytes",
 			"max_image_body_bytes",

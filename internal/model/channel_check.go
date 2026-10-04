@@ -48,3 +48,17 @@ func (c *Config) ScheduledCheckDueAt(now time.Time) bool {
 	elapsed := now.Hour()*60 + now.Minute() - start.Hour()*60 - start.Minute()
 	return elapsed >= 0 && elapsed%c.ScheduledCheckIntervalMinutes == 0
 }
+
+// ChannelMonitorDueAt 报告渠道是否应在统一监控间隔下运行。
+// 监控间隔由全局设置提供（1–600 分钟），从每个整点小时的第 0 分钟起算，
+// 渠道只通过 ScheduledCheckEnabled 决定是否参与，不再有各自的间隔与开始时间。
+func (c *Config) ChannelMonitorDueAt(now time.Time, intervalMinutes int) bool {
+	if c == nil || !c.Enabled || !c.ScheduledCheckEnabled || !c.IsAvailableAt(now) {
+		return false
+	}
+	if intervalMinutes < 1 || intervalMinutes > 600 {
+		return false
+	}
+	elapsed := now.Hour()*60 + now.Minute()
+	return elapsed%intervalMinutes == 0
+}

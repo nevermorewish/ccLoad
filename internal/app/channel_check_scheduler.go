@@ -73,8 +73,10 @@ func (s *Server) runScheduledChannelChecks(ctx context.Context, now time.Time) e
 		return err
 	}
 	due := configs[:0]
+	// 监控间隔来自全局设置，渠道只用 ScheduledCheckEnabled 决定是否参与。
+	interval := s.configService.GetInt(config.ChannelMonitorIntervalSettingKey, config.DefaultChannelMonitorIntervalMinutes)
 	for _, cfg := range configs {
-		if cfg.ScheduledCheckDueAt(now) && cfg.UpdatedAt.Before(now.Truncate(time.Minute)) {
+		if cfg.ChannelMonitorDueAt(now, interval) && cfg.UpdatedAt.Before(now.Truncate(time.Minute)) {
 			due = append(due, cfg)
 		}
 	}

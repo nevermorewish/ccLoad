@@ -65,6 +65,17 @@ const (
 	// DefaultChannelTestContent 渠道测试与定时检测使用的默认内容。
 	DefaultChannelTestContent = "sonnet 4.0的发布日期是什么"
 
+	// ChannelMonitorIntervalSettingKey 是渠道监控的统一检测间隔（分钟）。
+	// 所有渠道共用一个间隔，渠道只决定是否参与监测。
+	ChannelMonitorIntervalSettingKey = "channel_monitor_interval_minutes"
+
+	// DefaultChannelMonitorIntervalMinutes 统一监控间隔默认值（分钟）。
+	DefaultChannelMonitorIntervalMinutes = 300
+
+	// ChannelMonitorIntervalMinMinutes / ChannelMonitorIntervalMaxMinutes 是统一间隔的取值边界。
+	ChannelMonitorIntervalMinMinutes = 1
+	ChannelMonitorIntervalMaxMinutes = 600
+
 	// DefaultAntigravitySensitiveWordsJSON Antigravity 和 CodeBuddy 系统指令默认敏感词。
 	DefaultAntigravitySensitiveWordsJSON = `["API","proxy","Claude","Anthropic"]`
 )

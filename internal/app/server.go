@@ -1780,7 +1780,7 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 	{
 		// 渠道管理
 		admin.GET("/channel-monitor", s.HandleChannelMonitor)
-		admin.PUT("/channels/:id/monitor-schedule", s.HandleChannelMonitorSchedule)
+		admin.PUT("/channels/:id/monitor-participation", s.HandleChannelMonitorExclude)
 		admin.POST("/channels/:id/monitor-run", s.HandleChannelMonitorRun)
 		admin.GET("/channels", s.HandleChannels)
 		admin.POST("/channels", s.HandleChannels)

@@ -2,34 +2,34 @@ package app
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
+	"ccLoad/internal/config"
 	"ccLoad/internal/model"
 	"github.com/gin-gonic/gin"
 )
 
 type channelMonitorItem struct {
-	ID             int64                        `json:"id"`
-	Name           string                       `json:"name"`
-	Enabled        bool                         `json:"enabled"`
-	AuthType       string                       `json:"auth_type"`
-	Models         []string                     `json:"models"`
-	Schedule       model.ChannelMonitorSchedule `json:"schedule"`
-	EffectiveModel string                       `json:"effective_model"`
-	Status         string                       `json:"status"`
-	Running        bool                         `json:"running"`
-	NextCheck      *time.Time                   `json:"next_check"`
-	Stats          model.ChannelMonitorStats    `json:"stats"`
+	ID             int64                     `json:"id"`
+	Name           string                    `json:"name"`
+	Enabled        bool                      `json:"enabled"`
+	AuthType       string                    `json:"auth_type"`
+	Models         []string                  `json:"models"`
+	Monitored      bool                      `json:"monitored"`
+	EffectiveModel string                    `json:"effective_model"`
+	Status         string                    `json:"status"`
+	Running        bool                      `json:"running"`
+	NextCheck      *time.Time                `json:"next_check"`
+	Stats          model.ChannelMonitorStats `json:"stats"`
 }
 
-func nextChannelMonitorCheck(cfg *model.Config, now time.Time) *time.Time {
+func nextChannelMonitorCheck(cfg *model.Config, now time.Time, intervalMinutes int) *time.Time {
 	if !cfg.Enabled || !cfg.ScheduledCheckEnabled {
 		return nil
 	}
-	// Include availability windows and day boundaries using the scheduler's exact rule.
+	// 用调度器同一套规则（全局间隔 + 可用时段）逐一试探后续分钟。
 	for candidate, end := now.Truncate(time.Minute).Add(time.Minute), now.Add(48*time.Hour); candidate.Before(end); candidate = candidate.Add(time.Minute) {
-		if cfg.ScheduledCheckDueAt(candidate) {
+		if cfg.ChannelMonitorDueAt(candidate, intervalMinutes) {
 			return &candidate
 		}
 	}
@@ -69,6 +69,8 @@ func monitorStatus(cfg *model.Config, stat model.ChannelMonitorStats) string {
 	return "online"
 }
 
+// HandleChannelMonitor 返回监控视图：渠道列表、每渠道的探测统计与状态。
+// 检测间隔是全局设置，这里一并下发，前端不再提供按渠道的间隔与开始时间。
 func (s *Server) HandleChannelMonitor(c *gin.Context) {
 	ctx := c.Request.Context()
 	configs, err := s.store.ListConfigs(ctx)
@@ -77,6 +79,7 @@ func (s *Server) HandleChannelMonitor(c *gin.Context) {
 		return
 	}
 	now := time.Now()
+	interval := s.configService.GetInt(config.ChannelMonitorIntervalSettingKey, config.DefaultChannelMonitorIntervalMinutes)
 	stats, err := s.store.ListChannelMonitorStats(ctx, now.Add(-24*time.Hour), now)
 	if err != nil {
 		RespondError(c, http.StatusInternalServerError, err)
@@ -100,27 +103,32 @@ func (s *Server) HandleChannelMonitor(c *gin.Context) {
 		_, running := s.scheduledChannelChecksRunning.Load(cfg.ID)
 		items = append(items, channelMonitorItem{
 			ID: cfg.ID, Name: cfg.Name, Enabled: cfg.Enabled, AuthType: cfg.GetAuthType(), Models: cfg.GetModels(),
-			Schedule:       model.ChannelMonitorSchedule{Enabled: cfg.ScheduledCheckEnabled, IntervalMinutes: cfg.ScheduledCheckIntervalMinutes, StartTime: cfg.ScheduledCheckStartTime, Model: cfg.ScheduledCheckModel},
-			EffectiveModel: name, Status: monitorStatus(cfg, stat), Running: running, NextCheck: nextChannelMonitorCheck(cfg, now), Stats: stat,
+			// 检测模型由后端自动选择，这里回传实际选中的模型供展示。
+			Monitored:      cfg.ScheduledCheckEnabled,
+			EffectiveModel: name, Status: monitorStatus(cfg, stat), Running: running, NextCheck: nextChannelMonitorCheck(cfg, now, interval), Stats: stat,
 		})
 	}
 	zone, offset := now.Zone()
-	RespondJSON(c, http.StatusOK, gin.H{"items": items, "server_time": now, "timezone": zone, "timezone_offset_minutes": offset / 60})
+	RespondJSON(c, http.StatusOK, gin.H{
+		"items": items, "server_time": now, "timezone": zone, "timezone_offset_minutes": offset / 60,
+		"interval_minutes": interval,
+		"interval_min":     config.ChannelMonitorIntervalMinMinutes,
+		"interval_max":     config.ChannelMonitorIntervalMaxMinutes,
+	})
 }
 
-func (s *Server) HandleChannelMonitorSchedule(c *gin.Context) {
+// HandleChannelMonitorExclude 只切换某渠道是否参与统一监控。
+// 间隔与检测模型是全局的（模型由后端自动选择），因此这里不再接收排程字段。
+func (s *Server) HandleChannelMonitorExclude(c *gin.Context) {
 	id, err := ParseInt64Param(c, "id")
 	if err != nil {
 		RespondErrorMsg(c, http.StatusBadRequest, "invalid channel id")
 		return
 	}
-	var schedule model.ChannelMonitorSchedule
-	if err := c.ShouldBindJSON(&schedule); err != nil {
-		RespondError(c, http.StatusBadRequest, err)
-		return
+	var request struct {
+		Enabled bool `json:"enabled"`
 	}
-	schedule.Model = strings.TrimSpace(schedule.Model)
-	if err := model.ValidateScheduledCheckSchedule(schedule.IntervalMinutes, schedule.StartTime); err != nil {
+	if err := c.ShouldBindJSON(&request); err != nil {
 		RespondError(c, http.StatusBadRequest, err)
 		return
 	}
@@ -129,20 +137,19 @@ func (s *Server) HandleChannelMonitorSchedule(c *gin.Context) {
 		RespondErrorMsg(c, http.StatusNotFound, "channel not found")
 		return
 	}
-	copy := *cfg
-	copy.ScheduledCheckModel = schedule.Model
-	if schedule.Enabled || schedule.Model != "" {
-		if _, reason := selectScheduledCheckModel(&copy); reason != "" {
+	// 参与监控要求渠道有可用的检测模型（自动选择时取第一个已启用模型）。
+	if request.Enabled {
+		if _, reason := selectScheduledCheckModel(cfg); reason != "" {
 			RespondErrorMsg(c, http.StatusBadRequest, reason)
 			return
 		}
 	}
-	if err := s.store.UpdateChannelMonitorSchedule(c.Request.Context(), id, schedule); err != nil {
+	if err := s.store.UpdateChannelMonitorParticipation(c.Request.Context(), id, request.Enabled); err != nil {
 		RespondError(c, http.StatusInternalServerError, err)
 		return
 	}
 	s.InvalidateChannelListCache()
-	RespondJSON(c, http.StatusOK, schedule)
+	RespondJSON(c, http.StatusOK, gin.H{"id": id, "monitored": request.Enabled})
 }
 
 func (s *Server) HandleChannelMonitorRun(c *gin.Context) {

@@ -18,6 +18,21 @@ func (s *SQLStore) UpdateChannelMonitorSchedule(ctx context.Context, id int64, s
 	return err
 }
 
+// UpdateChannelMonitorParticipation 只切换渠道是否参与统一监控。
+// 间隔与检测模型是全局的，因此不动 scheduled_check_interval_minutes / start_time / model；
+// 订阅时把遗留的单渠道排程字段归零，避免两套语义并存。
+func (s *SQLStore) UpdateChannelMonitorParticipation(ctx context.Context, id int64, enabled bool) error {
+	var err error
+	if enabled {
+		_, err = s.ExecContext(ctx, `UPDATE channels SET scheduled_check_enabled = 1,
+			scheduled_check_interval_minutes = 0, scheduled_check_start_time = '', scheduled_check_model = '', updated_at = ? WHERE id = ?`,
+			timeToUnix(time.Now()), id)
+	} else {
+		_, err = s.ExecContext(ctx, `UPDATE channels SET scheduled_check_enabled = 0, updated_at = ? WHERE id = ?`, timeToUnix(time.Now()), id)
+	}
+	return err
+}
+
 func (s *SQLStore) ListChannelMonitorStats(ctx context.Context, since, until time.Time) ([]model.ChannelMonitorStats, error) {
 	// Aggregate every sample, but return at most twelve recent probes per model.
 	// Proxy traffic, chats and balance/check-in requests cannot restore test health.

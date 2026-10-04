@@ -589,6 +589,8 @@ func initDefaultSettings(ctx context.Context, db *sql.DB, dialect Dialect) error
 		{"debug_log_retention_minutes", strconv.Itoa(config.DefaultDebugLogRetentionMinutes), "int", "Debug日志保留时长(分钟,1-1440)", strconv.Itoa(config.DefaultDebugLogRetentionMinutes)},
 		// 前端自动刷新
 		{"auto_refresh_interval_seconds", "0", "int", "页面自动刷新间隔(秒,>=0;0=禁用,建议≥30;有对话框打开时跳过本次刷新)", "0"},
+		// 渠道监控统一检测间隔（渠道只决定是否参与）
+		{config.ChannelMonitorIntervalSettingKey, strconv.Itoa(config.DefaultChannelMonitorIntervalMinutes), "int", "渠道监控统一检测间隔(分钟,1-600;所有渠道共用)", strconv.Itoa(config.DefaultChannelMonitorIntervalMinutes)},
 		// Responses WebSocket
 		{"responses_ws_max_sessions", "0", "int", responsesWSMaxSessionsDescription, "0"},
 		{"responses_ws_session_ttl_minutes", "0", "int", responsesWSSessionTTLDescription, "0"},
@@ -683,6 +685,7 @@ func initDefaultSettings(ctx context.Context, db *sql.DB, dialect Dialect) error
 			"cooldown_max_seconds":                   true,
 			"debug_log_retention_minutes":            true,
 			"auto_refresh_interval_seconds":          true,
+			config.ChannelMonitorIntervalSettingKey:  true,
 			"responses_ws_max_sessions":              true,
 			"responses_ws_session_ttl_minutes":       true,
 			"responses_ws_max_transcript_bytes":      true,

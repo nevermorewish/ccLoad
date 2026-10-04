@@ -244,3 +244,24 @@ fieldset.card legend { padding: 0 6px; color: #cbd5e1; }
 .setting-dirty td { background: rgba(37, 99, 235, 0.08); }
 .setting-desc { white-space: normal; min-width: 220px; color: #cbd5e1; }
 :root[data-resolved-theme="light"] .setting-desc { color: #374151; }
+
+/* ---- 渠道列表指标列（首字/耗时/请求数/成功率/成本独立成列并高亮） ---- */
+.metric-col { text-align: right; }
+.metric-cell { text-align: right; white-space: nowrap; }
+.metric-cell strong { display: block; font-size: 15px; font-variant-numeric: tabular-nums; }
+.metric-cell .table-note { font-weight: 500; }
+.metric-good { color: #22c55e; }
+.metric-warn { color: #eab308; }
+.metric-bad { color: #ef4444; }
+.metric-ttft strong, .metric-duration strong { font-size: 16px; }
+.metric-requests strong, .metric-rate strong { font-size: 16px; }
+.metric-cost strong { font-size: 15px; }
+:root[data-resolved-theme="light"] .metric-good { color: #15803d; }
+:root[data-resolved-theme="light"] .metric-warn { color: #a16207; }
+:root[data-resolved-theme="light"] .metric-bad { color: #b91c1c; }
+
+/* ---- 监控页 ---- */
+.monitor-interval-bar { margin-bottom: 16px; }
+.monitor-table td { vertical-align: middle; }
+.monitor-table .monitor-sparkline { margin-bottom: 0; min-width: 92px; }
+.monitor-table .monitor-error { display: inline-flex; align-items: center; gap: 4px; }

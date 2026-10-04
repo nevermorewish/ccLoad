@@ -13,6 +13,8 @@ import (
 // [REFACTOR] 2025-12：合并子接口，所有方法平铺
 // 理由：8个子接口无任何地方被独立使用，所有消费者都依赖完整 Store
 type Store interface {
+	// UpdateChannelMonitorParticipation 只切换渠道是否参与统一监控（间隔与检测模型是全局的）。
+	UpdateChannelMonitorParticipation(ctx context.Context, id int64, enabled bool) error
 	UpdateChannelMonitorSchedule(ctx context.Context, id int64, schedule model.ChannelMonitorSchedule) error
 	ListChannelMonitorStats(ctx context.Context, since, until time.Time) ([]model.ChannelMonitorStats, error)
 	// === Channel Management ===

@@ -261,13 +261,9 @@ export function AdvancedSettingsDialog({ open, draft: initial, channelId, authTy
         </div>
         <p className="muted">HH:MM；留空表示全天可用，支持跨午夜时段，例如 22:00–08:00。</p>
         <label><input type="checkbox" checked={draft.retry_other_keys_on_failure} onChange={(event) => patch({ retry_other_keys_on_failure: event.target.checked })} /> 渠道故障时优先换 Key 重试</label>
-        <label><input type="checkbox" checked={draft.scheduled_check_enabled} onChange={(event) => patch({ scheduled_check_enabled: event.target.checked })} /> 每日定时检测</label>
-        {draft.scheduled_check_enabled && <div className="toolbar">
-          <SearchableSelect ariaLabel="检测模型" className="combobox-inline" allowCustomInput value={draft.scheduled_check_model} options={models.map((model) => ({ value: model, label: model }))} onChange={(value) => patch({ scheduled_check_model: value })} placeholder="检测模型（留空自动）" />
-          <label className="cell-stack">间隔（分钟）<input className="input compact" type="number" min={1} max={1440} step={1} value={draft.scheduled_check_interval_minutes} onChange={(event) => patch({ scheduled_check_interval_minutes: Number(event.target.value) })} /></label>
-          <label className="cell-stack">开始时间<input className="input compact" type="time" step={60} value={draft.scheduled_check_start_time} onChange={(event) => patch({ scheduled_check_start_time: event.target.value })} /></label>
-        </div>}
-        {draft.scheduled_check_enabled && <p className="muted">按服务端时间，每天从开始时间按间隔执行至当天结束；错过的检测不补跑。</p>}
+        {/* 检测间隔与检测模型是全局的（/web/monitor 统一设置），渠道只决定是否参与。 */}
+        <label><input type="checkbox" checked={draft.scheduled_check_enabled} onChange={(event) => patch({ scheduled_check_enabled: event.target.checked })} /> 参与定时检测</label>
+        <p className="muted">检测间隔与检测模型在「渠道监控」页统一设置；此处只决定该渠道是否参与。</p>
 
         {!isOAuth && <fieldset className="card">
           <legend>管理账户</legend>
