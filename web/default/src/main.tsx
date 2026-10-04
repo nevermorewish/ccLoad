@@ -1,7 +1,9 @@
 import { createRoot } from 'react-dom/client'
 import { lazy, StrictMode, Suspense, useEffect, useState } from 'react'
-import { createRootRoute, createRoute, createRouter, Link, Outlet, RouterProvider } from '@tanstack/react-router'
-import { getSession, login } from './lib/auth'
+import { createRootRoute, createRoute, createRouter, Navigate, Outlet, RouterProvider, useLocation } from '@tanstack/react-router'
+import { canAccessPath, getSession, login, safeRedirectPath } from './lib/auth'
+import { redirectToLogin } from './lib/api'
+import { SessionContext } from './lib/session-context'
 import { AppLayout } from './components/layout'
 import type { Session } from './types'
 import './styles/index.css'
@@ -25,18 +27,39 @@ function Header({ title, description, onRefresh }: { title: string; description?
   return <header className="page-header"><div><h1>{title}</h1>{description && <p className="muted">{description}</p>}</div>{onRefresh && <button className="btn" onClick={onRefresh}>刷新</button>}</header>
 }
 
+const LOGIN_COPY = {
+  admin: { title: '管理员登录', hint: '使用 CCLOAD_PASS 中配置的管理员密码登录，可管理全部渠道与设置。', placeholder: '管理员密码' },
+  api_token: { title: 'API Token 登录', hint: '使用 API 访问令牌登录，仅可查看该令牌的统计、趋势与日志。', placeholder: 'API 访问令牌' },
+} as const
+
 function Login() {
+  const params = new URLSearchParams(window.location.search)
   const [mode, setMode] = useState<'admin' | 'api_token'>('admin')
   const [credential, setCredential] = useState('')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(() => params.get('error'))
+  const switchMode = (next: 'admin' | 'api_token') => { setMode(next); setCredential(''); setError(null) }
   const submit = async (event: React.FormEvent) => {
-    event.preventDefault(); setBusy(true); setError(null)
-    try { await login(mode, credential); window.location.href = '/web/' }
+    event.preventDefault()
+    if (!credential.trim()) return
+    setBusy(true); setError(null)
+    try { await login(mode, credential); window.location.href = safeRedirectPath(params.get('redirect')) }
     catch (cause) { setError(cause instanceof Error ? cause.message : '登录失败') }
     finally { setBusy(false) }
   }
-  return <div className="login-shell"><form className="card login-card" onSubmit={(event) => void submit(event)}><div className="brand login-brand"><span className="brand-mark">C</span><span>ccLoad</span></div><h1>登录管理控制台</h1><div className="toolbar"><button type="button" className={mode === 'admin' ? 'btn btn-primary' : 'btn'} onClick={() => setMode('admin')}>管理员密码</button><button type="button" className={mode === 'api_token' ? 'btn btn-primary' : 'btn'} onClick={() => setMode('api_token')}>API Token</button></div><input className="input wide" autoFocus type={mode === 'admin' ? 'password' : 'text'} value={credential} onChange={(event) => setCredential(event.target.value)} placeholder={mode === 'admin' ? '管理员密码' : 'API 访问令牌'} /><button className="btn btn-primary wide" disabled={busy || !credential.trim()}>{busy ? '登录中...' : '登录'}</button>{error && <p className="error-text">{error}</p>}</form></div>
+  const copy = LOGIN_COPY[mode]
+  return <div className="login-shell"><form className="card login-card" onSubmit={(event) => void submit(event)} onKeyDown={(event) => { if (event.key === 'Escape') setError(null) }}>
+    <div className="brand login-brand"><span className="brand-mark">C</span><span>ccLoad</span></div>
+    <div className="toolbar" role="tablist">
+      <button type="button" role="tab" aria-selected={mode === 'admin'} className={mode === 'admin' ? 'btn btn-primary' : 'btn'} onClick={() => switchMode('admin')}>管理员密码</button>
+      <button type="button" role="tab" aria-selected={mode === 'api_token'} className={mode === 'api_token' ? 'btn btn-primary' : 'btn'} onClick={() => switchMode('api_token')}>API Token</button>
+    </div>
+    <h1>{copy.title}</h1>
+    <p className="muted">{copy.hint}</p>
+    <input key={mode} className="input wide" autoFocus required type="password" autoComplete={mode === 'admin' ? 'current-password' : 'off'} disabled={busy} value={credential} onChange={(event) => setCredential(event.target.value)} placeholder={copy.placeholder} aria-label={copy.placeholder} aria-invalid={Boolean(error)} />
+    <button className="btn btn-primary wide" disabled={busy || !credential.trim()}>{busy ? '登录中...' : '登录'}</button>
+    {error && <p className="error-text" role="alert">{error}</p>}
+  </form></div>
 }
 
 
@@ -57,7 +80,20 @@ const loginRoute = createRoute({ getParentRoute: () => rootRoute, path: '/login'
 const routeTree = rootRoute.addChildren([dashboardRoute, channelsRoute, monitorRoute, statsRoute, trendRoute, modelTestRoute, logsRoute, tokensRoute, settingsRoute, oauthRoute, modelCatalogRoute, oauthJobsRoute, loginRoute])
 const router = createRouter({ routeTree, basepath: '/web', defaultPreload: 'intent' })
 
-function App() { const [session, setSession] = useState<Session | null | undefined>(undefined); const path = window.location.pathname.replace(/^\/web(?=\/|$)/, '') || '/'; useEffect(() => { if (path !== '/login') void getSession().then(setSession); else setSession(null) }, [path]); if (path === '/login') return <Outlet />; return session ? <AppLayout><Suspense fallback={<div className="page-shell"><Header title="ccLoad" /><div className="card">正在加载页面...</div></div>}><Outlet /></Suspense></AppLayout> : <div className="page-shell"><Header title="ccLoad" /><div className="card">{session === undefined ? '正在验证登录状态...' : <Link className="btn btn-primary" to="/login">前往登录</Link>}</div></div> }
+function App() {
+  const location = useLocation()
+  const path = location.pathname.replace(/^\/web(?=\/|$)/, '') || '/'
+  const [session, setSession] = useState<Session | null | undefined>(undefined)
+  const isLogin = path === '/login'
+  useEffect(() => { if (!isLogin) void getSession().then(setSession) }, [isLogin])
+  // 未登录直接进入登录页并带回跳地址（旧版 ui.js:fetchWithAuth 行为）。
+  useEffect(() => { if (!isLogin && session === null) redirectToLogin() }, [isLogin, session])
+  if (isLogin) return <Outlet />
+  if (!session) return <div className="page-shell"><Header title="ccLoad" /><div className="card">{session === undefined ? '正在验证登录状态...' : '正在跳转到登录页...'}</div></div>
+  // API Token 角色只能访问统计类页面，其余路由回到首页（旧版 ui.js:1086-1090）。
+  if (!canAccessPath(path)) return <Navigate to="/" replace />
+  return <SessionContext.Provider value={session}><AppLayout><Suspense fallback={<div className="page-shell"><Header title="ccLoad" /><div className="card">正在加载页面...</div></div>}><Outlet /></Suspense></AppLayout></SessionContext.Provider>
+}
 
 declare module '@tanstack/react-router' { interface Register { router: typeof router } }
 

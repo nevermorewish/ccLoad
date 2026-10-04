@@ -1,107 +1,282 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { DateRangeFilter, normalizeRange, rangeParams, type DateRangeValue } from '../components/date-range'
+import { SearchableSelect } from '../components/searchable-select'
 import { getJSON } from '../lib/api'
-import type { StatsEntry } from '../types'
-import { ChartPie, Table2 } from 'lucide-react'
+import { shouldHideChannels } from '../lib/auth'
+import { cacheHitRate, formatCompact, formatCostPair, formatDateTime, formatInt, formatPercent, formatSeconds, formatUSD } from '../lib/format'
+import { useSession } from '../lib/session-context'
+import { readQuery, readStored, writeQuery } from '../lib/url-state'
+import { useAutoRefresh } from '../hooks/use-auto-refresh'
+import { useTokenOptions } from '../hooks/use-token-options'
 
-type SortKey = 'channel_name' | 'model' | 'success' | 'error' | 'total' | 'rpm' | 'success_rate' | 'duration' | 'speed' | 'input' | 'output' | 'cost' | 'cache_read' | 'cache_creation'
-type FilterOptions = { channel_names?: string[]; models?: string[] }
-type StatsView = 'table' | 'chart'
-const FILTER_STORAGE_KEY = 'ccload_stats_filters'
-const VIEW_STORAGE_KEY = 'stats.view'
+type HealthPoint = { ts?: string; rate?: number; success?: number; error?: number; rate_limited?: number; avg_first_byte_time?: number; avg_duration?: number; input_tokens?: number; output_tokens?: number; cache_read_tokens?: number; cache_creation_tokens?: number; cost?: number; effective_cost?: number }
+type Entry = {
+  channel_id?: number; channel_name?: string; channel_priority?: number; cost_multiplier_min?: number; cost_multiplier_max?: number; model?: string
+  success?: number; error?: number; total?: number; avg_first_byte_time_seconds?: number; avg_duration_seconds?: number
+  peak_rpm?: number; avg_rpm?: number; recent_rpm?: number; total_input_tokens?: number; total_output_tokens?: number; speed_output_tokens?: number; speed_duration_seconds?: number
+  total_cache_read_input_tokens?: number; total_cache_creation_input_tokens?: number; total_cost?: number; effective_cost?: number; health_timeline?: HealthPoint[]
+}
+type StatsResponse = { stats?: Entry[]; is_today?: boolean; rpm_stats?: { peak_rpm?: number; avg_rpm?: number; recent_rpm?: number } }
+type Filters = { range: DateRangeValue; channel: string; model: string; protocol: string; token: string; channelId: string; hideZero: boolean }
+type SortKey = 'channel_name' | 'model' | 'success' | 'error' | 'duration' | 'speed' | 'rpm' | 'input' | 'output' | 'cache_read' | 'cache_creation' | 'cost'
 
-function readStatsFilters() {
-  try {
-    const value = JSON.parse(localStorage.getItem(FILTER_STORAGE_KEY) ?? '{}') as Record<string, unknown>
-    return {
-      range: String(value.range ?? 'today'), channel: String(value.channel ?? ''), model: String(value.model ?? ''),
-      protocol: String(value.protocol ?? ''), token: String(value.token ?? ''), start: String(value.start ?? ''), end: String(value.end ?? ''),
-      exact: value.exact === true, hideZero: value.hideZero !== false,
-    }
-  } catch { return { range: 'today', channel: '', model: '', protocol: '', token: '', start: '', end: '', exact: false, hideZero: true } }
+const STORAGE_KEY = 'stats.filters'
+const VIEW_KEY = 'stats.view'
+const PROTOCOLS = [{ value: '', label: '全部协议' }, { value: 'anthropic', label: 'Claude Code' }, { value: 'codex', label: 'Codex' }, { value: 'openai', label: 'OpenAI' }, { value: 'gemini', label: 'Gemini' }]
+const COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#14b8a6', '#6366f1', '#a855f7']
+const num = (value: unknown) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0 }
+
+/** 单行速度：每次成功的平均输出 ÷ 生成耗时（总耗时减首字，生成耗时 ≥1s 才扣），与旧版 stats.js 一致。 */
+function rowSpeed(entry: Entry): number | null {
+  const success = num(entry.success); const output = num(entry.total_output_tokens); const duration = num(entry.avg_duration_seconds); const ttft = num(entry.avg_first_byte_time_seconds)
+  if (!success || !output || duration <= 0) return null
+  const generation = duration - ttft >= 1 ? duration - ttft : duration
+  return output / success / generation
 }
-function readStatsView(): StatsView {
-  try { return localStorage.getItem(VIEW_STORAGE_KEY) === 'chart' ? 'chart' : 'table' } catch { return 'table' }
-}
-function numericRangeValue(value: string) {
-  const parsed = Date.parse(value)
-  return Number.isFinite(parsed) ? parsed : undefined
+
+function initialFilters(): Filters {
+  const query = readQuery()
+  const stored = readStored<Partial<Filters>>(STORAGE_KEY, {})
+  const fromURL = ['range', 'channel_name', 'channel_name_like', 'model', 'model_like', 'client_protocol', 'auth_token_id', 'channel_id'].some((key) => query.has(key))
+  if (!fromURL) return { range: normalizeRange(stored.range), channel: stored.channel ?? '', model: stored.model ?? '', protocol: stored.protocol ?? '', token: stored.token ?? '', channelId: '', hideZero: stored.hideZero ?? true }
+  return {
+    range: normalizeRange({ range: query.get('range') ?? 'today', start: Number(query.get('start_time')), end: Number(query.get('end_time')) }),
+    channel: query.get('channel_name') ?? query.get('channel_name_like') ?? '', model: query.get('model') ?? query.get('model_like') ?? '',
+    protocol: query.get('client_protocol') ?? '', token: query.get('auth_token_id') ?? '', channelId: query.get('channel_id') ?? '', hideZero: stored.hideZero ?? true,
+  }
 }
 
 export function StatsPage() {
-  const [savedFilters] = useState(readStatsFilters)
-  const [range, setRange] = useState(savedFilters.range); const [channel, setChannel] = useState(savedFilters.channel); const [model, setModel] = useState(savedFilters.model); const [protocol, setProtocol] = useState(savedFilters.protocol); const [token, setToken] = useState(savedFilters.token); const [start, setStart] = useState(savedFilters.start); const [end, setEnd] = useState(savedFilters.end); const [exact, setExact] = useState(savedFilters.exact); const [hideZero, setHideZero] = useState(savedFilters.hideZero)
-  const [view, setView] = useState<StatsView>(readStatsView)
-  const [sort, setSort] = useState<SortKey>('total'); const [direction, setDirection] = useState<'asc' | 'desc' | 'none'>('none'); const [rows, setRows] = useState<StatsEntry[]>([]); const [rpm, setRpm] = useState<Record<string, number>>({}); const [options, setOptions] = useState<FilterOptions>({}); const [loading, setLoading] = useState(false); const [error, setError] = useState<string | null>(null)
-  const [isToday, setIsToday] = useState(true)
-  const requestVersion = useRef(0)
-  const queryParams = (includeHealth = false) => ({ range, channel_name: exact && channel ? channel : undefined, channel_name_like: !exact && channel ? channel : undefined, model: exact && model ? model : undefined, model_like: !exact && model ? model : undefined, client_protocol: protocol || undefined, auth_token_id: token || undefined, start_time: range === 'custom' ? numericRangeValue(start) : undefined, end_time: range === 'custom' ? numericRangeValue(end) : undefined, include_health: includeHealth })
-  const refresh = async () => {
-    const version = ++requestVersion.current
-    setLoading(true); setError(null)
-    try {
-      // Render the aggregate table immediately. Health buckets are hydrated in
-      // the background because they require a separate grouped log query.
-      const result = await getJSON<{ stats?: StatsEntry[]; rpm_stats?: Record<string, number>; is_today?: boolean }>('/dashboard/stats', queryParams(false))
-      if (version !== requestVersion.current) return
-      setRows(result.stats ?? []); setRpm(result.rpm_stats ?? {}); setIsToday(result.is_today !== false); setLoading(false)
-      void getJSON<{ stats?: StatsEntry[] }>('/dashboard/stats', queryParams(true)).then((health) => {
-        if (version === requestVersion.current && health.stats) setRows(health.stats)
-      }).catch(() => { /* The aggregate table is still useful without the timeline. */ })
-    } catch (cause) { if (version === requestVersion.current) { setError(cause instanceof Error ? cause.message : '加载统计失败'); setLoading(false) } }
-  }
-  const loadOptions = async () => { try { setOptions(await getJSON<FilterOptions>('/dashboard/stats/filter-options', queryParams())) } catch { setOptions({}) } }
-  useEffect(() => { void refresh(); void loadOptions() }, [range])
-  useEffect(() => {
-    try { localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify({ range, channel, model, protocol, token, start, end, exact, hideZero })) } catch { /* Storage may be unavailable. */ }
-  }, [range, channel, model, protocol, token, start, end, exact, hideZero])
-  useEffect(() => { try { localStorage.setItem(VIEW_STORAGE_KEY, view) } catch { /* Storage may be unavailable. */ } }, [view])
-  const filtered = useMemo(() => {
-    const result = rows.filter((row) => !hideZero || Number(row.success ?? 0) > 0)
-    const value = (row: StatsEntry): string | number => { if (sort === 'channel_name') return String(row.channel_name ?? ''); if (sort === 'model') return String(row.model ?? ''); if (sort === 'success_rate') return Number(row.total ?? 0) ? Number(row.success ?? 0) / Number(row.total) : 0; if (sort === 'cost') return Number(row.effective_cost ?? row.total_cost ?? 0); if (sort === 'rpm') return Number(row.peak_rpm ?? 0); if (sort === 'duration') return Number(row.avg_duration_seconds ?? 0); if (sort === 'speed') return Number(row.speed_output_tokens ?? 0) / Math.max(Number(row.speed_duration_seconds ?? 0), 0.001); if (sort === 'input') return Number(row.total_input_tokens ?? 0); if (sort === 'output') return Number(row.total_output_tokens ?? 0); if (sort === 'cache_read') return Number(row.total_cache_read_input_tokens ?? 0); if (sort === 'cache_creation') return Number(row.total_cache_creation_input_tokens ?? 0); return Number(row[sort] ?? 0) }
-    if (direction === 'none') return result
-    return [...result].sort((a, b) => { const left = value(a); const right = value(b); const comparison = typeof left === 'string' && typeof right === 'string' ? left.localeCompare(right) : Number(left) - Number(right); return direction === 'asc' ? comparison : -comparison })
-  }, [rows, hideZero, sort, direction])
-  const cycleSort = (key: SortKey) => { if (sort !== key) { setSort(key); setDirection('desc'); return }; setDirection((current) => current === 'none' ? 'desc' : current === 'desc' ? 'asc' : 'none') }
-  const heading = (key: SortKey, label: string) => <th className="sortable" onClick={() => cycleSort(key)}>{label}{sort === key && direction !== 'none' ? direction === 'desc' ? ' ↓' : ' ↑' : ''}</th>
-  const applyFilters = () => { void refresh(); void loadOptions() }
-  const chartGroups = useMemo(() => {
-    const grouped = (key: 'channel_name' | 'model', value: (row: StatsEntry) => number) => {
-      const totals = new Map<string, number>()
-      for (const row of filtered) {
-        const label = String(row[key] ?? '未知')
-        totals.set(label, (totals.get(label) ?? 0) + Math.max(0, value(row)))
-      }
-      return [...totals].sort((a, b) => b[1] - a[1]).slice(0, 10)
+  const session = useSession()
+  const hideChannels = shouldHideChannels(session)
+  const tokenOptions = useTokenOptions()
+  const [filters, setFilters] = useState<Filters>(initialFilters)
+  const [options, setOptions] = useState<{ channel_names: string[]; models: string[] }>({ channel_names: [], models: [] })
+  const [data, setData] = useState<StatsResponse>({})
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' } | null>(null)
+  const [view, setView] = useState<'table' | 'chart'>(() => localStorage.getItem(VIEW_KEY) === 'chart' ? 'chart' : 'table')
+  const generation = useRef(0)
+  const lastFilters = useRef<Filters | null>(null)
+
+  // 精确或模糊：值命中筛选项时按精确匹配（channel_name/model），否则模糊（*_like），与旧版一致。
+  const queryParams = useCallback((value: Filters): Record<string, string | number> => {
+    const params: Record<string, string | number> = { ...rangeParams(value.range) }
+    if (!hideChannels) {
+      if (value.channelId) params.channel_id = value.channelId
+      if (value.channel) params[options.channel_names.includes(value.channel) ? 'channel_name' : 'channel_name_like'] = value.channel
     }
-    const calls = (row: StatsEntry) => Number(row.total ?? 0)
-    const cost = (row: StatsEntry) => Number(row.effective_cost ?? row.total_cost ?? 0)
-    const tokens = (row: StatsEntry) => Number(row.total_input_tokens ?? 0) + Number(row.total_output_tokens ?? 0)
-    return [
-      { key: 'channel_calls', title: '渠道调用次数', data: grouped('channel_name', calls) },
-      { key: 'model_calls', title: '模型调用次数', data: grouped('model', calls) },
-      { key: 'channel_cost', title: '渠道成本', data: grouped('channel_name', cost) },
-      { key: 'model_cost', title: '模型成本', data: grouped('model', cost) },
-      { key: 'channel_tokens', title: '渠道 Token 用量', data: grouped('channel_name', tokens) },
-      { key: 'model_tokens', title: '模型 Token 用量', data: grouped('model', tokens) },
-    ]
-  }, [filtered])
-  return <><header className="page-header"><div><h1>统计分析</h1><p className="muted">按渠道和模型查看调用、Token 与成本</p></div><button className="btn" onClick={() => void refresh()} disabled={loading}>刷新</button></header>
-    <div className="toolbar"><select className="select" value={range} onChange={(event) => setRange(event.target.value)}><option value="today">今天</option><option value="yesterday">昨天</option><option value="this_week">本周</option><option value="this_month">本月</option><option value="all">全部</option><option value="custom">自定义</option></select><input className="input" list="stats-channels" value={channel} onChange={(event) => setChannel(event.target.value)} placeholder="渠道筛选" /><datalist id="stats-channels">{(options.channel_names ?? []).map((item) => <option key={item} value={item} />)}</datalist><input className="input" list="stats-models" value={model} onChange={(event) => setModel(event.target.value)} placeholder="模型筛选" /><datalist id="stats-models">{(options.models ?? []).map((item) => <option key={item} value={item} />)}</datalist><label className="muted"><input type="checkbox" checked={exact} onChange={(event) => setExact(event.target.checked)} /> 精确</label><label className="muted"><input type="checkbox" checked={hideZero} onChange={(event) => setHideZero(event.target.checked)} /> 隐藏零成功</label><select className="select" value={protocol} onChange={(event) => setProtocol(event.target.value)}><option value="">全部入口协议</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="codex">Codex</option></select><input className="input" value={token} onChange={(event) => setToken(event.target.value)} placeholder="Token ID" />{range === 'custom' && <><input className="input" type="datetime-local" value={start} onChange={(event) => setStart(event.target.value)} /><input className="input" type="datetime-local" value={end} onChange={(event) => setEnd(event.target.value)} /></>}<button className="btn btn-primary" onClick={applyFilters}>查询</button><span className="muted">峰值 RPM {Number(rpm.peak_rpm ?? 0).toFixed(1)}</span></div>
-    {error && <div className="card error-text">{error}</div>}
-    <div className="toolbar" role="group" aria-label="统计视图"><button className={view === 'table' ? 'btn btn-primary' : 'btn'} onClick={() => setView('table')} aria-pressed={view === 'table'}><Table2 size={16} /> 表格</button><button className={view === 'chart' ? 'btn btn-primary' : 'btn'} onClick={() => setView('chart')} aria-pressed={view === 'chart'}><ChartPie size={16} /> 图表</button></div>
-    {view === 'table' ? <div className="table-wrap"><table><thead><tr>{heading('channel_name', '渠道')}{heading('model', '模型')}{heading('success', '成功')}{heading('error', '失败')}{heading('total', '总调用')}{heading('rpm', 'RPM 峰/均/近')}{heading('success_rate', '成功率')}{heading('duration', '首字/耗时 (s)')}{heading('speed', '速度 tok/s')}{heading('input', '输入 Token')}{heading('output', '输出 Token')}{heading('cache_read', '缓存读取')}{heading('cache_creation', '缓存创建')}<th>缓存命中</th>{heading('cost', '成本 (USD)')}</tr></thead><tbody>{loading ? <tr><td colSpan={15}>加载中...</td></tr> : filtered.length === 0 ? <tr><td colSpan={15}>暂无数据</td></tr> : <>{filtered.map((row, index) => { const total = Number(row.total ?? 0); const rate = total ? Number(row.success ?? 0) / total : 0; const speed = Number(row.speed_output_tokens ?? 0) / Math.max(Number(row.speed_duration_seconds ?? 0), 0.001); const cacheRead = Number(row.total_cache_read_input_tokens ?? 0); const cacheCreation = Number(row.total_cache_creation_input_tokens ?? 0); const input = Number(row.total_input_tokens ?? 0); const rpmText = `${Number(row.peak_rpm ?? 0).toFixed(1)} / ${Number(row.avg_rpm ?? 0).toFixed(1)} / ${isToday ? Number(row.recent_rpm ?? 0).toFixed(1) : '-'}`; return <tr key={`${row.channel_id}-${row.model}-${index}`}><td><button className="link-button" onClick={() => { window.location.href = `/web/logs?channel_name=${encodeURIComponent(String(row.channel_name ?? ''))}` }}>{String(row.channel_name ?? '-')}</button></td><td><button className="link-button" onClick={() => { window.location.href = `/web/logs?model=${encodeURIComponent(String(row.model ?? ''))}` }}>{String(row.model ?? '-')}</button></td><td>{Number(row.success ?? 0)}</td><td>{Number(row.error ?? 0)}</td><td>{total}</td><td>{rpmText}</td><td>{total ? `${(rate * 100).toFixed(1)}%` : '-'}</td><td>{Number(row.avg_first_byte_time_seconds ?? 0).toFixed(2)} / {Number(row.avg_duration_seconds ?? 0).toFixed(2)}</td><td>{Number.isFinite(speed) && Number(row.speed_output_tokens ?? 0) > 0 ? speed.toFixed(2) : '-'}</td><td>{input.toLocaleString()}</td><td>{Number(row.total_output_tokens ?? 0).toLocaleString()}</td><td>{cacheRead.toLocaleString()}</td><td>{cacheCreation.toLocaleString()}</td><td>{input ? `${((cacheRead + cacheCreation) / input * 100).toFixed(1)}%` : '-'}</td><td>{Number(row.effective_cost ?? row.total_cost ?? 0).toFixed(4)}</td></tr> })}<tr><th colSpan={2}>合计</th><th>{filtered.reduce((sum, row) => sum + Number(row.success ?? 0), 0)}</th><th>{filtered.reduce((sum, row) => sum + Number(row.error ?? 0), 0)}</th><th>{filtered.reduce((sum, row) => sum + Number(row.total ?? 0), 0)}</th><th>{Number(rpm.peak_rpm ?? 0).toFixed(1)} / {Number(rpm.avg_rpm ?? 0).toFixed(1)} / {isToday ? Number(rpm.recent_rpm ?? 0).toFixed(1) : '-'}</th><td colSpan={3}></td><th>{filtered.reduce((sum, row) => sum + Number(row.total_input_tokens ?? 0), 0).toLocaleString()}</th><th>{filtered.reduce((sum, row) => sum + Number(row.total_output_tokens ?? 0), 0).toLocaleString()}</th><th>{filtered.reduce((sum, row) => sum + Number(row.total_cache_read_input_tokens ?? 0), 0).toLocaleString()}</th><th>{filtered.reduce((sum, row) => sum + Number(row.total_cache_creation_input_tokens ?? 0), 0).toLocaleString()}</th><td>-</td><th>{filtered.reduce((sum, row) => sum + Number(row.effective_cost ?? row.total_cost ?? 0), 0).toFixed(4)}</th></tr></>}</tbody></table></div> : <div className="charts-grid">{chartGroups.map((group) => <section className="chart-card" key={group.key}><h2>{group.title}</h2><PieBreakdown data={group.data} /></section>)}</div>}
-    <div className="card" style={{ marginTop: 16 }}><h2>渠道健康时间线</h2><div className="health-grid">{filtered.slice(0, 20).map((row, index) => { const timeline = Array.isArray(row.health_timeline) ? row.health_timeline as Array<{ rate?: number }> : []; return <div className="health-line" key={`${row.channel_id}-${row.model}-${index}`}><span>{row.channel_name} / {row.model}</span><div>{timeline.map((point, pointIndex) => { const rate = Number(point.rate ?? -1); return <i key={pointIndex} title={rate < 0 ? '无请求' : `${(rate * 100).toFixed(1)}%`} style={{ background: rate < 0 ? '#64748b' : rate >= 0.95 ? '#22c55e' : rate >= 0.7 ? '#eab308' : '#ef4444' }} /> })}</div></div> })}</div></div>
+    if (value.model) params[options.models.includes(value.model) ? 'model' : 'model_like'] = value.model
+    if (value.protocol) params.client_protocol = value.protocol
+    if (value.token && tokenOptions) params.auth_token_id = value.token
+    return params
+  }, [hideChannels, options, tokenOptions])
+
+  const load = useCallback(async () => {
+    const current = ++generation.current
+    setLoading(true)
+    try {
+      const response = await getJSON<StatsResponse>('/dashboard/stats', queryParams(filters))
+      if (current === generation.current) { setData(response); setError('') }
+    } catch (cause) { if (current === generation.current) setError(cause instanceof Error ? cause.message : '统计加载失败') }
+    finally { if (current === generation.current) setLoading(false) }
+  }, [filters, queryParams])
+
+  // 筛选项只带时间参数，避免当前筛选把候选缩窄（旧版 stats.js:709-711）。
+  useEffect(() => {
+    void getJSON<{ channel_names?: string[]; models?: string[] }>('/dashboard/stats/filter-options', rangeParams(filters.range))
+      .then((value) => setOptions({ channel_names: value.channel_names ?? [], models: value.models ?? [] })).catch(() => undefined)
+  }, [filters.range])
+
+  useEffect(() => {
+    const { hideZero, ...rest } = filters
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...rest, channelId: undefined, hideZero }))
+    const params = queryParams(filters)
+    // 首次加载与筛选项异步就绪只替换 URL；用户改动筛选才写入历史，便于前进后退与分享。
+    writeQuery(params, lastFilters.current !== null && lastFilters.current !== filters)
+    lastFilters.current = filters
+    void load()
+  }, [filters, load, queryParams])
+
+  useAutoRefresh(() => void load())
+  useEffect(() => { localStorage.setItem(VIEW_KEY, view) }, [view])
+
+  const set = (patch: Partial<Filters>) => setFilters((current) => ({ ...current, ...patch }))
+  const clear = () => setFilters({ range: { range: 'today' }, channel: '', model: '', protocol: '', token: '', channelId: '', hideZero: true })
+
+  const all = data.stats ?? []
+  const rows = useMemo(() => {
+    const filtered = filters.hideZero ? all.filter((entry) => num(entry.success) > 0) : [...all]
+    const value = (entry: Entry, key: SortKey): number | string => {
+      switch (key) {
+        case 'channel_name': return String(entry.channel_name ?? '')
+        case 'model': return String(entry.model ?? '')
+        case 'duration': return num(entry.avg_duration_seconds ?? entry.avg_first_byte_time_seconds)
+        case 'speed': return rowSpeed(entry) ?? 0
+        case 'rpm': return num(entry.peak_rpm)
+        case 'input': return num(entry.total_input_tokens)
+        case 'output': return num(entry.total_output_tokens)
+        case 'cache_read': return num(entry.total_cache_read_input_tokens)
+        case 'cache_creation': return num(entry.total_cache_creation_input_tokens)
+        case 'cost': return num(entry.total_cost)
+        default: return num(entry[key])
+      }
+    }
+    if (!sort) {
+      // 默认：渠道优先级降序 → 渠道名 → 模型（旧版 stats.js:812-845）。
+      return filtered.sort((a, b) => num(b.channel_priority) - num(a.channel_priority) || String(a.channel_name ?? '').localeCompare(String(b.channel_name ?? '')) || String(a.model ?? '').localeCompare(String(b.model ?? '')))
+    }
+    return filtered.sort((a, b) => {
+      const left = value(a, sort.key); const right = value(b, sort.key)
+      const result = typeof left === 'string' && typeof right === 'string' ? left.localeCompare(right) : Number(left) - Number(right)
+      return sort.dir === 'asc' ? result : -result
+    })
+  }, [all, filters.hideZero, sort])
+
+  const totals = useMemo(() => {
+    const sum = (pick: (entry: Entry) => number) => rows.reduce((acc, entry) => acc + pick(entry), 0)
+    const success = sum((entry) => num(entry.success))
+    const weighted = (field: 'avg_first_byte_time_seconds' | 'avg_duration_seconds') => {
+      let total = 0; let weight = 0
+      for (const entry of rows) { const value = num(entry[field]); const w = num(entry.success); if (value > 0 && w > 0) { total += value * w; weight += w } }
+      return weight ? total / weight : undefined
+    }
+    const speedOut = sum((entry) => num(entry.speed_output_tokens)); const speedSeconds = sum((entry) => num(entry.speed_duration_seconds))
+    return {
+      success, error: sum((entry) => num(entry.error)), ttft: weighted('avg_first_byte_time_seconds'), duration: weighted('avg_duration_seconds'),
+      speed: speedSeconds > 0 ? speedOut / speedSeconds : null,
+      input: sum((entry) => num(entry.total_input_tokens)), output: sum((entry) => num(entry.total_output_tokens)),
+      read: sum((entry) => num(entry.total_cache_read_input_tokens)), creation: sum((entry) => num(entry.total_cache_creation_input_tokens)),
+      cost: sum((entry) => num(entry.total_cost)), effective: sum((entry) => num(entry.effective_cost ?? entry.total_cost)),
+    }
+  }, [rows])
+
+  const toggleSort = (key: SortKey) => setSort((current) => !current || current.key !== key ? { key, dir: 'desc' } : current.dir === 'desc' ? { key, dir: 'asc' } : null)
+  const header = (key: SortKey, label: string) => <th><button className="link-button" onClick={() => toggleSort(key)}>{label}{sort?.key === key ? (sort.dir === 'desc' ? ' ↓' : ' ↑') : ''}</button></th>
+  // 跳转日志时带上当前时间范围；点模型时同时带上渠道（旧版 stats.js:102-110）。
+  const logsLink = (entry: Entry, withModel: boolean) => {
+    const params = new URLSearchParams(Object.entries(rangeParams(filters.range)).map(([key, value]) => [key, String(value)]))
+    if (!hideChannels && entry.channel_name) params.set('channel_name', entry.channel_name)
+    if (withModel && entry.model) params.set('model', entry.model)
+    return `/web/logs?${params.toString()}`
+  }
+  const today = Boolean(data.is_today)
+  const columns = hideChannels ? 13 : 14
+
+  return <>
+    <header className="page-header">
+      <div><h1>统计分析</h1><p className="muted">按渠道与模型查看请求、延迟、Token 与成本</p></div>
+      <div className="toolbar" style={{ marginBottom: 0 }}>
+        <button className={`btn${view === 'table' ? ' btn-primary' : ''}`} onClick={() => setView('table')}>表格</button>
+        <button className={`btn${view === 'chart' ? ' btn-primary' : ''}`} onClick={() => setView('chart')}>图表</button>
+        <button className="btn" disabled={loading} onClick={() => void load()}>刷新</button>
+      </div>
+    </header>
+
+    <div className="toolbar">
+      <DateRangeFilter value={filters.range} onChange={(range) => set({ range })} />
+      {!hideChannels && <SearchableSelect ariaLabel="渠道" className="combobox-inline" allowCustomInput value={filters.channel} options={[{ value: '', label: '所有渠道' }, ...options.channel_names.map((name) => ({ value: name, label: name }))]} onChange={(channel) => set({ channel })} placeholder="渠道" />}
+      <SearchableSelect ariaLabel="模型" className="combobox-inline" allowCustomInput value={filters.model} options={[{ value: '', label: '所有模型' }, ...options.models.map((name) => ({ value: name, label: name }))]} onChange={(model) => set({ model })} placeholder="模型" />
+      <SearchableSelect ariaLabel="请求协议" className="combobox-inline" value={filters.protocol} options={PROTOCOLS} onChange={(protocol) => set({ protocol })} />
+      {tokenOptions && <SearchableSelect ariaLabel="令牌" className="combobox-inline" value={filters.token} options={[{ value: '', label: '全部令牌' }, ...tokenOptions]} onChange={(token) => set({ token })} />}
+      {filters.channelId && !hideChannels && <span className="badge">渠道 ID {filters.channelId} <button className="link-button" aria-label="移除渠道 ID 筛选" onClick={() => set({ channelId: '' })}>×</button></span>}
+      <label className="switch"><input type="checkbox" checked={filters.hideZero} onChange={(event) => set({ hideZero: event.target.checked })} /> 隐藏 0 成功</label>
+      <button className="btn" onClick={clear}>清空</button>
+    </div>
+    {error && <div className="card error-text" role="alert">{error}</div>}
+
+    {view === 'table' ? <div className="table-wrap"><table><thead><tr>
+      {!hideChannels && header('channel_name', '渠道')}{header('model', '模型')}{header('success', '成功 / 成功率')}{header('error', '失败')}
+      {header('duration', '首字 / 耗时')}{header('speed', 'Tok/s')}{header('rpm', today ? 'RPM 峰/均/近' : 'RPM 峰/均')}
+      {header('input', '输入')}{header('output', '输出')}{header('cache_read', '缓存读')}{header('cache_creation', '缓存建')}<th>缓存命中</th>{header('cost', '成本')}
+      {!hideChannels && <th>健康</th>}
+    </tr></thead><tbody>
+      {!rows.length && <tr><td colSpan={columns} className="muted">{loading ? '加载中…' : '暂无数据'}</td></tr>}
+      {rows.map((entry, index) => {
+        const success = num(entry.success); const total = num(entry.total) || success + num(entry.error)
+        const multiplier = entry.cost_multiplier_min != null ? (entry.cost_multiplier_min === entry.cost_multiplier_max ? `×${entry.cost_multiplier_min}` : `×${entry.cost_multiplier_min}–${entry.cost_multiplier_max}`) : ''
+        const speed = rowSpeed(entry)
+        return <tr key={`${entry.channel_id ?? entry.channel_name}-${entry.model}-${index}`}>
+          {!hideChannels && <td><a className="link-button" href={logsLink(entry, false)}>{entry.channel_name || '-'}</a>{entry.channel_id != null && <span className="table-note">ID: {entry.channel_id}</span>}</td>}
+          <td><a className="link-button" href={logsLink(entry, true)}>{entry.model || '-'}</a>{multiplier && <span className="badge" title="成本倍率">{multiplier}</span>}</td>
+          <td className="cell-stack"><span className="success-text">{formatInt(success)}</span><span className="table-note">{formatPercent(success, total)}</span></td>
+          <td className={num(entry.error) ? 'error-text' : 'muted'}>{formatInt(entry.error)}</td>
+          <td className="cell-stack"><span>{formatSeconds(entry.avg_first_byte_time_seconds)}</span><span className="table-note">{formatSeconds(entry.avg_duration_seconds)}</span></td>
+          <td>{speed == null ? '-' : speed.toFixed(1)}</td>
+          <td>{[entry.peak_rpm, entry.avg_rpm, ...(today ? [entry.recent_rpm] : [])].map((value) => num(value).toFixed(1)).join(' / ')}</td>
+          <td>{formatCompact(entry.total_input_tokens)}</td><td>{formatCompact(entry.total_output_tokens)}</td>
+          <td>{formatCompact(entry.total_cache_read_input_tokens)}</td><td>{formatCompact(entry.total_cache_creation_input_tokens)}</td>
+          <td>{cacheHitRate(entry.total_input_tokens, entry.total_cache_read_input_tokens, entry.total_cache_creation_input_tokens)}</td>
+          <td>{formatCostPair(entry.total_cost, entry.effective_cost)}</td>
+          {!hideChannels && <td><HealthBar points={entry.health_timeline ?? []} /></td>}
+        </tr>
+      })}
+      {rows.length > 0 && <tr className="totals-row">
+        {!hideChannels && <td><strong>合计</strong></td>}<td>{hideChannels ? <strong>合计</strong> : `${rows.length} 行`}</td>
+        <td className="cell-stack"><span className="success-text">{formatInt(totals.success)}</span><span className="table-note">{formatPercent(totals.success, totals.success + totals.error)}</span></td>
+        <td>{formatInt(totals.error)}</td>
+        <td className="cell-stack"><span>{formatSeconds(totals.ttft)}</span><span className="table-note">{formatSeconds(totals.duration)}</span></td>
+        <td>{totals.speed == null ? '-' : totals.speed.toFixed(1)}</td>
+        <td>{data.rpm_stats ? [data.rpm_stats.peak_rpm, data.rpm_stats.avg_rpm, ...(today ? [data.rpm_stats.recent_rpm] : [])].map((value) => num(value).toFixed(1)).join(' / ') : '-'}</td>
+        <td>{formatCompact(totals.input)}</td><td>{formatCompact(totals.output)}</td><td>{formatCompact(totals.read)}</td><td>{formatCompact(totals.creation)}</td>
+        <td>{cacheHitRate(totals.input, totals.read, totals.creation)}</td><td>{formatCostPair(totals.cost, totals.effective)}</td>
+        {!hideChannels && <td />}
+      </tr>}
+    </tbody></table></div> : <Charts entries={all} hideChannels={hideChannels} />}
   </>
 }
 
-function PieBreakdown({ data }: { data: Array<[string, number]> }) {
-  const total = data.reduce((sum, [, value]) => sum + value, 0)
-  const colors = ['#2878c8', '#1b8f78', '#d97706', '#c2415d', '#6656b3', '#4f7d32', '#0f9bb5', '#a14e82', '#697586', '#9a7023']
-  let offset = 0
-  const stops = data.map(([, value], index) => {
-    const start = offset
-    offset += total > 0 ? value / total * 100 : 0
-    return `${colors[index % colors.length]} ${start}% ${offset}%`
-  })
-  return <div className="pie-breakdown">{data.length && total > 0 ? <div aria-label={`分布总计 ${total.toLocaleString()}`} className="pie-breakdown-chart" style={{ background: `conic-gradient(${stops.join(', ')})` }}><div>{total.toLocaleString()}</div></div> : <div className="pie-breakdown-empty">暂无数据</div>}<div className="pie-breakdown-legend">{data.map(([label, value], index) => <div key={label}><i style={{ backgroundColor: colors[index % colors.length] }} /><span title={label}>{label}</span><strong>{total ? `${(value / total * 100).toFixed(1)}%` : value}</strong></div>)}</div></div>
+/** 每行健康条：阈值 95%/80%，全部失败均为 429 时显示限流色（旧版 stats.js:950-1009）。 */
+function HealthBar({ points }: { points: HealthPoint[] }) {
+  if (!points.length) return <span className="muted">-</span>
+  return <div className="health-strip health-strip-sm" role="img" aria-label="健康时间线">{points.map((point, index) => {
+    const success = num(point.success); const error = num(point.error); const limited = num(point.rate_limited)
+    const rate = point.rate == null || point.rate < 0 || success + error === 0 ? null : point.rate
+    const cls = rate == null ? 'health-unknown' : error > 0 && limited === error && success === 0 ? 'health-limited' : rate >= 0.95 ? 'health-good' : rate >= 0.8 ? 'health-warn' : 'health-bad'
+    const tip = `${formatDateTime(point.ts)}\n成功 ${success} · 失败 ${error}${limited ? `（限流 ${limited}）` : ''}${rate == null ? '\n无请求' : `\n成功率 ${(rate * 100).toFixed(1)}%`}\n首字 ${formatSeconds(point.avg_first_byte_time)} · 耗时 ${formatSeconds(point.avg_duration)}\nToken 入 ${formatCompact(point.input_tokens)} 出 ${formatCompact(point.output_tokens)} 缓读 ${formatCompact(point.cache_read_tokens)} 缓建 ${formatCompact(point.cache_creation_tokens)}\n成本 ${formatCostPair(point.cost, point.effective_cost)}`
+    return <i key={index} className={cls} title={tip} />
+  })}</div>
+}
+
+type Slice = { label: string; value: number; detail?: string }
+
+/** 6 个环形图：渠道/模型 × 调用次数（仅成功）/ 成本（倍率后）/ Token（含缓存），不受「隐藏 0 成功」影响。 */
+function Charts({ entries, hideChannels }: { entries: Entry[]; hideChannels: boolean }) {
+  const group = (key: 'channel_name' | 'model', pick: (entry: Entry) => number, detail?: (entries: Entry[]) => string): Slice[] => {
+    const map = new Map<string, Entry[]>()
+    for (const entry of entries) { if (num(entry.success) <= 0) continue; const label = String(entry[key] || '未知'); map.set(label, [...(map.get(label) ?? []), entry]) }
+    return [...map.entries()].map(([label, items]) => ({ label, value: items.reduce((acc, item) => acc + pick(item), 0), detail: detail?.(items) })).filter((slice) => slice.value > 0).sort((a, b) => b.value - a.value)
+  }
+  const tokens = (entry: Entry) => num(entry.total_input_tokens) + num(entry.total_output_tokens) + num(entry.total_cache_read_input_tokens) + num(entry.total_cache_creation_input_tokens)
+  const cost = (entry: Entry) => num(entry.effective_cost ?? entry.total_cost)
+  const costDetail = (items: Entry[]) => `标准 ${formatUSD(items.reduce((acc, item) => acc + num(item.total_cost), 0))}`
+  const charts: Array<{ title: string; slices: Slice[]; format: (value: number) => string }> = [
+    ...(hideChannels ? [] : [{ title: '渠道调用次数（成功）', slices: group('channel_name', (entry) => num(entry.success)), format: formatInt }]),
+    { title: '模型调用次数（成功）', slices: group('model', (entry) => num(entry.success)), format: formatInt },
+    ...(hideChannels ? [] : [{ title: '渠道成本', slices: group('channel_name', cost, costDetail), format: formatUSD }]),
+    { title: '模型成本', slices: group('model', cost, costDetail), format: formatUSD },
+    ...(hideChannels ? [] : [{ title: '渠道 Token', slices: group('channel_name', tokens), format: formatCompact }]),
+    { title: '模型 Token', slices: group('model', tokens), format: formatCompact },
+  ]
+  return <section className="charts-grid">{charts.map((chart) => <Donut key={chart.title} {...chart} />)}</section>
+}
+
+function Donut({ title, slices, format }: { title: string; slices: Slice[]; format: (value: number) => string }) {
+  const [active, setActive] = useState<number | null>(null)
+  const total = slices.reduce((acc, slice) => acc + slice.value, 0)
+  let cursor = 0
+  const stops = slices.map((slice, index) => { const from = cursor; cursor += (slice.value / total) * 360; return `${COLORS[index % COLORS.length]} ${from}deg ${cursor}deg` }).join(', ')
+  const focus = active == null ? null : slices[active]
+  return <div className="chart-card">
+    <h2>{title}</h2>
+    {!total ? <div className="pie-breakdown"><div className="pie-breakdown-empty">暂无数据</div></div> : <div className="pie-breakdown">
+      <div className="pie-breakdown-chart" style={{ background: `conic-gradient(${stops})` }}><div title={focus?.label}>{focus ? `${focus.label}\n${format(focus.value)}` : format(total)}</div></div>
+      <div className="pie-breakdown-legend pie-legend-scroll">{slices.map((slice, index) => (
+        <div key={slice.label} className={active === index ? 'active' : undefined} onMouseEnter={() => setActive(index)} onMouseLeave={() => setActive(null)} title={`${slice.label}\n${format(slice.value)}（${((slice.value / total) * 100).toFixed(1)}%）${slice.detail ? `\n${slice.detail}` : ''}`}>
+          <i style={{ background: COLORS[index % COLORS.length] }} /><span>{slice.label}</span><strong>{((slice.value / total) * 100).toFixed(1)}%</strong>
+        </div>
+      ))}</div>
+    </div>}
+  </div>
 }

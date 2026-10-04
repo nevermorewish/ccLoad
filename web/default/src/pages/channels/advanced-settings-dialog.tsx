@@ -317,7 +317,7 @@ export function AdvancedSettingsDialog({ open, draft: initial, channelId, authTy
 
 // ---------------------------------------------------------------- 冷却规则
 
-function CooldownRulesPanel({ rules, onChange }: { rules: CooldownRuleDraft[]; onChange: (rules: CooldownRuleDraft[]) => void }) {
+export function CooldownRulesPanel({ rules, onChange, rulesSource = 'channel' }: { rules: CooldownRuleDraft[]; onChange: (rules: CooldownRuleDraft[]) => void; rulesSource?: 'channel' | 'global' }) {
   const [testStatus, setTestStatus] = useState(429)
   const [testBody, setTestBody] = useState('upstream status 429: {"error":{"message":"retry later"}}')
   const [testResult, setTestResult] = useState<unknown>(null)
@@ -331,7 +331,7 @@ function CooldownRulesPanel({ rules, onChange }: { rules: CooldownRuleDraft[]; o
     const problem = validateAdvanced({ ...emptyAdvanced(), cooldown: rules })
     if (problem) { setTestResult({ error: problem.message }); return }
     const payload = advancedToPayload({ ...emptyAdvanced(), cooldown: rules }, true)
-    try { setTestResult(await cooldownDetectionTest({ rules_source: 'channel', cooldown_detection_rules: payload.cooldown_detection_rules ?? { rules: [] }, status_code: testStatus, error_body: testBody })) }
+    try { setTestResult(await cooldownDetectionTest({ rules_source: rulesSource, cooldown_detection_rules: payload.cooldown_detection_rules ?? { rules: [] }, status_code: testStatus, error_body: testBody })) }
     catch (cause) { setTestResult({ error: cause instanceof Error ? cause.message : '测试失败' }) }
   }
   return <>

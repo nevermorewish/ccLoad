@@ -2,7 +2,7 @@ import { Link, useLocation } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { BarChart3, Gauge, Home, KeyRound, List, LogOut, Settings, Activity, Sun, Moon, Languages } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { logout } from '../lib/auth'
+import { canAccessPath, logout } from '../lib/auth'
 
 const links = [
   { to: '/', label: '概览', icon: Home },
@@ -29,13 +29,14 @@ export function AppLayout({ children }: { children: ReactNode }) {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">C</span><span>ccLoad</span></div>
-        <nav>{links.map(({ to, label, icon: Icon }) => (
+        <nav>{links.filter(({ to }) => canAccessPath(to)).map(({ to, label, icon: Icon }) => (
           <Link key={to} to={to} className={location.pathname === to ? 'nav-link active' : 'nav-link'}>
             <Icon size={17} />{label}
           </Link>
         ))}</nav>
         <div className="sidebar-tools"><button className="nav-link" title="切换主题" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}<span>主题</span></button><button className="nav-link" title="切换语言" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}><Languages size={17} /><span>{locale === 'zh-CN' ? '中文' : 'English'}</span></button></div>
-        <button className="nav-link logout" onClick={() => { logout(); location.href = '/web/' }}>
+        {/* 注意：此处 location 是路由对象，跳转必须用 window.location。 */}
+        <button className="nav-link logout" onClick={() => { if (!window.confirm('确定退出登录吗？')) return; void logout().finally(() => { window.location.href = '/web/login' }) }}>
           <LogOut size={17} />退出登录
         </button>
       </aside>

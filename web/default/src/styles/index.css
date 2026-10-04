@@ -209,3 +209,38 @@ th { color: #9ca3af; font-size: 12px; font-weight: 600; }
 fieldset.card { display: grid; gap: 10px; }
 fieldset.card legend { padding: 0 6px; color: #cbd5e1; }
 :root[data-resolved-theme="light"] .sort-item { background: #fff; border-color: #d1d5db; }
+
+/* ---- 服务健康时间线 ---- */
+.health-strip { display: flex; gap: 2px; min-height: 26px; align-items: stretch; }
+.health-strip i { flex: 1 1 0; min-width: 2px; border-radius: 2px; }
+.health-legend { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; }
+.health-good { background: #22c55e; }
+.health-warn { background: #eab308; }
+.health-bad { background: #ef4444; }
+.health-limited { background: #3b82f6; }
+.health-unknown { background: #334155; }
+:root[data-resolved-theme="light"] .health-unknown { background: #e5e7eb; }
+.health-strip-sm { min-height: 16px; min-width: 160px; gap: 1px; }
+.totals-row td { font-weight: 600; background: rgba(37, 99, 235, 0.06); }
+.pie-legend-scroll { max-height: 180px; overflow: auto; }
+.pie-breakdown-legend > div.active span { color: #fff; }
+.pie-breakdown-chart > div { white-space: pre-line; text-align: center; }
+.trend-chart { position: relative; }
+.trend-chart-svg { display: block; width: 100%; height: auto; }
+.trend-grid { stroke: #263244; stroke-width: 1; }
+.trend-axis { fill: #9ca3af; font-size: 11px; }
+.trend-gap { fill: rgba(148, 163, 184, 0.12); }
+.trend-ref { stroke: #64748b; stroke-dasharray: 4 4; }
+.trend-ref-strong { stroke: #f59e0b; }
+.trend-cursor { stroke: #94a3b8; stroke-dasharray: 3 3; }
+.trend-tooltip { position: absolute; top: 12px; display: grid; gap: 3px; max-width: 320px; padding: 10px 12px; border: 1px solid #374151; border-radius: 8px; background: rgba(15, 23, 42, 0.95); font-size: 12px; pointer-events: none; }
+:root[data-resolved-theme="light"] .trend-tooltip { background: rgba(255, 255, 255, 0.97); border-color: #d1d5db; }
+:root[data-resolved-theme="light"] .trend-grid { stroke: #e5e7eb; }
+.warn-text { color: #fde68a; }
+.active-row td { background: rgba(234, 179, 8, 0.06); }
+.log-message { max-width: 360px; white-space: normal; word-break: break-word; }
+.debug-pre { max-height: 60vh; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+:root[data-resolved-theme="light"] .warn-text { color: #a16207; }
+.setting-dirty td { background: rgba(37, 99, 235, 0.08); }
+.setting-desc { white-space: normal; min-width: 220px; color: #cbd5e1; }
+:root[data-resolved-theme="light"] .setting-desc { color: #374151; }

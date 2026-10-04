@@ -1,3 +1,4 @@
+import { redirectToLogin } from './api'
 import { getToken } from './auth'
 
 /**
@@ -10,6 +11,7 @@ export async function streamSSE<T>(url: string, body: unknown, onEvent: (event: 
   const token = getToken()
   if (token) headers.Authorization = `Bearer ${token}`
   const response = await fetch(url, { method, headers, credentials: 'include', body: method === 'POST' ? JSON.stringify(body) : undefined, signal })
+  if (response.status === 401) { redirectToLogin(); throw new Error('登录已过期') }
   if (!response.ok || !response.body) {
     let message = `请求失败 (${response.status})`
     try { const payload = await response.json() as { error?: string }; if (payload?.error) message = payload.error } catch { /* 非 JSON 错误体沿用状态码文案 */ }

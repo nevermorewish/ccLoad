@@ -26,16 +26,61 @@ export function invalidateGetCache(): void {
   getCache.clear()
 }
 
+/** 后端错误：保留 HTTP 状态和响应里的 data（如调试日志 404 时的不可用原因）。 */
+export class ApiError extends Error {
+  status: number
+  data: unknown
+  constructor(message: string, status = 0, data: unknown = undefined) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.data = data
+  }
+}
+
+const SESSION_KEYS = ['ccload_token', 'ccload_token_expiry', 'ccload_web_role', 'ccload_api_token']
+
+/** 会话失效：清本地会话并带回跳地址进入登录页（与旧版 ui.js:fetchWithAuth 一致）。 */
+export function redirectToLogin(): void {
+  SESSION_KEYS.forEach((key) => localStorage.removeItem(key))
+  const path = window.location.pathname
+  if (path === '/web/login' || path.startsWith('/web/login')) return
+  const redirect = `${path}${window.location.search}${window.location.hash}`
+  window.location.href = `/web/login?redirect=${encodeURIComponent(redirect)}`
+}
+
+// 登录与公开接口不需要会话，失效时也不应跳转。
+const isPublicURL = (url = '') => /^\/*(login|logout|public\/|health)/.test(url)
+
 api.interceptors.response.use((response) => {
   const payload = response.data
   if (payload && payload.success === false) {
-    return Promise.reject(new Error(payload.error || '请求失败'))
+    return Promise.reject(new ApiError(payload.error || '请求失败', response.status, payload.data))
   }
   return response
+}, (error: unknown) => {
+  if (axios.isCancel(error)) return Promise.reject(error)
+  const response = axios.isAxiosError(error) ? error.response : undefined
+  if (!response) return Promise.reject(new ApiError(error instanceof Error && error.message ? `网络错误：${error.message}` : '网络错误', 0))
+  if (response.status === 401 && !isPublicURL(response.config?.url)) {
+    redirectToLogin()
+  }
+  const payload = response.data as { error?: unknown; data?: unknown } | undefined
+  // 后端统一返回 {success:false,error,data}；非 JSON 时退回状态文本。
+  const message = payload && typeof payload === 'object' && typeof payload.error === 'string' && payload.error
+    ? payload.error
+    : `请求失败（HTTP ${response.status}）`
+  return Promise.reject(new ApiError(message, response.status, payload && typeof payload === 'object' ? payload.data : undefined))
 })
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('ccload_token')
+  const expiry = Number(localStorage.getItem('ccload_token_expiry') ?? 0)
+  // 客户端先判断过期，避免带着失效 token 发出一串注定 401 的请求。
+  if (token && expiry > 0 && Date.now() > expiry && !isPublicURL(config.url)) {
+    redirectToLogin()
+    return Promise.reject(new ApiError('登录已过期', 401))
+  }
   if (token) config.headers.set('Authorization', `Bearer ${token}`)
   return config
 })
