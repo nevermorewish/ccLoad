@@ -37,3 +37,8 @@ export function getToken(): string | null {
 export function isReadOnlySession(session: Session | null): boolean {
   return session?.role === 'api_token' && session.show_channels !== true
 }
+
+/** API Token 登录的只读角色：渠道页改读 /dashboard/* 并隐藏全部写操作。 */
+export function isAPITokenRole(): boolean {
+  return localStorage.getItem(ROLE_KEY) === 'api_token'
+}
