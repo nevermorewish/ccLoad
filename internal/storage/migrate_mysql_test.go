@@ -142,7 +142,7 @@ func cleanupMySQLTables(t *testing.T, db *sql.DB) {
 	_, _ = db.Exec("SET FOREIGN_KEY_CHECKS = 0")
 	defer func() { _, _ = db.Exec("SET FOREIGN_KEY_CHECKS = 1") }()
 
-	tables := []string{"debug_logs", "logs", "web_sessions", "admin_sessions", "system_settings", "auth_tokens", "channel_model_cooldowns", "channel_url_states", "channel_models", "channel_protocol_transforms", "api_keys", "channels", "schema_migrations"}
+	tables := []string{"debug_logs", "logs", "web_sessions", "admin_sessions", "system_settings", "auth_tokens", "channel_model_cooldowns", "channel_url_states", "oauth_quota_cost_ledger", "channel_models", "channel_protocol_transforms", "api_keys", "channels", "schema_migrations"}
 	for _, table := range tables {
 		_, _ = db.Exec("DROP TABLE IF EXISTS " + table)
 	}
@@ -183,7 +183,7 @@ func TestMySQL(t *testing.T) {
 		}
 	})
 
-	t.Run("OAuthQuotaRounding", func(t *testing.T) {
+	t.Run("OAuthQuotaLedger", func(t *testing.T) {
 		cleanupMySQLTables(t, env.db)
 		store, err := CreateMySQLStoreForTest(env.dsn)
 		if err != nil {
@@ -191,7 +191,51 @@ func TestMySQL(t *testing.T) {
 		}
 		defer func() { _ = store.Close() }()
 
-		assertOAuthQuotaRoundingMatchesGo(t, store)
+		assertOAuthQuotaLedgerDialect(t, store)
+	})
+
+	t.Run("OAuthQuotaLedgerLegacyCollation", func(t *testing.T) {
+		cleanupMySQLTables(t, env.db)
+		ctx := context.Background()
+		if _, err := env.db.ExecContext(ctx, `CREATE TABLE oauth_quota_cost_ledger (
+			channel_id INT NOT NULL, bucket_at BIGINT NOT NULL,
+			model VARCHAR(191) NOT NULL, window_key VARCHAR(128) NOT NULL DEFAULT '',
+			cost_microusd BIGINT NOT NULL,
+			PRIMARY KEY (channel_id, bucket_at, model, window_key)
+		) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.db.ExecContext(ctx, `INSERT INTO oauth_quota_cost_ledger
+			(channel_id, bucket_at, model, window_key, cost_microusd) VALUES (99, 100, 'Case', '', 1)`); err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			store, err := CreateMySQLStoreForTest(env.dsn)
+			if err != nil {
+				t.Fatalf("migrate legacy ledger: %v", err)
+			}
+			_ = store.Close()
+		}
+		var binaryKeys int
+		if err := env.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='oauth_quota_cost_ledger'
+			AND COLUMN_NAME IN ('model', 'window_key') AND COLLATION_NAME='utf8mb4_bin'`).Scan(&binaryKeys); err != nil {
+			t.Fatal(err)
+		}
+		if binaryKeys != 2 {
+			t.Fatalf("binary ledger key columns = %d, want 2", binaryKeys)
+		}
+		if _, err := env.db.ExecContext(ctx, `INSERT INTO oauth_quota_cost_ledger
+			(channel_id, bucket_at, model, window_key, cost_microusd) VALUES (99, 100, 'case', '', 2)`); err != nil {
+			t.Fatalf("case-distinct ledger key rejected: %v", err)
+		}
+		var rowCount int
+		if err := env.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM oauth_quota_cost_ledger WHERE channel_id=99`).Scan(&rowCount); err != nil {
+			t.Fatal(err)
+		}
+		if rowCount != 2 {
+			t.Fatalf("case-distinct ledger rows = %d, want 2", rowCount)
+		}
 	})
 
 	t.Run("SyncManagerLargeRestore", func(t *testing.T) {

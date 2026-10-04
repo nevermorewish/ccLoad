@@ -3,6 +3,7 @@ package util
 import (
 	"log"
 	"strings"
+	"time"
 )
 
 // ============================================================================
@@ -506,6 +507,7 @@ func isOpenAIModel(model string) bool {
 // 注意：gpt-5.4-pro 虽在表中出现但价格列为空，不算支持。
 var serviceTierModels = map[string]bool{
 	"gpt-6-astra":       true,
+	"gpt-6.1-sol":       true,
 	"gpt-6-sol":         true,
 	"gpt-6-luna":        true,
 	"gpt-5.6":           true,
@@ -563,7 +565,8 @@ func modelSupportsTier(model string) bool {
 
 // OpenAIServiceTierMultiplier 返回 OpenAI service_tier 的费用倍率。
 // Codex 的 auto/priority 表示 Fast 模式：GPT-5.6/5.5=2.5x，
-// GPT-6 Sol/Luna 和 GPT-5.4=2x；其他 priority 模型=2x，ultrafast=10x，flex=0.5x，
+// GPT-6 Sol/Luna 和 GPT-5.4=2x；其他 priority 模型=2x，Astra ultrafast=6x，
+// 其他 ultrafast=10x，flex=0.5x，
 // default/standard/""=1x（标准）。
 func OpenAIServiceTierMultiplier(model, serviceTier string) float64 {
 	serviceTier = strings.ToLower(strings.TrimSpace(serviceTier))
@@ -575,6 +578,9 @@ func OpenAIServiceTierMultiplier(model, serviceTier string) float64 {
 	}
 	switch serviceTier {
 	case "ultrafast":
+		if IsOpenAIAstraModel(model) {
+			return 6.0
+		}
 		return 10.0
 	case "auto", "priority":
 		if multiplier := openAIFastModeMultiplier(model); multiplier != 1.0 {
@@ -590,12 +596,26 @@ func OpenAIServiceTierMultiplier(model, serviceTier string) float64 {
 	}
 }
 
+// IsOpenAIAstraModel identifies Astra and its dated snapshots, excluding other variants.
+func IsOpenAIAstraModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	const astra = "gpt-6-astra"
+	if model == astra {
+		return true
+	}
+	if !strings.HasPrefix(model, astra+"-") {
+		return false
+	}
+	_, err := time.Parse("2006-01-02", strings.TrimPrefix(model, astra+"-"))
+	return err == nil
+}
+
 func openAIFastModeMultiplier(model string) float64 {
 	lowerModel := strings.ToLower(model)
 	switch {
 	case strings.HasPrefix(lowerModel, "gpt-6-astra"), strings.HasPrefix(lowerModel, "gpt-5.6"), strings.HasPrefix(lowerModel, "gpt-5.5"):
 		return 2.5
-	case strings.HasPrefix(lowerModel, "gpt-6-sol"), strings.HasPrefix(lowerModel, "gpt-6-luna"):
+	case strings.HasPrefix(lowerModel, "gpt-6.1-sol"), strings.HasPrefix(lowerModel, "gpt-6-sol"), strings.HasPrefix(lowerModel, "gpt-6-luna"):
 		return 2.0
 	case strings.HasPrefix(lowerModel, "gpt-5.4"):
 		return 2.0

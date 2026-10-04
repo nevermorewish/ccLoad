@@ -26,6 +26,38 @@ func assertClassifyError(t *testing.T, err error, wantStatus int, wantLevel Erro
 
 }
 
+func TestClassifyXAIFreeUsageScope(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{429, 403, StatusSSEError} {
+		for _, tc := range []struct {
+			name  string
+			body  string
+			model string
+		}{
+			{"account", `{"code":"subscription:free-usage-exhausted","error":"You've used all the included free usage for now."}`, ""},
+			{"named model", `{"code":"subscription:free-usage-exhausted","error":"You've used all the included free usage for model grok-4.6 for now."}`, "grok-4.6"},
+			{"structured model", `{"error":{"code":"subscription:free-usage-exhausted","message":"Included free usage exhausted","model":"grok-4.7","reset_seconds":3600}}`, "grok-4.7"},
+		} {
+			t.Run(fmt.Sprintf("%d/%s", status, tc.name), func(t *testing.T) {
+				before := time.Now()
+				got := ClassifyHTTPResponseWithMeta(status, nil, []byte(tc.body))
+				if tc.model == "" {
+					if got.ModelScoped || !got.CredentialScoped || got.Level != ErrorLevelKey || !got.HasKeyCooldownUntil {
+						t.Fatalf("account quota classification=%+v", got)
+					}
+				} else {
+					if !got.ModelScoped || got.CredentialScoped || got.Model != tc.model || !got.HasModelCooldownUntil {
+						t.Fatalf("model quota classification=%+v", got)
+					}
+					if tc.name == "structured model" && (got.ModelCooldownUntil.Before(before.Add(time.Hour-time.Second)) || got.ModelCooldownUntil.After(before.Add(time.Hour+time.Second))) {
+						t.Fatalf("exact reset lost: %v", got.ModelCooldownUntil)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestClassifyHTTPResponse(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -1129,6 +1161,16 @@ func TestClassifySSEError(t *testing.T) {
 				t.Errorf("%s: ModelScoped=%v, want %v", tt.name, classification.ModelScoped, wantModelScoped)
 			}
 		})
+	}
+}
+
+// Codex WS 错误事件经 597 分类时，模型不可用只冷却当前模型；OAuth 渠道无独立 Key，
+// 若按普通 Key 级处理会冷却整个渠道。
+func TestClassifySSEErrorModelUnavailableIsModelScoped(t *testing.T) {
+	body := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}}`)
+	classification := ClassifyHTTPResponseWithMeta(StatusSSEError, nil, body)
+	if classification.Level != ErrorLevelKey || !classification.ModelScoped {
+		t.Fatalf("classification=%+v, want Key level and model scoped", classification)
 	}
 }
 

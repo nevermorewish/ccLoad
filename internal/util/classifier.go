@@ -52,6 +52,8 @@ var retryAfterSecondsRegex = regexp.MustCompile(`(?i)\bretry\s+after\s+([0-9]+)\
 // rollingFreeAllowanceResetRegex 匹配 Token Harbor 免费额度的下一个滚动周期起点。
 var rollingFreeAllowanceResetRegex = regexp.MustCompile(`(?i)\bnext\s+rolling\s+7-day\s+period\s+starts\s+at\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\b`)
 
+var xaiFreeUsageModelRegex = regexp.MustCompile(`(?i)\bfor\s+model\s+["\x60']?([a-z0-9][a-z0-9._/-]*)`)
+
 // globalFixedWindowRetryClockRegex 匹配“请在 今天 12:00 后再试”这类全站固定窗口限额文案。
 var globalFixedWindowRetryClockRegex = regexp.MustCompile(`(今天|明天)\s*(\d{1,2})\s*[:：]\s*(\d{1,2})`)
 
@@ -426,6 +428,26 @@ func classifyHTTPResponseWithMetaAt(statusCode int, headers map[string][]string,
 				Level: level,
 				Model: strings.TrimSpace(quotaErr.model),
 			}
+			if reason == "XAI_FREE_USAGE_EXHAUSTED" {
+				if classification.Model == "" {
+					if match := xaiFreeUsageModelRegex.FindStringSubmatch(quotaErr.message); len(match) == 2 {
+						classification.Model = strings.TrimRight(match[1], ".")
+					}
+				}
+				if classification.Model != "" {
+					classification.ModelScoped = true
+					classification.ModelCooldownUntil = cooldownUntil
+					classification.HasModelCooldownUntil = true
+					classification.ModelCooldownReason = reason
+				} else {
+					classification.Level = ErrorLevelKey
+					classification.CredentialScoped = true
+					classification.KeyCooldownUntil = cooldownUntil
+					classification.HasKeyCooldownUntil = true
+					classification.KeyCooldownReason = reason
+				}
+				return classification
+			}
 			if reason == "model_cooldown" || reason == codexUsageFrequencyLimitReason || reason == "INFERENCE_CAP_ERROR" {
 				classification.ModelScoped = true
 				classification.ModelCooldownReason = reason
@@ -466,12 +488,14 @@ func classifyHTTPResponseWithMetaAt(statusCode int, headers map[string][]string,
 	// [INFO] 597 SSE error事件：解析实际错误类型动态判断级别
 	// SSE error JSON格式: {"type":"error","error":{"type":"api_error","message":"上游API返回错误: 500"}}
 	// 服务类错误切换渠道但只冷却当前模型；认证/限流类错误仍冷却 Key。
+	// 模型不可用（如 Codex WS 错误事件 "model is not supported"）与 HTTP 400 同口径：只冷却当前模型。
 	if statusCode == StatusSSEError {
 		level, matched := classifySSEError(responseBody)
 		return HTTPResponseClassification{
 			Level:           level,
 			DefaultFallback: !matched,
-			ModelScoped:     level == ErrorLevelChannel,
+			ModelScoped: level == ErrorLevelChannel ||
+				(level == ErrorLevelKey && isModelUnavailableResponse(responseBody)),
 		}
 	}
 
@@ -581,7 +605,7 @@ func classifyHTTPResponseWithMetaAt(statusCode int, headers map[string][]string,
 	// 仅分析401和403错误,其他状态码使用标准分类器
 	if statusCode != 401 && statusCode != 403 {
 		_, knownStatus := statusCodeMetaMap[statusCode]
-		return HTTPResponseClassification{Level: ClassifyHTTPStatus(statusCode), DefaultFallback: !knownStatus || IsModelScopedHTTPStatus(statusCode)}
+		return HTTPResponseClassification{Level: ClassifyHTTPStatus(statusCode), DefaultFallback: !knownStatus}
 	}
 
 	// 401/403错误:分析响应体内容
@@ -913,8 +937,11 @@ func parseStructuredQuotaCooldown(quotaErr structuredQuotaError, now time.Time) 
 	case strings.Contains(code, "FREE-USAGE-EXHAUSTED") ||
 		strings.Contains(messageUpper, "FREE-USAGE-EXHAUSTED") ||
 		strings.Contains(messageUpper, "INCLUDED FREE USAGE"):
-		// xAI 不提供精确 reset 时间，只承诺滚动 24 小时窗口。账户级
-		// 429 在分类出口会收窄为当前模型，避免误伤同渠道其他模型。
+		if until, ok := parseStructuredCooldownUntil(quotaErr, now); ok {
+			return until, "XAI_FREE_USAGE_EXHAUSTED", ErrorLevelChannel, true
+		}
+		// 没有精确 reset 时沿用滚动 24 小时窗口；分类出口按上游是否
+		// 明确命名模型区分模型额度和整个凭证的共享额度。
 		return now.Add(xaiFreeUsageExhaustedCooldown), "XAI_FREE_USAGE_EXHAUSTED", ErrorLevelChannel, true
 	case code == "API_KEY_QUOTA_EXHAUSTED":
 		return now.Add(30 * time.Minute), "API_KEY_QUOTA_EXHAUSTED", ErrorLevelKey, true

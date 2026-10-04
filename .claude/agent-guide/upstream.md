@@ -1,5 +1,14 @@
 # 上游提供商契约
 
+## ccLoad 上游同步记录（2026-10-04）
+
+- 上游仓库：`https://github.com/caidaoli/ccLoad.git`
+- 上游分支/版本：`master` / `v4.10.31-beta.1`
+- 上游提交：`d907bb214c7c52210042296b803b87f321f77b5b`
+- 本次整合：同步后端应用、OAuth 配额账本、Anthropic 额度重置、xAI/Antigravity/代理修复、Codex 模型清单与 SSE 处理、数据库迁移及测试改进。
+- 本地保留：React + TypeScript 前端、`web/default` 构建链、渠道监控页面与 `internal/*channel_monitor*` 实现。上游旧静态 HTML/bundle 未覆盖本地入口。
+- 协议核心：CLIProxy 转换核心未在本次整合中覆盖，继续以 `internal/protocol/cliproxy/UPSTREAM.md` 的原子同步基线为准，待单独完成 core/provider 审计后再更新。
+
 只读取本次涉及的提供商章节。通用协议转换见 [protocol.md](protocol.md)，故障切换及 OAuth 凭证终态禁用见 [proxy.md](proxy.md)，配额累计见 [billing.md](billing.md)。省略目录的 app 文件位于 `internal/app/`；文中的渠道禁用、连接轮换等跨专题机制按这些链接查阅。
 
 审查或修改 wire 形态、指纹、签名及发送前处理时，先读该节记录的参照上游固定提交（如"对照来源"）中的对应实现，列出其完整分支表后再与本地比对，不凭推理判定"方向错误"。本地的典型偏差是只移植了命中当前场景的分支。

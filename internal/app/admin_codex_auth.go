@@ -34,6 +34,7 @@ const (
 // 导入凭证和模型获取必须共享这一份 Codex 模型目录，并按订阅计划过滤。
 var codexOAuthDefaultModels = []string{
 	"gpt-6-astra",
+	"gpt-6.1-sol",
 	"gpt-6-sol",
 	"gpt-6-luna",
 	"gpt-5.6-sol",
@@ -51,6 +52,7 @@ var codexOAuthDefaultModels = []string{
 var codexOAuthExcludedModelsByPlan = map[string]map[string]struct{}{
 	"free": {
 		"gpt-6-astra": {},
+		"gpt-6.1-sol": {},
 		"gpt-6-sol":   {},
 		"gpt-5.6-sol": {},
 	},
@@ -767,27 +769,14 @@ func newCodexOAuthChannel(name, credentialJSON, planType string) *model.Config {
 	}
 }
 
-func codexOAuthPlanTier(planType string) string {
-	switch strings.ToLower(strings.TrimSpace(planType)) {
-	case "free":
-		return "free"
-	case "team", "business", "go", "self_serve_business_prolite":
-		return "team"
-	case "plus":
-		return "plus"
-	case "pro":
-		return "pro"
-	default:
-		return "pro"
-	}
-}
-
 func codexOAuthModelAllowed(name, planType string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" || name == "*" {
 		return false
 	}
-	excluded := codexOAuthExcludedModelsByPlan[codexOAuthPlanTier(planType)]
+	// Only explicitly restricted plans alter the fallback catalog. Preserve SKU
+	// identity: an unknown or newly introduced plan is not a Pro subscription.
+	excluded := codexOAuthExcludedModelsByPlan[strings.ToLower(strings.TrimSpace(planType))]
 	for _, supported := range codexOAuthDefaultModels {
 		if name == supported {
 			_, blocked := excluded[name]

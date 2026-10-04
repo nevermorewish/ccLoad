@@ -96,6 +96,7 @@ func TestCodeBuddySystemSensitiveWordsOnWire(t *testing.T) {
 }
 
 func TestCodeBuddyAdminWireAndTemplateCompatibility(t *testing.T) {
+	t.Parallel()
 	for _, effort := range []string{"", "low", "none", "high"} {
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("effort=%s/stream=%v", effort, stream), func(t *testing.T) {
@@ -304,6 +305,7 @@ func createCursorOAuthChannelForAdminTest(t testing.TB, srv *Server, upstreamURL
 }
 
 func TestOAuthCredentialCleanupQueueUsesPriorityThenChannelName(t *testing.T) {
+	t.Parallel()
 	arrivals := make(chan string, 10)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -428,6 +430,7 @@ func TestOAuthCredentialCleanupQueueUsesPriorityThenChannelName(t *testing.T) {
 }
 
 func TestOAuthCredentialCleanupRunsConcurrentlyAndDeletesOnlyRefreshFailures(t *testing.T) {
+	t.Parallel()
 	var inFlight atomic.Int32
 	var maxInFlight atomic.Int32
 	var healthyArrivals atomic.Int32
@@ -787,6 +790,7 @@ func TestOAuthCredentialCleanupRunsConcurrentlyAndDeletesOnlyRefreshFailures(t *
 }
 
 func TestOAuthCredentialCleanupCancelDuringRefreshKeepsChannel(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -917,6 +921,7 @@ func TestOAuthCredentialCleanupCancelDuringRefreshKeepsChannel(t *testing.T) {
 }
 
 func TestOAuthCredentialCleanupDisablesRejectedPersonalAccessTokenByDefault(t *testing.T) {
+	t.Parallel()
 	var upstreamAttempts atomic.Int32
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamAttempts.Add(1)
@@ -1019,6 +1024,7 @@ func TestOAuthCredentialCleanupDisablesRejectedPersonalAccessTokenByDefault(t *t
 }
 
 func TestOAuthCredentialCleanupConcurrentEditKeepsCurrentChannel(t *testing.T) {
+	t.Parallel()
 	requestStarted := make(chan struct{})
 	releaseRequest := make(chan struct{})
 	var startedOnce sync.Once
@@ -1129,6 +1135,7 @@ func TestOAuthCredentialCleanupConcurrentEditKeepsCurrentChannel(t *testing.T) {
 }
 
 func TestOAuthCredentialRefreshTrackerOwnsDetachedRefreshLifetime(t *testing.T) {
+	t.Parallel()
 	_, cancelParent := context.WithCancel(context.Background())
 	tracker := newOAuthCredentialRefreshTracker()
 	trackedCtx, done, err := tracker.begin()
@@ -1197,6 +1204,7 @@ func TestOAuthCredentialRefreshTrackerOwnsDetachedRefreshLifetime(t *testing.T) 
 }
 
 func TestOAuthDetectionPersistsUsageAndCost(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"manual", "manual-stream", "chat-stream", "scheduled"} {
 		t.Run(mode, func(t *testing.T) {
 			resetAt := time.Now().Add(time.Hour).Unix()
@@ -1252,7 +1260,7 @@ func TestOAuthDetectionPersistsUsageAndCost(t *testing.T) {
 				if credential.QuotaCostUsage == nil || len(credential.QuotaCostUsage.Windows) != 1 {
 					t.Fatalf("missing cost window: %+v", credential.QuotaCostUsage)
 				}
-				cost := credential.QuotaCostUsage.Windows[0].StandardCostMicroUSD
+				cost := quotaCostViewAt(t, srv.store, cfg.ID, time.Now()).FindWindow(credential.QuotaCostUsage.Windows[0].Key).StandardCostMicroUSD
 				if cost <= 0 || (i == 1 && cost != 2*previousCost) {
 					t.Fatalf("cost=%d previous=%d", cost, previousCost)
 				}
@@ -1263,6 +1271,7 @@ func TestOAuthDetectionPersistsUsageAndCost(t *testing.T) {
 }
 
 func TestAnthropicOAuthChannelTestDecodesAdvertisedCompression(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		var compressed bytes.Buffer
 		writer := gzip.NewWriter(&compressed)
@@ -1287,6 +1296,7 @@ func TestAnthropicOAuthChannelTestDecodesAdvertisedCompression(t *testing.T) {
 
 // TestHandleChannelTest 测试渠道测试功能
 func TestHandleChannelTest(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		channelID      string
@@ -1372,6 +1382,7 @@ func TestHandleChannelTest(t *testing.T) {
 }
 
 func TestChannelTestCodexRepairsMalformedFramesAndStopsAfterResponseCompleted(t *testing.T) {
+	t.Parallel()
 	streamBody := []byte("\xef\xbb\xbf : ping\nevent: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"created_at\":1784768634,\"model\":\"gpt-5.6-sol\"}}\n" +
 		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n" +
 		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1784768634,\"model\":\"gpt-5.6-sol\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n")
@@ -1428,6 +1439,7 @@ func TestChannelTestCodexRepairsMalformedFramesAndStopsAfterResponseCompleted(t 
 }
 
 func TestChannelTestCodexUsesNativeWebsocketWhenEnabled(t *testing.T) {
+	t.Parallel()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !websocket.IsWebSocketUpgrade(r) {
@@ -1529,6 +1541,7 @@ func TestChannelTestCodexUsesNativeWebsocketWhenEnabled(t *testing.T) {
 }
 
 func TestChannelTestCodexDoesNotHideRejectedWebsocketHandshake(t *testing.T) {
+	t.Parallel()
 	var httpFallbacks atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if websocket.IsWebSocketUpgrade(r) {
@@ -1570,6 +1583,7 @@ func TestChannelTestCodexDoesNotHideRejectedWebsocketHandshake(t *testing.T) {
 }
 
 func TestHandleChannelWebsocketProbeDetectsSupportedUpstream(t *testing.T) {
+	t.Parallel()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !websocket.IsWebSocketUpgrade(r) {
@@ -1627,6 +1641,7 @@ func TestHandleChannelWebsocketProbeDetectsSupportedUpstream(t *testing.T) {
 }
 
 func TestHandleChannelWebsocketProbeRejectsUnsupportedUpstreamWithoutHTTPFallback(t *testing.T) {
+	t.Parallel()
 	var httpFallbacks atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if websocket.IsWebSocketUpgrade(r) {
@@ -1665,6 +1680,7 @@ func TestHandleChannelWebsocketProbeRejectsUnsupportedUpstreamWithoutHTTPFallbac
 }
 
 func TestTestChannelAPI_MultiURL5xxDoesNotFallbackOrCooldownURL(t *testing.T) {
+	t.Parallel()
 	failCalls := 0
 	okCalls := 0
 
@@ -1719,6 +1735,7 @@ func TestTestChannelAPI_MultiURL5xxDoesNotFallbackOrCooldownURL(t *testing.T) {
 }
 
 func TestTestChannelAPI_MultiURLStreamFailureDoesNotFallbackOrCooldownURL(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		wantStatus       int
@@ -1824,6 +1841,7 @@ func TestTestChannelAPI_MultiURLStreamFailureDoesNotFallbackOrCooldownURL(t *tes
 }
 
 func TestExecuteChannelTestWithCooldown_RespectsRPMLimitWithoutCooldown(t *testing.T) {
+	t.Parallel()
 	hits := 0
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
@@ -1875,6 +1893,7 @@ func TestExecuteChannelTestWithCooldown_RespectsRPMLimitWithoutCooldown(t *testi
 }
 
 func TestExecuteChannelTestWithCooldown_ModelCooldownUsesSentModelKey(t *testing.T) {
+	t.Parallel()
 	const sentModel = "model-b"
 
 	var upstreamModel string
@@ -1934,6 +1953,7 @@ func TestExecuteChannelTestWithCooldown_ModelCooldownUsesSentModelKey(t *testing
 }
 
 func TestTestChannelAPI_MultiURLPlainText502DoesNotFallback(t *testing.T) {
+	t.Parallel()
 	failCalls := 0
 	okCalls := 0
 
@@ -1987,6 +2007,7 @@ func TestTestChannelAPI_MultiURLPlainText502DoesNotFallback(t *testing.T) {
 }
 
 func TestTestChannelAPI_NonStreamUsesConfiguredTimeout(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
@@ -2034,6 +2055,7 @@ func TestTestChannelAPI_NonStreamUsesConfiguredTimeout(t *testing.T) {
 }
 
 func TestTestChannelAPI_StreamFirstValidContentTimeoutIgnoresHeartbeats(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -2098,6 +2120,7 @@ func TestTestChannelAPI_StreamFirstValidContentTimeoutIgnoresHeartbeats(t *testi
 }
 
 func TestTestChannelAPI_ResponsesMetadataDoesNotStopFirstContentTimeout(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -2143,6 +2166,7 @@ func TestTestChannelAPI_ResponsesMetadataDoesNotStopFirstContentTimeout(t *testi
 }
 
 func TestTestChannelAPI_StreamFirstValidContentTimeoutEOFReturns598(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	srv.firstByteTimeout = 10 * time.Millisecond
 	srv.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -2193,6 +2217,7 @@ func (b *heartbeatThenContextEOFBody) Close() error {
 }
 
 func TestHandleChannelTest_InvalidRequestDoesNotLeakDecoderError(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 
 	c, w := newTestContext(t, newJSONRequestBytes(http.MethodPost, "/admin/channels/1/test", []byte(`{"model":123,"client_protocol":"anthropic"}`)))
@@ -2213,6 +2238,7 @@ func TestHandleChannelTest_InvalidRequestDoesNotLeakDecoderError(t *testing.T) {
 }
 
 func TestHandleChannelTest_RejectsBaseURL(t *testing.T) {
+	t.Parallel()
 	failCalls := 0
 	failUpstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		failCalls++
@@ -2270,6 +2296,7 @@ func TestHandleChannelTest_RejectsBaseURL(t *testing.T) {
 }
 
 func TestHandleChannelURLTest_UsesForcedURL(t *testing.T) {
+	t.Parallel()
 	failCalls := 0
 	failUpstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		failCalls++
@@ -2339,6 +2366,7 @@ func TestHandleChannelURLTest_UsesForcedURL(t *testing.T) {
 
 // TestHandleChannelTest_NoAPIKey 渠道存在但无 API key
 func TestHandleChannelTest_NoAPIKey(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	ctx := context.Background()
 
@@ -2389,6 +2417,7 @@ func TestHandleChannelTest_NoAPIKey(t *testing.T) {
 }
 
 func TestHandleChannelTest_CodexOAuthWithoutAPIKey(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer at-admin-test" {
 			t.Errorf("Authorization = %q", got)
@@ -2455,6 +2484,7 @@ func TestHandleChannelTest_CodexOAuthWithoutAPIKey(t *testing.T) {
 }
 
 func TestHandleChannelTest_CodexOAuthWithoutQuotaHeadersLeavesUsageEmpty(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
@@ -2486,6 +2516,7 @@ func TestHandleChannelTest_CodexOAuthWithoutQuotaHeadersLeavesUsageEmpty(t *test
 }
 
 func TestHandleChannelTest_CodexOAuthPersistsQuotaFromSSE(t *testing.T) {
+	t.Parallel()
 	const rateLimitEvent = `{"type":"codex.rate_limits","plan_type":"pro","rate_limits":{"allowed":true,"limit_reached":false,"primary":{"used_percent":10,"window_minutes":10080,"reset_after_seconds":571277,"reset_at":1786851417},"secondary":null},"code_review_rate_limits":null,"additional_rate_limits":{"GPT-5.3-Codex-Spark":{"allowed":true,"limit_reached":false,"primary":{"used_percent":0,"window_minutes":10080,"reset_after_seconds":604800,"reset_at":1786884940},"secondary":null}},"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"promo":null}`
 	resetAt := time.Now().Add(24 * time.Hour).Unix()
 	currentRateLimitEvent := strings.NewReplacer("1786851417", strconv.FormatInt(resetAt, 10), "1786884940", strconv.FormatInt(resetAt, 10)).Replace(rateLimitEvent)
@@ -2532,10 +2563,14 @@ func TestHandleChannelTest_CodexOAuthPersistsQuotaFromSSE(t *testing.T) {
 		t.Fatalf("missing cost windows: %+v", credential.QuotaCostUsage)
 	}
 	for _, window := range credential.QuotaCostUsage.Windows {
-		if window.Family == oauthcost.FamilyCodex && window.StandardCostMicroUSD <= 0 {
+		cost := quotaCostViewAt(t, srv.store, created.ID, time.Now()).FindWindow(window.Key)
+		if cost == nil {
+			t.Fatalf("missing cost view for %s", window.Key)
+		}
+		if window.Family == oauthcost.FamilyCodex && cost.StandardCostMicroUSD <= 0 {
 			t.Fatalf("first detection cost was lost: %+v", window)
 		}
-		if window.Family == oauthcost.FamilySpark && window.StandardCostMicroUSD != 0 {
+		if window.Family == oauthcost.FamilySpark && cost.StandardCostMicroUSD != 0 {
 			t.Fatalf("non-Spark detection charged Spark window: %+v", window)
 		}
 	}
@@ -2553,6 +2588,7 @@ func TestHandleChannelTest_CodexOAuthPersistsQuotaFromSSE(t *testing.T) {
 }
 
 func TestHandleChannelTest_CodexReserveAliasPreservesQuotaCost(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, active, group, transport string
 		weeklySecondary                bool
@@ -2651,12 +2687,15 @@ func TestHandleChannelTest_CodexReserveAliasPreservesQuotaCost(t *testing.T) {
 					t.Fatal(err)
 				}
 				main := oauthcost.Find(credential.QuotaCostUsage, "codex|"+mainKind)
-				if main == nil || main.StandardCostMicroUSD <= lastCost || main.CountFromAt != 0 || main.ResetAt != mainReset || main.SampledUpstreamUsedPercent == nil || *main.SampledUpstreamUsedPercent != 50 {
+				view := quotaCostViewAt(t, srv.store, created.ID, time.Now())
+				mainCost := view.FindWindow("codex|" + mainKind)
+				if main == nil || mainCost == nil || mainCost.StandardCostMicroUSD <= lastCost || main.CountFromAt != 0 || main.ResetAt != mainReset || main.SampledUpstreamUsedPercent == nil || *main.SampledUpstreamUsedPercent != 50 {
 					t.Fatalf("unexpected main quota after detection %d: %+v; previous cost=%d", attempt, main, lastCost)
 				}
-				lastCost = main.StandardCostMicroUSD
+				lastCost = mainCost.StandardCostMicroUSD
 				reserve := oauthcost.Find(credential.QuotaCostUsage, "gpt-reserve|primary")
-				if reserve == nil || reserve.StandardCostMicroUSD != 0 || reserve.ResetAt != reserveReset || reserve.SampledUpstreamUsedPercent == nil || *reserve.SampledUpstreamUsedPercent != wantReserveUsed {
+				reserveCost := view.FindWindow("gpt-reserve|primary")
+				if reserve == nil || reserveCost == nil || reserveCost.StandardCostMicroUSD != 0 || reserve.ResetAt != reserveReset || reserve.SampledUpstreamUsedPercent == nil || *reserve.SampledUpstreamUsedPercent != wantReserveUsed {
 					t.Fatalf("reserve quota = %+v, want used=%g reset=%d", reserve, wantReserveUsed, reserveReset)
 				}
 				if tc.transport == "sse" && credential.PassiveUsage != nil {
@@ -2672,6 +2711,7 @@ func TestHandleChannelTest_CodexReserveAliasPreservesQuotaCost(t *testing.T) {
 }
 
 func TestHandleChannelTest_AntigravityOAuthWithoutAPIKey(t *testing.T) {
+	t.Parallel()
 	var upstreamBody []byte
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1internal:generateContent" || r.URL.RawQuery != "" ||
@@ -2713,6 +2753,7 @@ func TestHandleChannelTest_AntigravityOAuthWithoutAPIKey(t *testing.T) {
 }
 
 func TestHandleChannelTest_AntigravityCapacityUsesProviderFallbackPolicy(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var baseURLs []string
 	var requestTimes []time.Time
@@ -2777,6 +2818,7 @@ func TestHandleChannelTest_AntigravityCapacityUsesProviderFallbackPolicy(t *test
 }
 
 func TestHandleChannelTest_AntigravityCapacityExhaustionAppliesCooldownOnce(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	client := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		calls.Add(1)
@@ -2818,7 +2860,58 @@ func TestHandleChannelTest_AntigravityCapacityExhaustionAppliesCooldownOnce(t *t
 	}
 }
 
+func TestHandleChannelTest_AntigravityNotFoundCoolsModelNotChannel(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{model.ProtocolTransformModeLocal, model.ProtocolTransformModeAuto, model.ProtocolTransformModeUpstream} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND"}}`)
+			}))
+			t.Cleanup(upstream.Close)
+
+			srv := newInMemoryServer(t)
+			srv.antigravityClient = upstream.Client()
+			created := createAntigravityOAuthChannelForAdminTest(t, srv, upstream.URL)
+			created.ProtocolTransformMode = mode
+			created.ModelEntries = append(created.ModelEntries, model.ModelEntry{Model: "gemini-other"})
+			ctx := context.Background()
+			if _, err := srv.store.UpdateConfig(ctx, created.ID, created); err != nil {
+				t.Fatal(err)
+			}
+			channelID := fmt.Sprintf("%d", created.ID)
+			c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/"+channelID+"/test", map[string]any{
+				"model": "gemini-3-flash", "client_protocol": "gemini", "stream": false, "content": "hello",
+			}))
+			c.Params = gin.Params{{Key: "id", Value: channelID}}
+			srv.HandleChannelTest(c)
+
+			resp := mustParseAPIResponse[map[string]any](t, w.Body.Bytes())
+			if got, _ := resp.Data["cooldown_action"].(string); got != "model_cooldown_applied" {
+				t.Fatalf("cooldown_action=%q data=%+v", got, resp.Data)
+			}
+			cooldowns, err := srv.store.GetAllModelCooldowns(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if until, ok := cooldowns[created.ID]["gemini-3-flash"]; !ok || !until.After(time.Now()) || len(cooldowns[created.ID]) != 1 {
+				t.Fatalf("model cooldowns=%v, want only gemini-3-flash", cooldowns[created.ID])
+			}
+			stored, err := srv.store.GetConfig(ctx, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if time.Unix(stored.CooldownUntil, 0).After(time.Now()) {
+				t.Fatalf("channel cooled until %d, want model-only cooldown", stored.CooldownUntil)
+			}
+		})
+	}
+}
+
 func TestHandleChannelTest_AntigravityCustomURLDoesNotExpandCapacityFallback(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
@@ -2857,6 +2950,7 @@ func TestHandleChannelTest_AntigravityCustomURLDoesNotExpandCapacityFallback(t *
 }
 
 func TestHandleChannelTest_AntigravityGlobalOverrideDoesNotExpandCapacityFallback(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
@@ -2888,6 +2982,7 @@ func TestHandleChannelTest_AntigravityGlobalOverrideDoesNotExpandCapacityFallbac
 }
 
 func TestHandleChannelTest_XAIOAuthWithoutAPIKeyUsesProviderWire(t *testing.T) {
+	t.Parallel()
 	var upstreamBody []byte
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" {
@@ -2949,6 +3044,7 @@ func TestHandleChannelTest_XAIOAuthWithoutAPIKeyUsesProviderWire(t *testing.T) {
 }
 
 func TestHandleChannelURLTest_XAIOAuthAllowsVersionedBaseURL(t *testing.T) {
+	t.Parallel()
 	requests := 0
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -2984,6 +3080,7 @@ func TestHandleChannelURLTest_XAIOAuthAllowsVersionedBaseURL(t *testing.T) {
 }
 
 func TestHandleChannelTest_XAIOAuthUsesCurrentAccessTokenBeforeRefreshing(t *testing.T) {
+	t.Parallel()
 	callTest := func(t *testing.T, srv *Server, channelID int64) APIResponse[map[string]any] {
 		t.Helper()
 		id := fmt.Sprintf("%d", channelID)
@@ -3109,6 +3206,7 @@ func TestHandleChannelTest_XAIOAuthUsesCurrentAccessTokenBeforeRefreshing(t *tes
 }
 
 func TestHandleChannelTest_CodexOAuthUsageLimitCoolsModel(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -3156,6 +3254,7 @@ func TestHandleChannelTest_CodexOAuthUsageLimitCoolsModel(t *testing.T) {
 }
 
 func TestHandleChannelTest_CodexOAuthTransformsOpenAIWithoutSSEContentType(t *testing.T) {
+	t.Parallel()
 	var upstreamBody []byte
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/backend-api/codex/responses" {
@@ -3210,6 +3309,7 @@ func TestHandleChannelTest_CodexOAuthTransformsOpenAIWithoutSSEContentType(t *te
 }
 
 func TestHandleChannelTest_CodexOAuthForcesStreamingUpstreamForNonStreamTest(t *testing.T) {
+	t.Parallel()
 	var upstreamBody []byte
 	var upstreamAccept string
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3257,6 +3357,7 @@ func TestHandleChannelTest_CodexOAuthForcesStreamingUpstreamForNonStreamTest(t *
 
 // TestHandleChannelTest_UnsupportedModel 渠道存在、有 Key，但模型不支持
 func TestHandleChannelTest_UnsupportedModel(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	ctx := context.Background()
 
@@ -3303,6 +3404,7 @@ func TestHandleChannelTest_UnsupportedModel(t *testing.T) {
 }
 
 func TestHandleChannelTest_AllowsDisabledConfiguredModel(t *testing.T) {
+	t.Parallel()
 	var gotPath string
 	var gotModel string
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3375,6 +3477,7 @@ func TestHandleChannelTest_AllowsDisabledConfiguredModel(t *testing.T) {
 }
 
 func TestHandleChannelTest_RejectsMissingClientProtocol(t *testing.T) {
+	t.Parallel()
 	var gotPath string
 
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3420,6 +3523,7 @@ func TestHandleChannelTest_RejectsMissingClientProtocol(t *testing.T) {
 }
 
 func TestHandleChannelTest_RejectsUnknownClientProtocol(t *testing.T) {
+	t.Parallel()
 	failCalls := 0
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		failCalls++
@@ -3463,6 +3567,7 @@ func TestHandleChannelTest_RejectsUnknownClientProtocol(t *testing.T) {
 }
 
 func TestHandleChannelTest_UsesSelectedOpenAIProtocol(t *testing.T) {
+	t.Parallel()
 	var gotPath string
 	var gotBody string
 
@@ -3540,6 +3645,7 @@ func TestHandleChannelTest_UsesSelectedOpenAIProtocol(t *testing.T) {
 }
 
 func TestHandleChannelTest_UsesSelectedCodexProtocolWithBasePathPrefix(t *testing.T) {
+	t.Parallel()
 	var gotPath string
 	var gotBody string
 	var gotHeaders http.Header
@@ -3645,6 +3751,7 @@ func TestHandleChannelTest_UsesSelectedCodexProtocolWithBasePathPrefix(t *testin
 }
 
 func TestHandleChannelTest_UsesSelectedProtocolEndpoint(t *testing.T) {
+	t.Parallel()
 	var gotPaths []string
 	var gotBodies [][]byte
 
@@ -3746,6 +3853,7 @@ func TestHandleChannelTest_UsesSelectedProtocolEndpoint(t *testing.T) {
 }
 
 func TestHandleChannelTest_AutoModePrioritizesAutomaticURLBeforeDeclaredConversion(t *testing.T) {
+	t.Parallel()
 	var automaticHits atomic.Int64
 	automatic := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		automaticHits.Add(1)
@@ -3815,6 +3923,7 @@ func TestHandleChannelTest_AutoModePrioritizesAutomaticURLBeforeDeclaredConversi
 }
 
 func TestHandleChannelTest_AutoFallsBackOnNonModelDeployment404(t *testing.T) {
+	t.Parallel()
 	var gotPaths []string
 	var gotBodies [][]byte
 
@@ -3884,6 +3993,7 @@ func TestHandleChannelTest_AutoFallsBackOnNonModelDeployment404(t *testing.T) {
 }
 
 func TestHandleChannelTest_AutoFallsBackOnCloudflareBlockPage(t *testing.T) {
+	t.Parallel()
 	var gotPaths []string
 	var gotBodies [][]byte
 
@@ -3984,6 +4094,7 @@ func TestHandleChannelTest_AutoFallsBackOnCloudflareBlockPage(t *testing.T) {
 }
 
 func TestHandleChannelTest_AutoFallsBackOnUnsupportedAnthropicBeta(t *testing.T) {
+	t.Parallel()
 	var gotPaths []string
 
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4045,6 +4156,7 @@ func TestHandleChannelTest_AutoFallsBackOnUnsupportedAnthropicBeta(t *testing.T)
 }
 
 func TestHandleChannelTest_AutoFallsBackOnResponsesModelNotSupported(t *testing.T) {
+	t.Parallel()
 	var gotPaths []string
 
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4107,6 +4219,7 @@ func TestHandleChannelTest_AutoFallsBackOnResponsesModelNotSupported(t *testing.
 }
 
 func TestHandleChannelTest_AutoTriesClientThenFallbackProtocols(t *testing.T) {
+	t.Parallel()
 	var gotPaths []string
 	var gotBodies [][]byte
 
@@ -4188,6 +4301,7 @@ func TestHandleChannelTest_AutoTriesClientThenFallbackProtocols(t *testing.T) {
 }
 
 func TestHandleChannelTest_AutoFallsBackOnConvertRequestNotImplemented(t *testing.T) {
+	t.Parallel()
 	var gotPaths []string
 	var gotBodies [][]byte
 
@@ -4269,6 +4383,7 @@ func TestHandleChannelTest_AutoFallsBackOnConvertRequestNotImplemented(t *testin
 }
 
 func TestChannelTest_StrictProtocolTransformModes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		mode        string
@@ -4335,6 +4450,7 @@ func TestChannelTest_StrictProtocolTransformModes(t *testing.T) {
 }
 
 func TestChannelTest_LocalModeUsesDeclaredProtocolForAutomaticBackupURL(t *testing.T) {
+	t.Parallel()
 	var declaredPaths []string
 	declared := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		declaredPaths = append(declaredPaths, r.URL.Path)
@@ -4387,6 +4503,7 @@ func TestChannelTest_LocalModeUsesDeclaredProtocolForAutomaticBackupURL(t *testi
 
 // TestHandleChannelTest_SuccessfulAPI 使用 mock server 模拟成功的 API 调用
 func TestHandleChannelTest_SuccessfulAPI(t *testing.T) {
+	t.Parallel()
 	// 创建 mock 上游服务器，返回成功的 Anthropic 响应
 	mockResp := `{
 		"id": "msg_test",
@@ -4460,6 +4577,7 @@ func TestHandleChannelTest_SuccessfulAPI(t *testing.T) {
 }
 
 func TestHandleChannelTest_OpenAIRequestIncludesSessionID(t *testing.T) {
+	t.Parallel()
 	var gotSessionID string
 	var gotBody []byte
 
@@ -4534,6 +4652,7 @@ func TestHandleChannelTest_OpenAIRequestIncludesSessionID(t *testing.T) {
 
 // TestHandleChannelTest_FailedAPI 使用 mock server 模拟失败的 API 调用
 func TestHandleChannelTest_FailedAPI(t *testing.T) {
+	t.Parallel()
 	// 创建 mock 上游服务器，返回 401 错误
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -4602,6 +4721,7 @@ func TestHandleChannelTest_FailedAPI(t *testing.T) {
 }
 
 func TestHandleChannelTest_HonorsRequestedKeyIndexEvenIfCooled(t *testing.T) {
+	t.Parallel()
 	mockResp := `{
 		"id": "msg_test",
 		"type": "message",
@@ -4683,6 +4803,7 @@ func TestHandleChannelTest_HonorsRequestedKeyIndexEvenIfCooled(t *testing.T) {
 }
 
 func TestHandleChannelTest_OmittedKeyIndexSelectsModelCompatibleKey(t *testing.T) {
+	t.Parallel()
 	mockResp := `{
 		"id":"msg_test","type":"message","role":"assistant",
 		"content":[{"type":"text","text":"Hello"}],
@@ -4743,6 +4864,7 @@ func TestHandleChannelTest_OmittedKeyIndexSelectsModelCompatibleKey(t *testing.T
 // 不再静默回退到其他可用 Key（既往会调用 SelectAvailableKey）。配合 HonorsRequestedKeyIndexEvenIfCooled
 // 共同保证"显式 key_index 即真"语义。
 func TestHandleChannelTest_RejectsUnknownKeyIndex(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	ctx := context.Background()
 
@@ -4787,6 +4909,7 @@ func TestHandleChannelTest_RejectsUnknownKeyIndex(t *testing.T) {
 }
 
 func TestHandleChannelTest_UsesRequestAPIKeyWithoutTouchingSavedCooldown(t *testing.T) {
+	t.Parallel()
 	mockResp := `{
 		"id": "msg_test",
 		"type": "message",
@@ -4863,6 +4986,7 @@ func TestHandleChannelTest_UsesRequestAPIKeyWithoutTouchingSavedCooldown(t *test
 }
 
 func TestHandleChannelTest_WritesManualTestLog(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -4929,6 +5053,7 @@ func TestHandleChannelTest_WritesManualTestLog(t *testing.T) {
 }
 
 func TestHandleChannelTest_SSESoftErrorTriggersCooldown(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -5013,6 +5138,7 @@ func TestHandleChannelTest_SSESoftErrorTriggersCooldown(t *testing.T) {
 }
 
 func TestHandleChannelTest_EventStreamHeaderWithJSONBodyFallback(t *testing.T) {
+	t.Parallel()
 	// 模拟“Content-Type=event-stream，但实际返回完整JSON”场景
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -5092,6 +5218,7 @@ func TestHandleChannelTest_EventStreamHeaderWithJSONBodyFallback(t *testing.T) {
 }
 
 func TestHandleChannelTest_CodexJSONFailedResponseShouldBeFailure(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -5165,6 +5292,7 @@ func TestHandleChannelTest_CodexJSONFailedResponseShouldBeFailure(t *testing.T) 
 }
 
 func TestHandleChannelTest_StringAPIErrorShouldExposeUpstreamMessage(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -5228,6 +5356,7 @@ func TestHandleChannelTest_StringAPIErrorShouldExposeUpstreamMessage(t *testing.
 }
 
 func TestHandleChannelTest_HTMLBlockPageShouldBeFailure(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -5309,6 +5438,7 @@ func TestHandleChannelTest_HTMLBlockPageShouldBeFailure(t *testing.T) {
 }
 
 func TestShouldFallbackToNextURL_StructuredSoftErrors(t *testing.T) {
+	t.Parallel()
 	t.Run("key_level_soft_error_should_not_fallback_or_cooldown_url", func(t *testing.T) {
 		result := map[string]any{
 			"success":     false,
@@ -5351,6 +5481,7 @@ func TestShouldFallbackToNextURL_StructuredSoftErrors(t *testing.T) {
 }
 
 func TestExtractSSEErrorMessage_ResponseFailedNestedError(t *testing.T) {
+	t.Parallel()
 	obj := map[string]any{
 		"type": "response.failed",
 		"response": map[string]any{
@@ -5378,6 +5509,7 @@ func TestExtractSSEErrorMessage_ResponseFailedNestedError(t *testing.T) {
 }
 
 func TestHandleChannelImageGeneration_ForwardsImagesWireContract(t *testing.T) {
+	t.Parallel()
 	var gotMethod string
 	var gotPath string
 	var gotAuthorization string
@@ -5506,6 +5638,7 @@ func TestHandleChannelImageGeneration_ForwardsImagesWireContract(t *testing.T) {
 }
 
 func TestHandleChannelImageGeneration_RejectsUnsupportedOAuthChannel(t *testing.T) {
+	t.Parallel()
 	var upstreamCalls atomic.Int32
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		upstreamCalls.Add(1)
@@ -5540,6 +5673,7 @@ func TestHandleChannelImageGeneration_RejectsUnsupportedOAuthChannel(t *testing.
 }
 
 func TestHandleChannelImageGeneration_CodexOAuthUsesDirectImagesAPI(t *testing.T) {
+	t.Parallel()
 	var gotMethod string
 	var gotPath string
 	var gotAuthorization string
@@ -5626,6 +5760,7 @@ func TestHandleChannelImageGeneration_CodexOAuthUsesDirectImagesAPI(t *testing.T
 }
 
 func TestHandleChannelImageGeneration_CodexImage25(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		model  string
 		failed bool
@@ -5688,6 +5823,7 @@ func TestHandleChannelImageGeneration_CodexImage25(t *testing.T) {
 }
 
 func TestHandleChannelImageGeneration_AntigravityUsesChatCompletions(t *testing.T) {
+	t.Parallel()
 	var gotPath string
 	var gotAuthorization string
 	var gotAcceptEncoding string
@@ -5786,6 +5922,7 @@ func TestHandleChannelImageGeneration_AntigravityUsesChatCompletions(t *testing.
 }
 
 func TestHandleChannelImageGeneration_AntigravityNoImagePersistsDebugBody(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{
@@ -5844,6 +5981,7 @@ func TestHandleChannelImageGeneration_AntigravityNoImagePersistsDebugBody(t *tes
 }
 
 func TestHandleChannelImageGeneration_RejectsUnsupportedInterfaceOptions(t *testing.T) {
+	t.Parallel()
 	t.Run("chat completions", func(t *testing.T) {
 		srv := newInMemoryServer(t)
 		req := newJSONRequest(t, http.MethodPost, "/admin/channels/1/images/generations", map[string]any{
@@ -5879,6 +6017,7 @@ func TestHandleChannelImageGeneration_RejectsUnsupportedInterfaceOptions(t *test
 }
 
 func TestHandleChannelImageGeneration_XAIOAuthUsesNativeImagesAPI(t *testing.T) {
+	t.Parallel()
 	var gotMethod string
 	var gotPath string
 	var gotAuthorization string
@@ -6000,6 +6139,7 @@ func TestHandleChannelImageGeneration_XAIOAuthUsesNativeImagesAPI(t *testing.T) 
 }
 
 func TestHandleChannelImageGeneration_XAIOAuthGrok46UsesResponsesImageTool(t *testing.T) {
+	t.Parallel()
 	var gotPath string
 	var gotBody map[string]any
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -6078,6 +6218,7 @@ func TestHandleChannelImageGeneration_XAIOAuthGrok46UsesResponsesImageTool(t *te
 }
 
 func TestHandleChannelImageGeneration_XAIOAuthRefreshesRejectedTokenOnce(t *testing.T) {
+	t.Parallel()
 	var orderMu sync.Mutex
 	order := make([]string, 0, 3)
 	record := func(stage string) {
@@ -6179,6 +6320,7 @@ func TestHandleChannelImageGeneration_XAIOAuthRefreshesRejectedTokenOnce(t *test
 }
 
 func TestHandleChannelImageGeneration_ClientCancellationDoesNotCooldown(t *testing.T) {
+	t.Parallel()
 	requestStarted := make(chan struct{})
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		close(requestStarted)
@@ -6258,6 +6400,7 @@ func TestHandleChannelImageGeneration_ClientCancellationDoesNotCooldown(t *testi
 }
 
 func TestHandleChannelImageGeneration_ClassifiesHTTP200StructuredError(t *testing.T) {
+	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"error":{"type":"1308","message":"已达到 5 小时的使用上限。您的限额将在 2099-12-09 18:08:11 重置。"}}`)
@@ -6386,6 +6529,7 @@ func TestDownstreamEndpointPath(t *testing.T) {
 
 // 管理测试与代理链路必须发出同一套上游契约，思考后缀在两边都要落进请求体。
 func TestBuildTestUpstreamRequestPlanAppliesThinkingSuffix(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	cfg := &model.Config{
 		ID: 11, Name: "codex-test", AuthType: model.AuthTypeAPIKey,
@@ -6410,6 +6554,7 @@ func TestBuildTestUpstreamRequestPlanAppliesThinkingSuffix(t *testing.T) {
 
 // 跨协议转到 Codex 时，patch 不能用模板默认 medium 盖掉后缀。
 func TestBuildTestUpstreamRequestPlanKeepsThinkingSuffixAcrossCodexTransform(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	cfg := &model.Config{
 		ID: 12, Name: "codex-transform-test", AuthType: model.AuthTypeAPIKey,
@@ -6433,6 +6578,7 @@ func TestBuildTestUpstreamRequestPlanKeepsThinkingSuffixAcrossCodexTransform(t *
 }
 
 func TestBuildTestUpstreamRequestPlanZedHaikuDoesNotInheritCodexThinkingBudget(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	cfg := &model.Config{
 		ID: 1485, Name: "zed-haiku", AuthType: model.AuthTypeZedOAuth,
@@ -6465,6 +6611,7 @@ func TestBuildTestUpstreamRequestPlanZedHaikuDoesNotInheritCodexThinkingBudget(t
 }
 
 func TestBuildTestUpstreamRequestPlanZedPreservesThinkingBodyRule(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	cfg := &model.Config{
 		ID: 1487, Name: "zed-haiku-body-rule", AuthType: model.AuthTypeZedOAuth,
@@ -6493,6 +6640,7 @@ func TestBuildTestUpstreamRequestPlanZedPreservesThinkingBodyRule(t *testing.T) 
 }
 
 func TestBuildTestUpstreamRequestPlanZedHaikuKeepsExplicitThinkingSuffix(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	cfg := &model.Config{
 		ID: 1486, Name: "zed-haiku-suffix", AuthType: model.AuthTypeZedOAuth,
@@ -6539,6 +6687,7 @@ func TestChannelTestLogIdentityStripsThinkingSuffix(t *testing.T) {
 }
 
 func TestAdminTestZAICodingPlanEmitsZCodeWireContract(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	cfg := newZAITestChannel()
 	cfg.ModelEntries = []model.ModelEntry{{Model: "glm-4.7"}}
@@ -6581,6 +6730,7 @@ func TestAdminTestZAICodingPlanEmitsZCodeWireContract(t *testing.T) {
 }
 
 func TestAdminTestNativeAnthropicDoesNotDoubleAppendHeaderRules(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	credentialJSON, err := (&anthropicauth.Credential{
 		Type: anthropicauth.ChannelType, AccessToken: "access", RefreshToken: "refresh",
@@ -6649,6 +6799,7 @@ func TestAdminTestNativeAnthropicDoesNotDoubleAppendHeaderRules(t *testing.T) {
 }
 
 func TestAdminTestAnthropicFinalBetaMatchesRequestBody(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	credentialJSON := anthropicProxyTestCredential(t, "oauth-admin-beta")
 	const sessionID = "11111111-2222-4333-8444-555555555555"
@@ -6746,6 +6897,7 @@ func TestAdminTestCursorOAuthUsesSDKBridgeInsteadOfHTTP(t *testing.T) {
 }
 
 func TestAdminTestCursorOAuthBillsChannelModelPricing(t *testing.T) {
+	t.Parallel()
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
 			srv := newInMemoryServer(t)
@@ -6771,6 +6923,7 @@ func TestAdminTestCursorOAuthBillsChannelModelPricing(t *testing.T) {
 }
 
 func TestHandleChannelTestCursorWritesOneManualLogWithDebug(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServerWithSettings(t, map[string]string{"debug_log_enabled": "true"})
 	cfg := createCursorOAuthChannelForAdminTest(t, srv, "https://unused.example.com")
 	srv.cursorRunner = &fakeCursorRunner{text: "ok from sdk bridge"}
@@ -6844,6 +6997,7 @@ func TestAdminTestCursorOAuthReportsMissingBridge(t *testing.T) {
 }
 
 func TestAdminTestCursorRequiresUserAPIKey(t *testing.T) {
+	t.Parallel()
 	srv := newInMemoryServer(t)
 	cfg := createCursorOAuthChannelForAdminTest(t, srv, "https://example.invalid")
 	payload, err := (&cursorauth.Credential{AccessToken: "tok", Email: "user@example.com"}).JSON()

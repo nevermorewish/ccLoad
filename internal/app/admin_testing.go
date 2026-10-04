@@ -167,6 +167,7 @@ type channelTestRequestPlan struct {
 	anthropicMappedSessionID  string
 	zedWire                   *zedWirePlan
 	openCodeResponses         *openCodeResponsesPlan
+	xaiTools                  *xaiResponsesToolsPlan
 	timeout                   *channelTestTimeout
 	debugCapture              *debugCapture
 	antigravityOAuth          bool
@@ -1212,6 +1213,7 @@ func (s *Server) applyChannelTestResultCooldown(ctx context.Context, cfg *model.
 	input := httpErrorInputFromParts(cfg.ID, keyIndex, statusCode, errorBody, headers)
 	if upstreamStatusCode, ok := getResultInt(result["status_code"]); ok {
 		input.UpstreamStatusCode = upstreamStatusCode
+		input.ModelScoped = isAntigravityModelNotFound(cfg, upstreamStatusCode)
 	}
 	action := s.applyCooldownDecision(
 		ctx,
@@ -1383,7 +1385,7 @@ func (s *Server) testChannelAPIWithCooldownTarget(
 				}
 				return lastResult
 			}
-			if !isChannelTestProtocolEndpointMissing(lastResult) {
+			if !isChannelTestProtocolEndpointMissing(cfg, lastResult) {
 				break
 			}
 			capabilityExhausted = protocolIdx == len(upstreamProtocols)-1
@@ -1789,6 +1791,10 @@ func (s *Server) testChannelAPIWithURLForProtocol(
 		})
 	}
 	wrapCodexSSEResponseBody(resp, protocol.Protocol(requestPlan.upstreamProtocol), isEventStream)
+	if requestPlan.xaiOAuth {
+		prepareXAIResponsesResponse(resp, requestPlan.upstreamStreaming || isEventStream)
+		prepareXAIResponsesToolsResponse(resp, requestPlan.xaiTools, requestPlan.upstreamStreaming || isEventStream)
+	}
 	prepareOpenCodeResponsesResponse(resp, requestPlan.openCodeResponses, requestPlan.upstreamStreaming)
 
 	// 通用结果初始化
@@ -2076,8 +2082,8 @@ func (s *Server) buildTestUpstreamRequestPlan(
 		requestPlan.fullURL = buildXAIResponsesURL(selectedURL, "")
 		requestPath = downstreamEndpointPath(requestPlan.fullURL, selectedURL)
 	}
-	if isAnthropicOAuthMessagesRequest(cfgForBuild, upstreamProtocolValue, requestPath) {
-		requestPlan.fullURL = buildAnthropicOAuthURL(selectedURL, requestPath, "")
+	if isAnthropicClaudeCodeMessagesRequest(cfgForBuild, upstreamProtocolValue, requestPath) {
+		requestPlan.fullURL = buildAnthropicClaudeCodeURL(selectedURL, requestPath, "")
 	}
 	requestedStreaming := isStreamingRequest(requestPath, requestPlan.requestBody)
 	// 与代理链路一致：Anthropic CCH 签名按上游 origin 分流，最终化前必须先有 URL。
@@ -2133,6 +2139,10 @@ func (s *Server) buildTestUpstreamRequestPlan(
 	}
 	if xaiResponsesRequest {
 		requestPlan.xaiConversationID = testReq.ResolveSessionID()
+		requestPlan.requestBody, requestPlan.xaiTools, err = prepareXAIResponsesToolsRequest(requestPlan.requestBody, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("adapt xAI test tools: %w", err)
+		}
 		requestPlan.requestBody, err = finalizeXAIResponsesBody(
 			requestPlan.requestBody,
 			testReq.Model,
@@ -2948,12 +2958,12 @@ func (s *Server) applyChannelTestCapacityCooldown(
 	result["antigravity_capacity_cooldown_applied"] = true
 }
 
-func isChannelTestProtocolEndpointMissing(result map[string]any) bool {
+func isChannelTestProtocolEndpointMissing(cfg *model.Config, result map[string]any) bool {
 	if missing, _ := result["protocol_capability_missing"].(bool); missing {
 		return true
 	}
 	statusCode, ok := getResultInt(result["status_code"])
-	if !ok {
+	if !ok || isAntigravityModelNotFound(cfg, statusCode) {
 		return false
 	}
 	_, errorBody, _ := buildTestFailureClassificationInput(result)

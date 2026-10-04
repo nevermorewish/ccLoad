@@ -116,6 +116,9 @@ func translateAntigravityResponseNonStream(
 	default:
 		return nil, fmt.Errorf("unsupported Antigravity client protocol %q", clientProtocol)
 	}
+	if err := protocol.ResponseToolInputError(state); err != nil {
+		return translated, err
+	}
 	if !gjson.ValidBytes(translated) {
 		return nil, fmt.Errorf("antigravity %s response adapter produced invalid JSON", clientProtocol)
 	}
@@ -129,6 +132,10 @@ func translateAntigravityResponseStream(
 	originalRequest, translatedRequest, response []byte,
 	state *any,
 ) ([][]byte, error) {
+	if state == nil {
+		var local any
+		state = &local
+	}
 	var chunks [][]byte
 	switch clientProtocol {
 	case protocol.Anthropic:
@@ -146,7 +153,7 @@ func translateAntigravityResponseStream(
 	default:
 		return nil, fmt.Errorf("unsupported Antigravity client protocol %q", clientProtocol)
 	}
-	return frameAntigravityStreamChunks(chunks), nil
+	return frameAntigravityStreamChunks(chunks), protocol.ResponseToolInputError(*state)
 }
 
 func frameAntigravityStreamChunks(chunks [][]byte) [][]byte {
@@ -836,6 +843,14 @@ func isAntigravityModelCapacityExhausted(statusCode int, body []byte) bool {
 		}
 	}
 	return false
+}
+
+// isAntigravityModelNotFound 判断 Antigravity 的 404 是否为模型级失败。
+// 端点与 wire 协议由系统内置、模型在请求体里：base URL 回退后仍是 Google 的
+// 404 NOT_FOUND（"Requested entity was not found."），即该账号不可用此模型，
+// 既不是协议能力缺失，也不是渠道故障。
+func isAntigravityModelNotFound(cfg *model.Config, statusCode int) bool {
+	return cfg != nil && cfg.UsesAntigravityOAuth() && statusCode == http.StatusNotFound
 }
 
 func shouldFallbackAntigravityBaseURL(statusCode int, body []byte) bool {

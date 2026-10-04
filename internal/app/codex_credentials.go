@@ -339,6 +339,7 @@ func cloneCodexCredential(credential *codexauth.Credential) *codexauth.Credentia
 	clone.PassiveUsage = codexauth.ClonePassiveUsage(credential.PassiveUsage)
 	clone.OAuthUsage = append([]byte(nil), credential.OAuthUsage...)
 	clone.QuotaCostUsage = oauthcost.Clone(credential.QuotaCostUsage)
+	clone.ModelManifest = credential.ModelManifest.Clone()
 	return &clone
 }
 
@@ -419,7 +420,7 @@ func (m *codexCredentialManager) updatePassiveUsage(
 		if err != nil {
 			return false, err
 		}
-		updated, _, err := m.store.CompareAndSwapOAuthUsage(
+		updated, err := m.store.CompareAndSwapOAuthUsage(
 			ctx, currentCfg.ID, model.AuthTypeCodexOAuth, currentCfg.OAuthCredential, payload,
 		)
 		if err != nil {

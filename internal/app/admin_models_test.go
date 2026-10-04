@@ -19,6 +19,7 @@ import (
 	"ccLoad/internal/config"
 	"ccLoad/internal/model"
 	"ccLoad/internal/storage"
+	"ccLoad/internal/util"
 
 	"github.com/gin-gonic/gin"
 )
@@ -1267,6 +1268,15 @@ func TestAdminModels_HandleFetchModels_CodexOAuth(t *testing.T) {
 	server, store, cleanup := setupAdminTestServer(t)
 	defer cleanup()
 	server.channelCache = storage.NewChannelCache(store, time.Minute)
+	var manifestRequests atomic.Int32
+	server.client = &http.Client{Transport: oauthUsageRoundTripper(func(r *http.Request) (*http.Response, error) {
+		manifestRequests.Add(1)
+		if r.URL.Path != "/backend-api/codex/models" || r.URL.Query().Get("client_version") != codexauth.DefaultClientVersion ||
+			r.Header.Get("Authorization") != "Bearer "+accessToken || r.Header.Get("ChatGPT-Account-Id") != "account-models" {
+			t.Fatalf("unexpected Codex manifest request: %s, headers=%v", r.URL, r.Header)
+		}
+		return jsonResponse(r, `{"models":[{"slug":"gpt-6-astra","service_tiers":[{"id":"ultrafast","name":"Ultrafast","description":"Lowest latency; 6x Standard token pricing."}]},{"slug":"unknown-tier"},{"slug":"no-tiers","service_tiers":[]}]}`)
+	})}
 	server.codexCredentials = newCodexCredentialManager(codexauth.NewService(server.client), store, nil, nil)
 
 	credential := &codexauth.Credential{
@@ -1280,7 +1290,7 @@ func TestAdminModels_HandleFetchModels_CodexOAuth(t *testing.T) {
 	cfg, err := store.CreateConfig(context.Background(), &model.Config{
 		Name: "Codex models", AuthType: model.AuthTypeCodexOAuth, OAuthCredential: payload,
 		URLs:         model.ChannelURLs{{URL: codexUpstreamURL, Exact: true, Protocols: []string{"codex"}}},
-		ModelEntries: []model.ModelEntry{{Model: "existing-model"}}, Enabled: true,
+		ModelEntries: []model.ModelEntry{{Model: "gpt-6-astra", RedirectModel: "gpt-6-astra", Pricing: &util.CustomModelPrice{InputPrice: float64PtrForModelsTest(3), OutputPrice: float64PtrForModelsTest(5)}}}, Enabled: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1297,7 +1307,7 @@ func TestAdminModels_HandleFetchModels_CodexOAuth(t *testing.T) {
 		t.Fatalf("response leaked OAuth token: %s", w.Body.String())
 	}
 	resp := mustParseAPIResponse[FetchModelsResponse](t, w.Body.Bytes())
-	if !resp.Success || len(resp.Data.Models) == 0 || resp.Data.Protocol != "codex" || resp.Data.Source != "predefined" {
+	if !resp.Success || len(resp.Data.Models) != 3 || resp.Data.Protocol != "codex" || resp.Data.Source != "api" {
 		t.Fatalf("unexpected response: %s", w.Body.String())
 	}
 
@@ -1328,6 +1338,198 @@ func TestAdminModels_HandleFetchModels_CodexOAuth(t *testing.T) {
 	}
 	if !reflect.DeepEqual(persisted.GetModels(), wantPersisted) {
 		t.Fatalf("persisted models = %#v, want %#v", persisted.GetModels(), wantPersisted)
+	}
+	if manifestRequests.Load() != 2 || persisted.ModelEntries[0].Pricing == nil {
+		t.Fatalf("manifest requests=%d, model pricing=%+v", manifestRequests.Load(), persisted.ModelEntries)
+	}
+	storedCredential, err := codexauth.ParseCredential([]byte(persisted.OAuthCredential))
+	if err != nil || storedCredential.ModelManifest == nil || len(storedCredential.ModelManifest.Models) != 3 {
+		t.Fatalf("manifest not persisted: credential=%+v, error=%v", storedCredential, err)
+	}
+}
+
+func float64PtrForModelsTest(value float64) *float64 { return &value }
+
+func TestAdminModels_CodexManifestRefreshBoundaries(t *testing.T) {
+	for _, scenario := range []string{"refresh401", "unavailable", "invalid", "redirect", "expandedCredential", "oldEpoch", "baseURLOverride", "multipleURLs", "manualQuotaReset"} {
+		t.Run(scenario, func(t *testing.T) {
+			server, store, cleanup := setupAdminTestServer(t)
+			defer cleanup()
+			ctx := context.Background()
+			credential := &codexauth.Credential{Type: codexauth.ChannelType, AccessToken: "old-access", RefreshToken: "refresh", AccountID: "account",
+				PlanType: "pro", Expired: time.Now().Add(time.Hour).Format(time.RFC3339)}
+			payload, err := credential.JSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := store.CreateConfig(ctx, &model.Config{Name: "Codex manifest boundaries", AuthType: model.AuthTypeCodexOAuth, OAuthCredential: payload,
+				Enabled: true, URLs: model.ChannelURLs{{URL: codexUpstreamURL, Exact: true, Protocols: []string{"codex"}}}, ModelEntries: []model.ModelEntry{{Model: "gpt-6-astra"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "baseURLOverride" {
+				server.configService = newStubConfigService(map[string]string{config.CodexBaseURLSettingKey: "https://custom.example/backend-api/codex/responses"})
+			}
+			if scenario == "multipleURLs" {
+				cfg.URLs = append(cfg.URLs, model.ChannelURL{URL: "https://other.example/v1", Protocols: []string{"openai"}})
+			}
+			var requests, tokenRefreshes int
+			server.client = &http.Client{Transport: oauthUsageRoundTripper(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/oauth/token" {
+					tokenRefreshes++
+					return jsonResponse(r, `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`)
+				}
+				requests++
+				if scenario == "baseURLOverride" && r.URL.Hostname() != "custom.example" {
+					t.Fatalf("ignored base URL override: %s", r.URL)
+				}
+				body := `{"models":[{"slug":"gpt-6-astra","service_tiers":[{"id":"ultrafast","name":"Ultrafast","description":"6x"}]}]}`
+				status := http.StatusOK
+				switch scenario {
+				case "refresh401":
+					if r.Header.Get("Authorization") == "Bearer old-access" {
+						status = http.StatusUnauthorized
+					}
+				case "unavailable":
+					status = http.StatusServiceUnavailable
+				case "invalid":
+					body = `{"models":[{"slug":"gpt-6-astra","service_tiers":{"id":"ultrafast"}}]}`
+				case "redirect":
+					status = http.StatusFound
+				case "expandedCredential":
+					body = `{"models":[{"slug":"gpt-6-astra","service_tiers":[{"id":"ultrafast","description":"` + strings.Repeat("<", 200000) + `"}]}]}`
+				case "oldEpoch":
+					credential.RestartQuotaEpochFromPoll(time.Now())
+					next, err := credential.JSON()
+					if err != nil {
+						t.Fatal(err)
+					}
+					changed, err := store.CompareAndSwapOAuthCredential(ctx, cfg.ID, model.AuthTypeCodexOAuth, payload, next)
+					if err != nil || !changed {
+						t.Fatalf("change poll epoch: changed=%v error=%v", changed, err)
+					}
+				}
+				response, err := jsonResponse(r, body)
+				response.StatusCode = status
+				if status == http.StatusFound {
+					response.Header.Set("Location", "https://unrelated.example/leak")
+				}
+				return response, err
+			})}
+			server.codexCredentials = newCodexCredentialManager(codexauth.NewService(server.client), store, nil, nil)
+			response, err := server.fetchModelsForChannel(ctx, cfg, "", modelFetchFirstAvailableKey)
+			shouldSucceed := scenario == "refresh401" || scenario == "baseURLOverride" || scenario == "multipleURLs" || scenario == "manualQuotaReset"
+			if shouldSucceed != (err == nil) {
+				t.Fatalf("response=%+v error=%v", response, err)
+			}
+			if scenario == "manualQuotaReset" {
+				// A quota reset moves the ledger epoch but not the account's capabilities.
+				if err := server.resetOAuthQuotaCostUsage(ctx, cfg.ID, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stored, loadErr := store.GetConfig(ctx, cfg.ID)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			parsed, parseErr := codexauth.ParseCredential([]byte(stored.OAuthCredential))
+			if parseErr != nil {
+				t.Fatalf("model refresh damaged credentials: %v", parseErr)
+			}
+			if shouldSucceed {
+				if parsed.ModelManifest == nil {
+					t.Fatal("successful refresh did not save capabilities")
+				}
+				if strings.Contains(parsed.ModelManifest.Endpoint, "client_version") {
+					t.Fatalf("client version became part of the snapshot identity: %s", parsed.ModelManifest.Endpoint)
+				}
+				if scenario == "refresh401" && (requests != 2 || tokenRefreshes != 1 || parsed.AccessToken != "new-access") {
+					t.Fatalf("requests=%d tokenRefreshes=%d accessToken=%q", requests, tokenRefreshes, parsed.AccessToken)
+				}
+			} else if parsed.ModelManifest != nil || parsed.AccessToken != "old-access" || (scenario != "oldEpoch" && stored.OAuthCredential != payload) {
+				t.Fatalf("failed discovery changed credentials: %s", stored.OAuthCredential)
+			}
+			if scenario == "redirect" && requests != 1 {
+				t.Fatalf("followed an untrusted redirect: %d requests", requests)
+			}
+			if scenario == "baseURLOverride" || scenario == "manualQuotaReset" {
+				server.authService = newTestAuthService(t)
+				client, result := newTestContext(t, newRequest(http.MethodGet, "/v1/models?client_version=0.159.2", nil))
+				server.handleListOpenAIModels(client)
+				var models struct {
+					Models []struct {
+						ServiceTiers []codexauth.ServiceTier `json:"service_tiers"`
+					} `json:"models"`
+				}
+				mustUnmarshalJSON(t, result.Body.Bytes(), &models)
+				if len(models.Models) != 1 || len(models.Models[0].ServiceTiers) != 1 || requests != 1 {
+					t.Fatalf("public directory did not reuse actual endpoint snapshot: %s, requests=%d", result.Body.String(), requests)
+				}
+			}
+		})
+	}
+}
+
+type codexManifestAfterSwapStore struct {
+	storage.Store
+	afterSwap func(context.Context, int64, string) error
+}
+
+func (s *codexManifestAfterSwapStore) CompareAndSwapOAuthCredential(ctx context.Context, channelID int64, authType, expected, next string) (bool, error) {
+	updated, err := s.Store.CompareAndSwapOAuthCredential(ctx, channelID, authType, expected, next)
+	if err == nil && updated {
+		err = s.afterSwap(ctx, channelID, next)
+	}
+	return updated, err
+}
+
+func TestAdminModels_CodexManifestPreservesConcurrentReauthorization(t *testing.T) {
+	server, store, cleanup := setupAdminTestServer(t)
+	defer cleanup()
+	ctx := context.Background()
+	credential := &codexauth.Credential{Type: codexauth.ChannelType, AccessToken: "old-access", RefreshToken: "old-refresh", AccountID: "account",
+		PlanType: "pro", Expired: time.Now().Add(time.Hour).Format(time.RFC3339)}
+	payload, err := credential.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := store.CreateConfig(ctx, &model.Config{Name: "Codex concurrent manifest", Enabled: true, AuthType: model.AuthTypeCodexOAuth, OAuthCredential: payload,
+		URLs: model.ChannelURLs{{URL: codexUpstreamURL, Exact: true, Protocols: []string{"codex"}}}, ModelEntries: []model.ModelEntry{{Model: "gpt-6-astra"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.client = &http.Client{Transport: oauthUsageRoundTripper(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(r, `{"models":[{"slug":"gpt-6-astra","service_tiers":[{"id":"ultrafast","name":"Ultrafast","description":"6x"}]}]}`)
+	})}
+	wrapped := &codexManifestAfterSwapStore{Store: store}
+	server.codexCredentials = newCodexCredentialManager(codexauth.NewService(server.client), wrapped, nil, nil)
+	wrapped.afterSwap = func(ctx context.Context, channelID int64, saved string) error {
+		winner := *credential
+		winner.AccessToken, winner.RefreshToken = "winner-access", "winner-refresh"
+		winnerJSON, err := winner.JSON()
+		if err != nil {
+			return err
+		}
+		updated, err := store.CompareAndSwapOAuthCredential(ctx, channelID, model.AuthTypeCodexOAuth, saved, winnerJSON)
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return fmt.Errorf("could not commit concurrent reauthorization")
+		}
+		server.codexCredentials.cache(channelID, &winner)
+		return nil
+	}
+	if _, err := server.fetchCodexOAuthModels(ctx, cfg, ""); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := store.GetConfig(ctx, cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := server.codexCredentials.credential(ctx, latest, false)
+	if err != nil || resolved.AccessToken != "winner-access" || resolved.RefreshToken != "winner-refresh" || resolved.ModelManifest != nil {
+		t.Fatalf("manifest refresh resurrected stale credentials: %+v, error=%v", resolved, err)
 	}
 }
 
@@ -1656,136 +1858,143 @@ func TestAdminModels_HandleFetchModels_MultiURL_KeyErrorDoesNotCooldownURL(t *te
 }
 
 func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
-	t.Run("merge normalization keeps a single row joining an existing variant group", func(t *testing.T) {
-		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"data":[{"id":"new-model"}]}`)
-		}))
-		t.Cleanup(upstream.Close)
+	type batchRefreshData struct {
+		Mode      string                   `json:"mode"`
+		Total     int                      `json:"total"`
+		Updated   int                      `json:"updated"`
+		Unchanged int                      `json:"unchanged"`
+		Failed    int                      `json:"failed"`
+		Results   []BatchRefreshModelsItem `json:"results"`
+	}
+	newFixture := func(t *testing.T) (*Server, storage.Store) {
+		t.Helper()
 		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
-		ctx := context.Background()
-		cfg, err := store.CreateConfig(ctx, &model.Config{
-			Name: "variant-collision", URLs: model.ChannelURLs{{URL: upstream.URL, Protocols: []string{"openai"}}},
-			Enabled: true, ModelEntries: []model.ModelEntry{
+		t.Cleanup(cleanup)
+		return server, store
+	}
+	refresh := func(t *testing.T, server *Server, ctx context.Context, req BatchRefreshModelsRequest, wantStatuses ...string) APIResponse[batchRefreshData] {
+		t.Helper()
+		if len(wantStatuses) != len(req.ChannelIDs) {
+			t.Fatalf("expected status count=%d, channel count=%d", len(wantStatuses), len(req.ChannelIDs))
+		}
+		request := newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", req).WithContext(ctx)
+		c, w := newTestContext(t, request)
+		server.HandleBatchRefreshModels(c)
+		response := mustParseAPIResponse[batchRefreshData](t, w.Body.Bytes())
+		if w.Code != http.StatusOK || !response.Success {
+			t.Fatalf("refresh status=%d body=%s", w.Code, w.Body.String())
+		}
+		wantMode := req.Mode
+		if wantMode == "" {
+			wantMode = "merge"
+		}
+		var updated, unchanged, failed int
+		for _, status := range wantStatuses {
+			switch status {
+			case "updated":
+				updated++
+			case "unchanged":
+				unchanged++
+			case "failed":
+				failed++
+			default:
+				t.Fatalf("invalid expected status %q", status)
+			}
+		}
+		data := response.Data
+		if data.Mode != wantMode || data.Total != len(req.ChannelIDs) ||
+			data.Updated != updated || data.Unchanged != unchanged || data.Failed != failed ||
+			len(data.Results) != len(wantStatuses) {
+			t.Fatalf("unexpected refresh summary: %+v", data)
+		}
+		for i, status := range wantStatuses {
+			if item := data.Results[i]; item.ChannelID != req.ChannelIDs[i] || item.Status != status {
+				t.Fatalf("refresh result[%d]=%+v, want channel=%d status=%s", i, item, req.ChannelIDs[i], status)
+			}
+		}
+		return response
+	}
+	for _, tc := range []struct {
+		name      string
+		mode      string
+		catalog   string
+		oldModels []model.ModelEntry
+		want      []model.ModelEntry
+	}{
+		{
+			name: "merge normalization keeps a single row joining an existing variant group",
+			mode: "merge", catalog: `{"data":[{"id":"new-model"}]}`,
+			oldModels: []model.ModelEntry{
 				{Model: "foo", RedirectModel: "target-a"},
 				{Model: "foo", RedirectModel: "target-b"},
 				{Model: "provider/foo", Pricing: channelPrice(3, 4)},
 			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: cfg.ID, APIKey: "sk-test", KeyIndex: 0}}); err != nil {
-			t.Fatal(err)
-		}
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID}, "mode": "merge", "strip_model_source_prefix": true,
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("refresh status=%d body=%s", w.Code, w.Body.String())
-		}
-		got, err := store.GetConfig(ctx, cfg.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := []model.ModelEntry{
-			{Model: "foo", RedirectModel: "target-a"},
-			{Model: "foo", RedirectModel: "target-b"},
-			{Model: "foo", RedirectModel: "provider/foo", Pricing: channelPrice(3, 4)},
-			{Model: "new-model"},
-		}
-		if !reflect.DeepEqual(got.ModelEntries, want) {
-			t.Fatalf("normalized models=%+v, want %+v", got.ModelEntries, want)
-		}
-	})
-	t.Run("normalization preserves distinct targets and prices", func(t *testing.T) {
-		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"data":[{"id":"new-model"}]}`)
-		}))
-		t.Cleanup(upstream.Close)
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
-		ctx := context.Background()
-		cfg, err := store.CreateConfig(ctx, &model.Config{
-			Name: "normalized-targets", URLs: model.ChannelURLs{{URL: upstream.URL, Protocols: []string{"openai"}}},
-			Enabled: true, ModelEntries: []model.ModelEntry{
+			want: []model.ModelEntry{
+				{Model: "foo", RedirectModel: "target-a"},
+				{Model: "foo", RedirectModel: "target-b"},
+				{Model: "foo", RedirectModel: "provider/foo", Pricing: channelPrice(3, 4)},
+				{Model: "new-model"},
+			},
+		},
+		{
+			name: "normalization preserves distinct targets and prices",
+			mode: "merge", catalog: `{"data":[{"id":"new-model"}]}`,
+			oldModels: []model.ModelEntry{
 				{Model: "provider-a/Foo", Pricing: channelPrice(1, 2)},
 				{Model: "provider-b/foo", Pricing: channelPrice(3, 4)},
 			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: cfg.ID, APIKey: "sk-test", KeyIndex: 0}}); err != nil {
-			t.Fatal(err)
-		}
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID}, "mode": "merge", "strip_model_source_prefix": true,
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("refresh status=%d body=%s", w.Code, w.Body.String())
-		}
-		got, err := store.GetConfig(ctx, cfg.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := []model.ModelEntry{
-			{Model: "Foo", RedirectModel: "provider-a/Foo", Pricing: channelPrice(1, 2)},
-			{Model: "Foo", RedirectModel: "provider-b/foo", Pricing: channelPrice(3, 4)},
-			{Model: "new-model"},
-		}
-		if !reflect.DeepEqual(got.ModelEntries, want) {
-			t.Fatalf("normalized models=%+v, want %+v", got.ModelEntries, want)
-		}
-	})
-	t.Run("replace preserves each normalized target state", func(t *testing.T) {
-		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"data":[{"id":"provider-a/foo"},{"id":"provider-b/foo"}]}`)
-		}))
-		t.Cleanup(upstream.Close)
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
-		ctx := context.Background()
-		cfg, err := store.CreateConfig(ctx, &model.Config{
-			Name: "replace-targets", URLs: model.ChannelURLs{{URL: upstream.URL, Protocols: []string{"openai"}}},
-			Enabled: true, ModelEntries: []model.ModelEntry{
+			want: []model.ModelEntry{
+				{Model: "Foo", RedirectModel: "provider-a/Foo", Pricing: channelPrice(1, 2)},
+				{Model: "Foo", RedirectModel: "provider-b/foo", Pricing: channelPrice(3, 4)},
+				{Model: "new-model"},
+			},
+		},
+		{
+			name: "replace preserves each normalized target state",
+			mode: "replace", catalog: `{"data":[{"id":"provider-a/foo"},{"id":"provider-b/foo"}]}`,
+			oldModels: []model.ModelEntry{
 				{Model: "provider-a/foo", Disabled: true, Pricing: channelPrice(1, 2)},
 				{Model: "provider-b/foo", Pricing: channelPrice(3, 4)},
 			},
+			want: []model.ModelEntry{
+				{Model: "foo", RedirectModel: "provider-a/foo", Disabled: true, Pricing: channelPrice(1, 2)},
+				{Model: "foo", RedirectModel: "provider-b/foo", Pricing: channelPrice(3, 4)},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.catalog)
+			}))
+			server, store := newFixture(t)
+			ctx := context.Background()
+			cfg, err := store.CreateConfig(ctx, &model.Config{
+				Name: tc.name, URLs: model.ChannelURLs{{URL: upstream.URL, Protocols: []string{"openai"}}},
+				Enabled: true, ModelEntries: tc.oldModels,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: cfg.ID, APIKey: "sk-test", KeyIndex: 0}}); err != nil {
+				t.Fatal(err)
+			}
+			refresh(t, server, ctx, BatchRefreshModelsRequest{
+				ChannelIDs: []int64{cfg.ID}, Mode: tc.mode, StripModelSourcePrefix: true,
+			}, "updated")
+			got, err := store.GetConfig(ctx, cfg.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.ModelEntries, tc.want) {
+				t.Fatalf("normalized models=%+v, want %+v", got.ModelEntries, tc.want)
+			}
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: cfg.ID, APIKey: "sk-test", KeyIndex: 0}}); err != nil {
-			t.Fatal(err)
-		}
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID}, "mode": "replace", "strip_model_source_prefix": true,
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("refresh status=%d body=%s", w.Code, w.Body.String())
-		}
-		got, err := store.GetConfig(ctx, cfg.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := []model.ModelEntry{
-			{Model: "foo", RedirectModel: "provider-a/foo", Disabled: true, Pricing: channelPrice(1, 2)},
-			{Model: "foo", RedirectModel: "provider-b/foo", Pricing: channelPrice(3, 4)},
-		}
-		if !reflect.DeepEqual(got.ModelEntries, want) {
-			t.Fatalf("replace changed target state: got %+v, want %+v", got.ModelEntries, want)
-		}
-	})
+	}
 	t.Run("refresh keeps edits committed during upstream fetch", func(t *testing.T) {
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		t.Parallel()
+		server, store := newFixture(t)
 		ctx := context.Background()
 		var channelID int64
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1804,7 +2013,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"data":[{"id":"new-model"}]}`)
 		}))
-		t.Cleanup(upstream.Close)
+
 		cfg, err := store.CreateConfig(ctx, &model.Config{
 			Name: "concurrent-refresh", URLs: model.ChannelURLs{{URL: upstream.URL, Protocols: []string{"openai"}}},
 			Enabled: true, ModelEntries: []model.ModelEntry{{Model: "auto", RedirectModel: "target-a", Pricing: channelPrice(1, 2)}},
@@ -1816,13 +2025,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		if err := store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: channelID, APIKey: "sk-test", KeyIndex: 0}}); err != nil {
 			t.Fatal(err)
 		}
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{channelID}, "mode": "merge",
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("refresh status=%d body=%s", w.Code, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{channelID}, Mode: "merge",
+		}, "updated")
+
 		got, err := store.GetConfig(ctx, channelID)
 		if err != nil {
 			t.Fatal(err)
@@ -1837,13 +2043,13 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		}
 	})
 	t.Run("refresh retries an edit at model commit", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"data":[{"id":"new-model"}]}`)
 		}))
-		t.Cleanup(upstream.Close)
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+
+		server, store := newFixture(t)
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
 			Name: "commit-race", URLs: model.ChannelURLs{{URL: upstream.URL, Protocols: []string{"openai"}}},
@@ -1866,13 +2072,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			return err
 		}
 		server.store = interleaved
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID}, "mode": "merge",
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("refresh status=%d body=%s", w.Code, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{cfg.ID}, Mode: "merge",
+		}, "updated")
+
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -1884,6 +2087,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 	for _, mode := range []string{"merge", "replace"} {
 		t.Run(mode+" preserves configured variants", func(t *testing.T) {
+			t.Parallel()
 			upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != "/v1/models" {
 					http.NotFound(w, r)
@@ -1892,9 +2096,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"data":[{"id":"AUTO"},{"id":"new-model"}]}`))
 			}))
-			t.Cleanup(upstream.Close)
-			server, store, cleanup := setupAdminTestServer(t)
-			defer cleanup()
+
+			server, store := newFixture(t)
 			ctx := context.Background()
 			variants := []model.ModelEntry{
 				{Model: "auto", RedirectModel: "target-b", Disabled: true, Pricing: channelPrice(1, 2)},
@@ -1911,13 +2114,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			if err := store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: cfg.ID, KeyIndex: 0, APIKey: "sk-refresh"}}); err != nil {
 				t.Fatal(err)
 			}
-			c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-				"channel_ids": []int64{cfg.ID}, "mode": mode, "lowercase_models": true,
-			}))
-			server.HandleBatchRefreshModels(c)
-			if w.Code != http.StatusOK {
-				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-			}
+			refresh(t, server, ctx, BatchRefreshModelsRequest{
+				ChannelIDs: []int64{cfg.ID}, Mode: mode, LowercaseModels: true,
+			}, "updated")
+
 			got, err := store.GetConfig(ctx, cfg.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -1942,6 +2142,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		{name: "catalog lists bridge as direct model", body: `{"data":[{"id":"b"},{"id":"c"},{"id":"d"}]}`},
 	} {
 		t.Run("replace preserves second redirect when "+catalog.name, func(t *testing.T) {
+			t.Parallel()
 			upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != "/v1/models" {
 					http.NotFound(w, r)
@@ -1950,9 +2151,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, catalog.body)
 			}))
-			t.Cleanup(upstream.Close)
-			server, store, cleanup := setupAdminTestServer(t)
-			defer cleanup()
+
+			server, store := newFixture(t)
 			ctx := context.Background()
 			bridge := model.ModelEntry{Model: "b", RedirectModel: "c", Pricing: channelPrice(3, 4)}
 			cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -1970,13 +2170,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			if err := store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: cfg.ID, KeyIndex: 0, APIKey: "sk-refresh"}}); err != nil {
 				t.Fatal(err)
 			}
-			c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-				"channel_ids": []int64{cfg.ID}, "mode": "replace",
-			}))
-			server.HandleBatchRefreshModels(c)
-			if w.Code != http.StatusOK {
-				t.Fatalf("refresh status=%d body=%s", w.Code, w.Body.String())
-			}
+			refresh(t, server, ctx, BatchRefreshModelsRequest{
+				ChannelIDs: []int64{cfg.ID}, Mode: "replace",
+			}, "updated")
+
 			got, err := store.GetConfig(ctx, cfg.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -1996,6 +2193,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		})
 	}
 	t.Run("merge mode partial success", func(t *testing.T) {
+		t.Parallel()
 		// channel1: 返回 m1,m2（新增1个）
 		var upstream1Auth []string
 		upstream1 := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2016,7 +2214,6 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"data":[{"id":"m1"},{"id":"m2"}]}`))
 		}))
-		t.Cleanup(upstream1.Close)
 
 		// channel2: 返回 x1（无变化）
 		upstream2 := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2027,10 +2224,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"x1"}]}`))
 		}))
-		t.Cleanup(upstream2.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		c1, err := store.CreateConfig(ctx, &model.Config{
@@ -2074,31 +2269,11 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{c1.ID, c2.ID, c3.ID},
-			"mode":        "merge",
-		}))
-		server.HandleBatchRefreshModels(c)
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{c1.ID, c2.ID, c3.ID},
+			Mode:       "merge",
+		}, "updated", "unchanged", "failed")
 
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
-		}
-
-		var resp struct {
-			Success bool `json:"success"`
-			Data    struct {
-				Updated   int `json:"updated"`
-				Unchanged int `json:"unchanged"`
-				Failed    int `json:"failed"`
-			} `json:"data"`
-		}
-		mustUnmarshalJSON(t, w.Body.Bytes(), &resp)
-		if !resp.Success {
-			t.Fatalf("expected success=true, body=%s", w.Body.String())
-		}
-		if resp.Data.Updated != 1 || resp.Data.Unchanged != 1 || resp.Data.Failed != 1 {
-			t.Fatalf("unexpected summary: %+v", resp.Data)
-		}
 		wantAuth := []string{"Bearer bad-k1", "Bearer k1", "Bearer other-k1"}
 		if !reflect.DeepEqual(upstream1Auth, wantAuth) {
 			t.Fatalf("Authorization sequence=%v, want %v", upstream1Auth, wantAuth)
@@ -2121,6 +2296,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("merge mode skips cooling keys and refreshes later channels", func(t *testing.T) {
+		t.Parallel()
 		var coolingCalls atomic.Int32
 		upstream1 := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/v1/models" {
@@ -2135,15 +2311,13 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"first-new"}]}`))
 		}))
-		t.Cleanup(upstream1.Close)
+
 		upstream2 := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"second-new"}]}`))
 		}))
-		t.Cleanup(upstream2.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 		ctx := context.Background()
 		first, err := store.CreateConfig(ctx, &model.Config{
 			Name: "first", URLs: model.ChannelURLs{{URL: upstream1.URL, Protocols: []string{"openai"}}},
@@ -2169,25 +2343,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 
 		requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		request := newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{first.ID, second.ID}, "mode": "merge",
-		}).WithContext(requestCtx)
-		c, w := newTestContext(t, request)
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, body=%s", w.Code, w.Body.String())
-		}
-		var response struct {
-			Success bool `json:"success"`
-			Data    struct {
-				Updated int `json:"updated"`
-				Failed  int `json:"failed"`
-			} `json:"data"`
-		}
-		mustUnmarshalJSON(t, w.Body.Bytes(), &response)
-		if !response.Success || response.Data.Updated != 2 || response.Data.Failed != 0 {
-			t.Fatalf("later channel was not refreshed: %s", w.Body.String())
-		}
+		refresh(t, server, requestCtx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{first.ID, second.ID}, Mode: "merge",
+		}, "updated", "updated")
+
 		if got := coolingCalls.Load(); got != 0 {
 			t.Fatalf("merge probed cooling key %d times", got)
 		}
@@ -2201,6 +2360,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("merge mode skips models already used as redirect targets", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/v1/models" {
 				http.NotFound(w, r)
@@ -2209,10 +2369,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"UPSTREAM-MODEL"}]}`))
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -2231,27 +2389,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID},
-			"mode":        "merge",
-		}))
-		server.HandleBatchRefreshModels(c)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
-		}
-
-		var resp struct {
-			Success bool `json:"success"`
-			Data    struct {
-				Updated   int `json:"updated"`
-				Unchanged int `json:"unchanged"`
-			} `json:"data"`
-		}
-		mustUnmarshalJSON(t, w.Body.Bytes(), &resp)
-		if !resp.Success || resp.Data.Updated != 0 || resp.Data.Unchanged != 1 {
-			t.Fatalf("unexpected response: %+v body=%s", resp, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{cfg.ID},
+			Mode:       "merge",
+		}, "unchanged")
 
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
@@ -2264,6 +2405,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("replace mode", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/v1/chat/completions" {
 				w.Header().Set("Content-Type", "application/json")
@@ -2277,10 +2419,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"new-1"}]}`))
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -2302,14 +2442,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID},
-			"mode":        "replace",
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{cfg.ID},
+			Mode:       "replace",
+		}, "updated")
 
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
@@ -2330,7 +2466,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 
 		server.configService = NewConfigService(store)
 		server.keySelector = NewKeySelector()
-		c, w = newTestContext(t, newJSONRequest(t, http.MethodPost, fmt.Sprintf("/admin/channels/%d/test", cfg.ID), map[string]any{
+		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, fmt.Sprintf("/admin/channels/%d/test", cfg.ID), map[string]any{
 			"model": "new-1", "client_protocol": "openai",
 		}))
 		c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(cfg.ID)}}
@@ -2342,14 +2478,13 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("replace mode preserves disabled state by routing model name", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.6-luna"}]}`))
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -2367,14 +2502,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID},
-			"mode":        "replace",
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{cfg.ID},
+			Mode:       "replace",
+		}, "updated")
 
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
@@ -2386,6 +2517,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("replace mode lowercases aliases and preserves upstream model names", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/v1/models" {
 				http.NotFound(w, r)
@@ -2394,10 +2526,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"CamelCase-Model"},{"id":"already-lower"}]}`))
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -2418,15 +2548,11 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids":      []int64{cfg.ID},
-			"mode":             "replace",
-			"lowercase_models": true,
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs:      []int64{cfg.ID},
+			Mode:            "replace",
+			LowercaseModels: true,
+		}, "updated")
 
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
@@ -2445,14 +2571,13 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("replace mode keeps distinct targets after stripping source prefixes", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"cloudcompile/Grok-4.5"},{"id":"z-source/Other-Model"},{"id":"x-ai/grok-4.5"},{"id":"a-source/Other-Model"},{"id":"grok-4.5"}]}`))
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -2473,16 +2598,12 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids":               []int64{cfg.ID},
-			"mode":                      "replace",
-			"lowercase_models":          true,
-			"strip_model_source_prefix": true,
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs:             []int64{cfg.ID},
+			Mode:                   "replace",
+			LowercaseModels:        true,
+			StripModelSourcePrefix: true,
+		}, "updated")
 
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
@@ -2504,14 +2625,13 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("merge mode normalizes existing aliases and preserves their mappings", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"source/ExistingModel"},{"id":"source/NewModel"}]}`))
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -2532,16 +2652,12 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids":               []int64{cfg.ID},
-			"mode":                      "merge",
-			"lowercase_models":          true,
-			"strip_model_source_prefix": true,
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs:             []int64{cfg.ID},
+			Mode:                   "merge",
+			LowercaseModels:        true,
+			StripModelSourcePrefix: true,
+		}, "updated")
 
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
@@ -2567,14 +2683,13 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("empty upstream model list leaves channel unchanged", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[]}`))
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -2593,23 +2708,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID},
-			"mode":        "replace",
-		}))
-		server.HandleBatchRefreshModels(c)
-
-		var resp struct {
-			Success bool `json:"success"`
-			Data    struct {
-				Failed  int                      `json:"failed"`
-				Results []BatchRefreshModelsItem `json:"results"`
-			} `json:"data"`
-		}
-		mustUnmarshalJSON(t, w.Body.Bytes(), &resp)
-		if !resp.Success || resp.Data.Failed != 1 || len(resp.Data.Results) != 1 || resp.Data.Results[0].Status != "failed" {
-			t.Fatalf("unexpected response: %+v body=%s", resp, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{cfg.ID},
+			Mode:       "replace",
+		}, "failed")
 
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
@@ -2621,6 +2723,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("replace mode unions per-key models across groups", func(t *testing.T) {
+		t.Parallel()
 		var upstreamAuth []string
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/v1/models" {
@@ -2640,10 +2743,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 				http.Error(w, "invalid api key", http.StatusUnauthorized)
 			}
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -2666,14 +2767,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID},
-			"mode":        "replace",
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{cfg.ID},
+			Mode:       "replace",
+		}, "updated")
 
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
@@ -2693,6 +2790,9 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetAPIKeys failed: %v", err)
 		}
+		if len(keys) != 3 {
+			t.Fatalf("key count=%d, want 3", len(keys))
+		}
 		if !reflect.DeepEqual(keys[0].AllowedModels, []string{"ma-1"}) || keys[0].Disabled || keys[0].ModelScopeEmpty {
 			t.Fatalf("successful group-a key scope=%+v, want ma-1 and enabled", keys[0])
 		}
@@ -2705,6 +2805,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("replace mode continues with successful keys when one key probe fails", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/v1/models" {
 				http.NotFound(w, r)
@@ -2720,10 +2821,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 				http.Error(w, "invalid api key", http.StatusUnauthorized)
 			}
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -2743,27 +2842,13 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID},
-			"mode":        "replace",
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
-		}
+		response := refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{cfg.ID},
+			Mode:       "replace",
+		}, "updated")
 
-		var response struct {
-			Success bool `json:"success"`
-			Data    struct {
-				Updated int                      `json:"updated"`
-				Failed  int                      `json:"failed"`
-				Results []BatchRefreshModelsItem `json:"results"`
-			} `json:"data"`
-		}
-		mustUnmarshalJSON(t, w.Body.Bytes(), &response)
-		if !response.Success || response.Data.Updated != 1 || response.Data.Failed != 0 ||
-			len(response.Data.Results) != 1 || response.Data.Results[0].Status != "updated" || response.Data.Results[0].Warning == "" {
-			t.Fatalf("unexpected response: %s", w.Body.String())
+		if response.Data.Results[0].Warning == "" {
+			t.Fatalf("expected partial-key warning: %+v", response.Data.Results[0])
 		}
 
 		got, err := store.GetConfig(ctx, cfg.ID)
@@ -2777,6 +2862,9 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		keys, err := store.GetAPIKeys(ctx, cfg.ID)
 		if err != nil {
 			t.Fatalf("GetAPIKeys failed: %v", err)
+		}
+		if len(keys) != 2 {
+			t.Fatalf("key count=%d, want 2", len(keys))
 		}
 		if !reflect.DeepEqual(keys[0].AllowedModels, []string{"model-a"}) || keys[0].ModelScopeEmpty || keys[0].Disabled {
 			t.Fatalf("healthy key scope=%+v, want model-a and enabled", keys[0])
@@ -2858,6 +2946,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
 				upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path != "/v1/models" {
 						http.NotFound(w, r)
@@ -2870,10 +2959,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write([]byte(`{"data":[{"id":"other"}]}`))
 				}))
-				t.Cleanup(upstream.Close)
 
-				server, store, cleanup := setupAdminTestServer(t)
-				defer cleanup()
+				server, store := newFixture(t)
 				ctx := context.Background()
 				oldModels := append(append([]model.ModelEntry{}, tc.oldModels...), model.ModelEntry{Model: "stale"})
 				cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -2889,13 +2976,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 				}); err != nil {
 					t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 				}
-				c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-					"channel_ids": []int64{cfg.ID}, "mode": "replace", "strip_model_source_prefix": tc.stripPrefix,
-				}))
-				server.HandleBatchRefreshModels(c)
-				if w.Code != http.StatusOK {
-					t.Fatalf("status=%d, body=%s", w.Code, w.Body.String())
-				}
+				refresh(t, server, ctx, BatchRefreshModelsRequest{
+					ChannelIDs: []int64{cfg.ID}, Mode: "replace", StripModelSourcePrefix: tc.stripPrefix,
+				}, "updated")
+
 				stored, err := store.GetConfig(ctx, cfg.ID)
 				if err != nil {
 					t.Fatalf("GetConfig failed: %v", err)
@@ -2907,6 +2991,9 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 				keys, err := store.GetAPIKeys(ctx, cfg.ID)
 				if err != nil {
 					t.Fatalf("GetAPIKeys failed: %v", err)
+				}
+				if len(keys) != 2 {
+					t.Fatalf("key count=%d, want 2", len(keys))
 				}
 				if !reflect.DeepEqual(keys[1].DetectedModels, tc.detected) {
 					t.Fatalf("failed key detected models changed: got %v, want %v", keys[1].DetectedModels, tc.detected)
@@ -2941,6 +3028,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
 				upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path != "/v1/models" {
 						http.NotFound(w, r)
@@ -2953,10 +3041,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = fmt.Fprintf(w, `{"data":[{"id":%q}]}`, tc.fetched)
 				}))
-				t.Cleanup(upstream.Close)
 
-				server, store, cleanup := setupAdminTestServer(t)
-				defer cleanup()
+				server, store := newFixture(t)
 				ctx := context.Background()
 				cfg, err := store.CreateConfig(ctx, &model.Config{
 					Name: "conflicting-failed-key", URLs: model.ChannelURLs{{URL: upstream.URL, Protocols: []string{"openai"}}},
@@ -2972,23 +3058,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 					t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 				}
 
-				c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-					"channel_ids": []int64{cfg.ID}, "mode": "replace", "strip_model_source_prefix": tc.stripPrefix,
-				}))
-				server.HandleBatchRefreshModels(c)
-				var response struct {
-					Success bool `json:"success"`
-					Data    struct {
-						Updated int                      `json:"updated"`
-						Failed  int                      `json:"failed"`
-						Results []BatchRefreshModelsItem `json:"results"`
-					} `json:"data"`
-				}
-				mustUnmarshalJSON(t, w.Body.Bytes(), &response)
-				if w.Code != http.StatusOK || !response.Success || response.Data.Updated != 0 || response.Data.Failed != 1 ||
-					len(response.Data.Results) != 1 || response.Data.Results[0].Status != "failed" {
-					t.Fatalf("conflicting refresh must fail: %s", w.Body.String())
-				}
+				refresh(t, server, ctx, BatchRefreshModelsRequest{
+					ChannelIDs: []int64{cfg.ID}, Mode: "replace", StripModelSourcePrefix: tc.stripPrefix,
+				}, "failed")
+
 				stored, err := store.GetConfig(ctx, cfg.ID)
 				if err != nil {
 					t.Fatalf("GetConfig failed: %v", err)
@@ -3000,6 +3073,9 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 				if err != nil {
 					t.Fatalf("GetAPIKeys failed: %v", err)
 				}
+				if len(keys) != 2 {
+					t.Fatalf("key count=%d, want 2", len(keys))
+				}
 				if !reflect.DeepEqual(keys[1].AllowedModels, []string{tc.allowed}) || keys[1].Disabled || keys[1].ModelScopeEmpty {
 					t.Fatalf("failed key scope changed after rejected refresh: %+v", keys[1])
 				}
@@ -3008,6 +3084,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("replace mode keeps all models when an unrestricted key probe fails", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Authorization") == "Bearer healthy" {
 				w.Header().Set("Content-Type", "application/json")
@@ -3016,10 +3093,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			}
 			http.Error(w, "rate limited", http.StatusTooManyRequests)
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -3039,16 +3114,12 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids":               []int64{cfg.ID},
-			"mode":                      "replace",
-			"lowercase_models":          true,
-			"strip_model_source_prefix": true,
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, body=%s", w.Code, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs:             []int64{cfg.ID},
+			Mode:                   "replace",
+			LowercaseModels:        true,
+			StripModelSourcePrefix: true,
+		}, "updated")
 
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
@@ -3063,12 +3134,16 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetAPIKeys failed: %v", err)
 		}
+		if len(keys) != 2 {
+			t.Fatalf("key count=%d, want 2", len(keys))
+		}
 		if len(keys[1].AllowedModels) != 0 || keys[1].ModelScopeEmpty || keys[1].Disabled {
 			t.Fatalf("failed unrestricted key must stay unrestricted: %+v", keys[1])
 		}
 	})
 
 	t.Run("replace mode probes cooling keys and skips manually disabled keys", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/v1/models" {
 				http.NotFound(w, r)
@@ -3086,10 +3161,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 				http.Error(w, "invalid api key", http.StatusUnauthorized)
 			}
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -3115,14 +3188,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID},
-			"mode":        "replace",
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{cfg.ID},
+			Mode:       "replace",
+		}, "updated")
 
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
@@ -3136,14 +3205,20 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetAPIKeys failed: %v", err)
 		}
+		if len(keys) != 4 {
+			t.Fatalf("key count=%d, want 4", len(keys))
+		}
 		if !reflect.DeepEqual(keys[0].AllowedModels, []string{"glm-5.2"}) || keys[0].ModelScopeEmpty || keys[0].Disabled {
 			t.Fatalf("ready key scope=%+v, want [glm-5.2]", keys[0])
 		}
 		if !reflect.DeepEqual(keys[1].AllowedModels, []string{"glm-5.2", "glm-5.2-air"}) || keys[1].ModelScopeEmpty || keys[1].Disabled {
 			t.Fatalf("cooling key scope must be refreshed, got %+v", keys[1])
 		}
-		if keys[1].CooldownUntil == 0 {
-			t.Fatalf("scope refresh must not clear key cooldown: %+v", keys[1])
+		if keys[1].CooldownUntil != cooldownUntil || keys[1].CooldownDurationMs != time.Hour.Milliseconds() {
+			t.Fatalf("scope refresh changed key cooldown: %+v", keys[1])
+		}
+		if keys[2].CooldownUntil != cooldownUntil || keys[2].CooldownDurationMs != time.Hour.Milliseconds() {
+			t.Fatalf("scope recovery changed key cooldown: %+v", keys[2])
 		}
 		if !reflect.DeepEqual(keys[2].AllowedModels, []string{"glm-5.2"}) || keys[2].ModelScopeEmpty || keys[2].Disabled {
 			t.Fatalf("cooling scope-empty key must recover, got %+v", keys[2])
@@ -3154,6 +3229,7 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 	})
 
 	t.Run("replace mode keeps cooling key scope when probe fails", func(t *testing.T) {
+		t.Parallel()
 		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/v1/models" {
 				http.NotFound(w, r)
@@ -3169,10 +3245,8 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 				http.Error(w, "invalid api key", http.StatusUnauthorized)
 			}
 		}))
-		t.Cleanup(upstream.Close)
 
-		server, store, cleanup := setupAdminTestServer(t)
-		defer cleanup()
+		server, store := newFixture(t)
 
 		ctx := context.Background()
 		cfg, err := store.CreateConfig(ctx, &model.Config{
@@ -3198,14 +3272,10 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 			t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 		}
 
-		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/refresh-batch", map[string]any{
-			"channel_ids": []int64{cfg.ID},
-			"mode":        "replace",
-		}))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusOK {
-			t.Fatalf("status=%d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
-		}
+		refresh(t, server, ctx, BatchRefreshModelsRequest{
+			ChannelIDs: []int64{cfg.ID},
+			Mode:       "replace",
+		}, "updated")
 
 		got, err := store.GetConfig(ctx, cfg.ID)
 		if err != nil {
@@ -3219,6 +3289,9 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetAPIKeys failed: %v", err)
 		}
+		if len(keys) != 2 {
+			t.Fatalf("key count=%d, want 2", len(keys))
+		}
 		if !reflect.DeepEqual(keys[1].AllowedModels, []string{"glm-5.2", "glm-5.2-air"}) || keys[1].ModelScopeEmpty || keys[1].Disabled {
 			t.Fatalf("failed cooling key scope must stay unchanged, got %+v", keys[1])
 		}
@@ -3227,16 +3300,23 @@ func TestAdminModels_HandleBatchRefreshModels(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid mode", func(t *testing.T) {
-		server, _, cleanup := setupAdminTestServer(t)
-		defer cleanup()
-
-		c, w := newTestContext(t, newJSONRequestBytes(http.MethodPost, "/admin/channels/models/refresh-batch", []byte(`{"channel_ids":[1],"mode":"xxx"}`)))
-		server.HandleBatchRefreshModels(c)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("status=%d, want %d", w.Code, http.StatusBadRequest)
-		}
-	})
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "invalid mode", body: `{"channel_ids":[1],"mode":"xxx"}`},
+		{name: "invalid JSON", body: `{"channel_ids":`},
+		{name: "empty channel IDs", body: `{"channel_ids":[],"mode":"merge"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, w := newTestContext(t, newJSONRequestBytes(http.MethodPost, "/admin/channels/models/refresh-batch", []byte(tc.body)))
+			(&Server{}).HandleBatchRefreshModels(c)
+			response := mustParseAPIResponse[batchRefreshData](t, w.Body.Bytes())
+			if w.Code != http.StatusBadRequest || response.Success || response.Error == "" {
+				t.Fatalf("invalid request status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
 }
 
 func TestAvailableModelFetchAPIKeysScopeEmptyFallback(t *testing.T) {
