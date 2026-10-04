@@ -15,7 +15,7 @@ export interface Channel {
   status?: string
   enabled?: boolean
   priority?: number
-  models?: string[]
+  models?: Array<string | { model?: unknown; redirect_model?: unknown; name?: unknown }>
   [key: string]: unknown
 }
 
