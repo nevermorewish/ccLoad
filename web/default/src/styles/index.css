@@ -191,6 +191,9 @@ th { color: #9ca3af; font-size: 12px; font-weight: 600; }
 .table-note { display: block; color: #9ca3af; font-size: 12px; }
 .cell-stack { display: grid; gap: 3px; }
 .priority-input { width: 84px; min-height: 32px; margin-left: 0; padding: 4px 7px; }
+/* 排序覆盖输入框：未覆盖时留空并显示自动值占位；已覆盖时高亮描边。 */
+.override-input { width: 88px; min-height: 32px; padding: 4px 7px; }
+.override-input.is-overridden { border-color: #eab308; color: #eab308; }
 
 /* ---- 渠道页补充 ---- */
 .btn-danger { border-color: #b91c1c; background: #b91c1c; color: #fff; }

@@ -320,7 +320,8 @@ func (s *Server) pickBestChannelWhenAllCooled(
 		if healthEnabled {
 			return s.calculateEffectivePriority(ch, s.healthCache.GetHealthStats(ch.ID), healthCfg, medianTTFB)
 		}
-		return float64(ch.Priority)
+		// 健康度关闭时用 SortPriority()，让排序覆盖在兜底路径同样生效。
+		return float64(ch.SortPriority())
 	}
 
 	best := slices.MinFunc(valid, func(a, b *modelpkg.Config) int {

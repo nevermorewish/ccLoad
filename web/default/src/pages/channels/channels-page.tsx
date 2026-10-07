@@ -7,7 +7,7 @@ import { streamSSE } from '../../lib/sse'
 import type { Channel } from '../../types'
 import { OAuthCleanupPanel, OAuthImportPanel, OAuthLoginPanel } from '../oauth/oauth-panels'
 import {
-  AUTH_TYPES, PROTOCOL_MODES, batchClearCooldowns, batchDelete, batchEnabled, batchPatch, batchPriority,
+  AUTH_TYPES, PROTOCOL_MODES, batchClearCooldowns, batchDelete, batchEnabled, batchPatch, batchPriority, batchSortOverride,
   codebuddyCheckin, codexQuotaReset, download, managementBalance, managementCheckin, oauthUsage,
   refreshModelsBatch, removeChannel, uploadJSON, type ModelEntry,
 } from './api'
@@ -76,6 +76,7 @@ export function ChannelsPage() {
   const [notice, setNotice] = useState<{ kind: 'success' | 'error' | 'info'; text: string; detail?: unknown } | null>(null)
   const [rowBusy, setRowBusy] = useState<Record<number, string>>({})
   const [priorityDrafts, setPriorityDrafts] = useState<Record<number, string>>({})
+  const [overrideDrafts, setOverrideDrafts] = useState<Record<number, string>>({})
   // 弹窗
   const [editor, setEditor] = useState<{ open: boolean; channel: Channel | null; duplicate: boolean }>({ open: false, channel: null, duplicate: false })
   const [testTarget, setTestTarget] = useState<{ channel: Channel; model?: string } | null>(null)
@@ -94,6 +95,7 @@ export function ChannelsPage() {
   const usageAbort = useRef<AbortController | null>(null)
   const loadSeq = useRef(0)
   const priorityTimers = useRef<Record<number, number>>({})
+  const overrideTimers = useRef<Record<number, number>>({})
   const busyRef = useRef(false)
 
   const readBase = readOnly ? '/dashboard' : '/admin'
@@ -196,6 +198,38 @@ export function ChannelsPage() {
       event.preventDefault(); event.stopPropagation()
       window.clearTimeout(priorityTimers.current[row.id]); delete priorityTimers.current[row.id]
       setPriorityDrafts((current) => { const next = { ...current }; delete next[row.id]; return next })
+    }
+  }
+
+  // ---- 行内排序覆盖（同 1s 防抖 → batch-sort-override） ----
+  // 留空或填 0 表示取消覆盖，恢复自动健康度排序。
+  const flushOverride = async (row: Row) => {
+    window.clearTimeout(overrideTimers.current[row.id]); delete overrideTimers.current[row.id]
+    const raw = overrideDrafts[row.id]
+    if (raw === undefined) return
+    const trimmed = raw.trim()
+    const value = trimmed === '' ? 0 : Math.trunc(Number(trimmed))
+    const original = Number(row.sort_override ?? 0)
+    setOverrideDrafts((current) => { const next = { ...current }; delete next[row.id]; return next })
+    if (!Number.isFinite(value) || value < -99999 || value > 9999999 || value === original) return
+    setRows((current) => current.map((item) => item.id === row.id ? { ...item, sort_override: value } : item))
+    try { await batchSortOverride([{ id: row.id, sort_override: value }]); notify('success', value === 0 ? '已取消排序覆盖' : `排序覆盖已设为 ${value}`); await refresh() }
+    catch (cause) {
+      setRows((current) => current.map((item) => item.id === row.id ? { ...item, sort_override: original } : item))
+      notify('error', errorMessage(cause, '排序覆盖更新失败'))
+    }
+  }
+  const editOverride = (row: Row, value: string) => {
+    setOverrideDrafts((current) => ({ ...current, [row.id]: value }))
+    window.clearTimeout(overrideTimers.current[row.id])
+    overrideTimers.current[row.id] = window.setTimeout(() => void flushOverride({ ...row }), 1000)
+  }
+  const overrideKey = (event: KeyboardEvent<HTMLInputElement>, row: Row) => {
+    if (event.key === 'Enter') { event.preventDefault(); void flushOverride(row) }
+    if (event.key === 'Escape') {
+      event.preventDefault(); event.stopPropagation()
+      window.clearTimeout(overrideTimers.current[row.id]); delete overrideTimers.current[row.id]
+      setOverrideDrafts((current) => { const next = { ...current }; delete next[row.id]; return next })
     }
   }
 
@@ -444,6 +478,8 @@ export function ChannelsPage() {
         const multiplierMax = row.cost_multiplier_max as number | undefined
         const effective = row.effective_priority as number | undefined
         const override = Number(row.sort_override ?? 0)
+        // 实际参与排序的值：有覆盖用覆盖，否则健康度开启时用 P_eff、关闭时用基础优先级。
+        const autoSortValue = override !== 0 ? override : (effective ?? Number(row.priority ?? 0))
         // 后端在 healthEnabled 时对每个渠道都会下发 effective_priority（含无样本渠道），
         // 因此它等价于「健康度模式已开启」；健康度列另据 success_rate 判断有无样本。
         const healthMode = effective != null
@@ -463,11 +499,20 @@ export function ChannelsPage() {
             <span className="table-note">{health.firstByte == null ? '首字 -' : `首字 ${formatDuration(health.firstByte)}`}</span>
           </> : <span className="muted" title="该渠道在健康度统计窗口内没有样本">无样本</span>) : <span className="muted" title={readOnly ? '只读视图不提供健康度数据' : '未开启健康度排序（enable_health_score）'}>-</span>}</td>
           <td className="metric-cell metric-effective" title={override !== 0
-            ? `已手动覆盖为 ${override}，直接决定选路顺序（不叠加健康度惩罚）`
-            : effective != null ? `惩罚后排序优先级 P_eff = 优先级 ${Number(row.priority ?? 0)} 减去失败/首字惩罚` : undefined}>{effective != null ? <>
-            <strong className={override !== 0 ? 'metric-good' : effectiveTone(effective, Number(row.priority ?? 0))}>{formatPriorityScore(effective)}</strong>
-            <span className="table-note">{override !== 0 ? '已覆盖' : effectiveDeltaLabel(effective, Number(row.priority ?? 0))}</span>
-          </> : <span className="muted">-</span>}</td>
+            ? `已手动覆盖为 ${override}，直接决定选路顺序（不叠加健康度惩罚）。清空输入框可恢复自动。`
+            : `留空 = 自动（当前 ${formatPriorityScore(autoSortValue)}）。填入数值即固定该渠道的排序位置，不再叠加失败/首字惩罚。`}>
+            {readOnly ? <><strong className={override !== 0 ? 'metric-good' : effectiveTone(autoSortValue, Number(row.priority ?? 0))}>{formatPriorityScore(autoSortValue)}</strong>
+              <span className="table-note">{override !== 0 ? '已覆盖' : '自动'}</span></> : <>
+              <input className={`input override-input${override !== 0 ? ' is-overridden' : ''}`} type="number" min={-99999} max={9999999}
+                aria-label={`${row.name} 排序覆盖`}
+                placeholder={formatPriorityScore(autoSortValue)}
+                value={overrideDrafts[row.id] ?? (override !== 0 ? String(override) : '')}
+                onChange={(event) => editOverride(row, event.target.value)}
+                onBlur={() => void flushOverride(row)}
+                onKeyDown={(event) => overrideKey(event, row)} />
+              <span className="table-note">{override !== 0 ? '已覆盖' : effective != null ? effectiveDeltaLabel(effective, Number(row.priority ?? 0)) : '自动'}</span>
+            </>}
+          </td>
           <td className="metric-cell metric-ttft">{stat ? <><strong className={timingTone(stat.avgFirstByteTimeSeconds)}>{formatDuration(stat.avgFirstByteTimeSeconds)}</strong><span className="table-note">首字</span></> : <span className="muted">-</span>}</td>
           <td className="metric-cell metric-duration">{stat ? <><strong className={timingTone(stat.avgDurationSeconds, 15, 30)}>{formatDuration(stat.avgDurationSeconds)}</strong><span className="table-note">耗时</span></> : <span className="muted">-</span>}</td>
           <td className="metric-cell metric-requests">{stat ? <><strong>{stat.total.toLocaleString()}</strong><span className="table-note">成功 {stat.success.toLocaleString()}</span></> : <span className="muted">-</span>}</td>

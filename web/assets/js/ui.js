@@ -2096,10 +2096,11 @@ window.WebAuth = window.WebAuth || {
     const host = dialogs.length > 0 ? dialogs[dialogs.length - 1] : document.body;
     const previousFocus = document.activeElement;
     host.appendChild(ta);
-    ta.select();
-    ta.setSelectionRange?.(0, ta.value.length);
 
     try {
+      ta.focus?.({ preventScroll: true });
+      ta.select();
+      ta.setSelectionRange?.(0, ta.value.length);
       return typeof document.execCommand === 'function' && document.execCommand('copy');
     } catch {
       return false;

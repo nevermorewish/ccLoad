@@ -2867,3 +2867,86 @@ func TestHandleCreateChannelRejectsInvalidKeyPriority(t *testing.T) {
 		}
 	}
 }
+
+// 回归：编辑器不提交 sort_override，保存渠道时必须保留现有覆盖值。
+// UpdateConfig 会无条件写该列，早前缺少保留逻辑会导致「改个名字就把手工排序清成自动」。
+func TestHandleUpdateChannel_PreservesSortOverride(t *testing.T) {
+	server, store, cleanup := setupAdminTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	created, err := store.CreateConfig(ctx, &model.Config{
+		Name:         "Override-Channel",
+		URLs:         model.ChannelURLs{{URL: "https://override.example.com"}},
+		Priority:     10,
+		SortOverride: 77,
+		Enabled:      true,
+		ModelEntries: []model.ModelEntry{{Model: "gpt-5.2", RedirectModel: ""}},
+	})
+	if err != nil {
+		t.Fatalf("创建测试渠道失败: %v", err)
+	}
+	if err := store.CreateAPIKeysBatch(ctx, []*model.APIKey{{
+		ChannelID: created.ID, KeyIndex: 0, APIKey: "sk-override", KeyStrategy: model.KeyStrategySequential,
+	}}); err != nil {
+		t.Fatalf("创建测试 API Key 失败: %v", err)
+	}
+
+	// 不含 sort_override 的普通编辑（改名 + 改优先级）
+	payload := map[string]any{
+		"name":     "Override-Channel-Renamed",
+		"api_key":  "sk-override",
+		"urls":     []map[string]any{{"url": "https://override.example.com"}},
+		"priority": 20,
+		"models":   []map[string]any{{"model": "gpt-5.2"}},
+		"enabled":  true,
+	}
+
+	c, w := newTestContext(t, newJSONRequest(t, http.MethodPut, "/admin/channels/"+strconv.FormatInt(created.ID, 10), payload))
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(created.ID, 10)}}
+	server.handleUpdateChannel(c, created.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望状态码 %d，实际 %d，响应体: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	reloaded, err := store.GetConfig(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
+	if reloaded.SortOverride != 77 {
+		t.Fatalf("未提交 sort_override 时被清掉了: got %d, want 77", reloaded.SortOverride)
+	}
+	if reloaded.Priority != 20 {
+		t.Fatalf("priority 应随提交更新: got %d, want 20", reloaded.Priority)
+	}
+	if reloaded.SortPriority() != 77 {
+		t.Fatalf("SortPriority() 应以覆盖值为准: got %d, want 77", reloaded.SortPriority())
+	}
+
+	// 显式提交 0 时应清除覆盖
+	clearPayload := map[string]any{
+		"name":          "Override-Channel-Renamed",
+		"api_key":       "sk-override",
+		"urls":          []map[string]any{{"url": "https://override.example.com"}},
+		"priority":      20,
+		"sort_override": 0,
+		"models":        []map[string]any{{"model": "gpt-5.2"}},
+		"enabled":       true,
+	}
+	c2, w2 := newTestContext(t, newJSONRequest(t, http.MethodPut, "/admin/channels/"+strconv.FormatInt(created.ID, 10), clearPayload))
+	c2.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(created.ID, 10)}}
+	server.handleUpdateChannel(c2, created.ID)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("清除覆盖时期望状态码 %d，实际 %d，响应体: %s", http.StatusOK, w2.Code, w2.Body.String())
+	}
+	cleared, err := store.GetConfig(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetConfig after clear: %v", err)
+	}
+	if cleared.SortOverride != 0 {
+		t.Fatalf("显式提交 0 应清除覆盖: got %d, want 0", cleared.SortOverride)
+	}
+	if cleared.SortPriority() != 20 {
+		t.Fatalf("清除覆盖后应回落到 priority: got %d, want 20", cleared.SortPriority())
+	}
+}

@@ -4,6 +4,7 @@ import { SearchableSelect } from '../components/searchable-select'
 import { SearchableMultiSelect } from '../components/searchable-multi-select'
 import { DateRangeFilter, normalizeRange, rangeParams, type DateRangeValue } from '../components/date-range'
 import { deleteJSON, getJSON, postJSON, putJSON } from '../lib/api'
+import { copyToClipboard } from '../lib/clipboard'
 import { formatCompact, formatCostPair, formatDateTime, formatInt, formatPercent, formatSeconds } from '../lib/format'
 import { useAutoRefresh } from '../hooks/use-auto-refresh'
 
@@ -95,7 +96,7 @@ export function TokensPage() {
     catch (cause) { setNotice({ kind: 'error', text: cause instanceof Error ? cause.message : '删除失败' }) }
   }
   const copy = async (text: string, label: string) => {
-    try { await navigator.clipboard.writeText(text); setNotice({ kind: 'success', text: `${label}已复制` }) } catch { setNotice({ kind: 'error', text: '复制失败，请手动复制' }) }
+    try { await copyToClipboard(text); setNotice({ kind: 'success', text: `${label}已复制` }) } catch { setNotice({ kind: 'error', text: '复制失败，请手动复制' }) }
   }
 
   return <>

@@ -330,8 +330,10 @@ func (s *Server) sortChannelsByEffectivePriority(cfgs []*model.Config, healthEna
 		})
 	} else {
 		sort.Slice(cfgs, func(i, j int) bool {
-			if cfgs[i].Priority != cfgs[j].Priority {
-				return cfgs[i].Priority > cfgs[j].Priority
+			// 用 SortPriority()：健康度关闭时排序覆盖也必须体现在列表顺序上。
+			left, right := cfgs[i].SortPriority(), cfgs[j].SortPriority()
+			if left != right {
+				return left > right
 			}
 			return cfgs[i].Name < cfgs[j].Name
 		})
@@ -1468,6 +1470,13 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 				req.APIKeys = submitted
 			}
 		}
+	}
+
+	// 排序覆盖由渠道列表的行内编辑与「惩罚排序覆盖」对话框维护，编辑器不提交该字段。
+	// UpdateConfig 会无条件写 sort_override，未提交时必须保留现值，否则编辑器保存
+	// 任何渠道（改个名字、加个模型）都会把手工排序静默清成「自动」。
+	if _, submitted := rawReq["sort_override"]; !submitted {
+		req.SortOverride = existing.SortOverride
 	}
 
 	upd, err := s.store.UpdateConfig(c.Request.Context(), id, req.ToConfig())
