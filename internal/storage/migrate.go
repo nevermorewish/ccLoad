@@ -230,6 +230,9 @@ func migrate(ctx context.Context, db *sql.DB, dialect Dialect) error {
 			if err := ensureChannelsOAuthCredential(ctx, db, dialect); err != nil {
 				return fmt.Errorf("migrate channels oauth_credential: %w", err)
 			}
+			if err := ensureChannelsSortOverride(ctx, db, dialect); err != nil {
+				return fmt.Errorf("migrate channels sort_override: %w", err)
+			}
 			// 增量迁移：将url字段从VARCHAR(191)扩展为TEXT（支持多URL存储）
 			if err := migrateChannelsURLToText(ctx, db, dialect); err != nil {
 				return fmt.Errorf("migrate channels url to text: %w", err)

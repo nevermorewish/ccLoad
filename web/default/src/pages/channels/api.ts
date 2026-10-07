@@ -252,6 +252,12 @@ export const cooldownDetectionTest = (body: Record<string, unknown>) => postJSON
 /** 行内优先级编辑：后端只接受 {updates:[{id,priority}]}。 */
 export const batchPriority = (updates: Array<{ id: number; priority: number }>) => postJSON('/admin/channels/batch-priority', { updates })
 
+/** 手动排序覆盖：sort_override=0 取消覆盖，恢复自动健康度排序。 */
+export const batchSortOverride = (updates: Array<{ id: number; sort_override: number }>) => postJSON('/admin/channels/batch-sort-override', { updates })
+
+/** 拉取全部渠道（不带 limit/offset 时后端返回全量，用于全局排序）。 */
+export const loadAllChannels = () => getJSON<Channel[]>('/admin/channels')
+
 /**
  * 批量高级设置。后端 HandleBatchPatchChannels 只读顶层字段，
  * 绝不接受 { patch: {...} } 包装层。

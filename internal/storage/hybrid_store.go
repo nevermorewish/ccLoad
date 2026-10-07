@@ -406,6 +406,21 @@ func (h *HybridStore) BatchUpdatePriority(ctx context.Context, updates []struct 
 	return affected, nil
 }
 
+func (h *HybridStore) BatchUpdateSortOverride(ctx context.Context, updates []struct {
+	ID           int64
+	SortOverride int
+}) (int64, error) {
+	affected, err := h.sqlite.BatchUpdateSortOverride(ctx, updates)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, update := range updates {
+		h.markChannelDirty(update.ID, false)
+	}
+	return affected, nil
+}
+
 // === Channel URL Runtime State ===
 
 func (h *HybridStore) LoadDisabledURLs(ctx context.Context) (map[int64][]string, error) {

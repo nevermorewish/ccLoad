@@ -642,6 +642,13 @@ func ensureChannelsRPMLimit(ctx context.Context, db *sql.DB, dialect Dialect) er
 		"INTEGER NOT NULL DEFAULT 0")
 }
 
+// ensureChannelsSortOverride 确保channels表有sort_override字段（0=未覆盖，走自动健康度排序）。
+func ensureChannelsSortOverride(ctx context.Context, db *sql.DB, dialect Dialect) error {
+	return ensureColumn(ctx, db, dialect, "channels", "sort_override",
+		"INT NOT NULL DEFAULT 0",
+		"INTEGER NOT NULL DEFAULT 0")
+}
+
 // ensureChannelsMaxConcurrency 确保channels表有max_concurrency字段（0=无限制）。
 func ensureChannelsMaxConcurrency(ctx context.Context, db *sql.DB, dialect Dialect) error {
 	return ensureColumn(ctx, db, dialect, "channels", "max_concurrency",

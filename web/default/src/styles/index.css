@@ -256,6 +256,9 @@ fieldset.card legend { padding: 0 6px; color: #cbd5e1; }
 .metric-ttft strong, .metric-duration strong { font-size: 16px; }
 .metric-requests strong, .metric-rate strong { font-size: 16px; }
 .metric-cost strong { font-size: 15px; }
+/* 健康度列取 healthCache 窗口口径；惩罚排序优先级列为 P_eff（优先级减去惩罚）。 */
+.metric-health strong, .metric-effective strong { font-size: 16px; }
+.metric-effective .table-note, .metric-health .table-note { font-variant-numeric: tabular-nums; }
 :root[data-resolved-theme="light"] .metric-good { color: #15803d; }
 :root[data-resolved-theme="light"] .metric-warn { color: #a16207; }
 :root[data-resolved-theme="light"] .metric-bad { color: #b91c1c; }

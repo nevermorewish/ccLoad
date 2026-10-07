@@ -94,12 +94,19 @@ func (s *Server) sortChannelsByHealth(
 // calculateEffectivePriority 计算渠道的有效优先级
 // P_eff = Priority - Penalty_fail - Penalty_ttfb
 // 越大越优先。medianTTFB 为当前候选集有效首字中位数（秒），<=0 表示不启用相对首字惩罚。
+// 手动排序覆盖（SortOverride）非 0 时直接返回该值，不再叠加任何健康度惩罚。
 func (s *Server) calculateEffectivePriority(
 	ch *modelpkg.Config,
 	stats modelpkg.ChannelHealthStats,
 	cfg modelpkg.HealthScoreConfig,
 	medianTTFB float64,
 ) float64 {
+	// 手动排序接管：管理员显式指定的顺序优先于健康度惩罚。
+	// 冷却过滤在排序之前执行，故障渠道已被排除，故这里不叠加惩罚是安全的。
+	if ch.SortOverride != 0 {
+		return float64(ch.SortOverride)
+	}
+
 	basePriority := float64(ch.Priority)
 
 	successRate := stats.SuccessRate
@@ -179,16 +186,17 @@ func (s *Server) balanceSamePriorityChannels(
 		panic("channelBalancer is nil: server not properly initialized")
 	}
 
-	// 按优先级降序排序（优先级大的排前面），确保相同优先级渠道连续
+	// 按优先级降序排序（优先级大的排前面），确保相同优先级渠道连续。
+	// 基准用 SortPriority()：手动覆盖（SortOverride）在此路径同样生效。
 	result := channels
 	sort.SliceStable(result, func(i, j int) bool {
-		return result[i].Priority > result[j].Priority
+		return result[i].SortPriority() > result[j].SortPriority()
 	})
 
 	// 按优先级分组，组内使用平滑加权轮询
 	groupStart := 0
 	for i := 1; i <= n; i++ {
-		if i == n || result[i].Priority != result[groupStart].Priority {
+		if i == n || result[i].SortPriority() != result[groupStart].SortPriority() {
 			if i-groupStart > 1 {
 				group := result[groupStart:i]
 				s.channelBalancer.selectWithCooldownInPlace(group, keyCooldowns, now)

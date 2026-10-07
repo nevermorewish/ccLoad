@@ -41,6 +41,10 @@ type Store interface {
 		ID       int64
 		Priority int
 	}) (int64, error)
+	BatchUpdateSortOverride(ctx context.Context, updates []struct {
+		ID           int64
+		SortOverride int
+	}) (int64, error)
 
 	// === Channel URL Runtime State ===
 	// 持久化URL级运行态（当前仅记录手动禁用），重启后由URLSelector回填

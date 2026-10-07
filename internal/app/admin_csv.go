@@ -101,7 +101,7 @@ func (s *Server) HandleExportChannelsCSV(c *gin.Context) {
 	writer := csv.NewWriter(buf)
 	defer writer.Flush()
 
-	header := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "urls", "priority", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "scheduled_check_interval_minutes", "scheduled_check_start_time"}
+	header := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "urls", "priority", "sort_override", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "scheduled_check_interval_minutes", "scheduled_check_start_time"}
 	if err := writer.Write(header); err != nil {
 		RespondError(c, http.StatusInternalServerError, err)
 		return
@@ -207,6 +207,7 @@ func (s *Server) HandleExportChannelsCSV(c *gin.Context) {
 			string(apiKeyModelScopeEmptyJSON),
 			string(urlsJSON),
 			strconv.Itoa(cfg.Priority),
+			strconv.Itoa(cfg.SortOverride),
 			strconv.Itoa(cfg.RPMLimit),
 			strconv.Itoa(cfg.MaxConcurrency),
 			string(modelEntriesJSON),
@@ -683,6 +684,15 @@ func (s *Server) parseChannelImportRow(
 		priority = p
 	}
 
+	sortOverride := 0
+	if soRaw := fetch("sort_override"); soRaw != "" {
+		parsed, err := strconv.Atoi(soRaw)
+		if err != nil {
+			return nil, fmt.Sprintf("第%d行排序覆盖格式错误: %v", lineNo, err), true
+		}
+		sortOverride = parsed
+	}
+
 	rpmLimit := 0
 	if rpmRaw := fetch("rpm_limit"); rpmRaw != "" {
 		parsed, err := strconv.Atoi(rpmRaw)
@@ -845,6 +855,7 @@ func (s *Server) parseChannelImportRow(
 		Websockets:                    websockets,
 		URLs:                          urls,
 		Priority:                      priority,
+		SortOverride:                  sortOverride,
 		RPMLimit:                      rpmLimit,
 		MaxConcurrency:                maxConcurrency,
 		ModelEntries:                  modelEntries,

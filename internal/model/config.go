@@ -626,6 +626,9 @@ type Config struct {
 	ProtocolTransformMode         string      `json:"protocol_transform_mode"`
 	URLs                          ChannelURLs `json:"urls"`
 	Priority                      int         `json:"priority"`
+	// SortOverride 手动接管渠道排序：非 0 时直接作为有效优先级，不再叠加失败/首字惩罚；
+	// 0 表示未覆盖，走自动健康度计算。冷却过滤优先于排序，故覆盖不会让故障渠道重新入选。
+	SortOverride                  int         `json:"sort_override"`
 	RPMLimit                      int         `json:"rpm_limit"`       // 每分钟请求数限制，0表示无限制
 	MaxConcurrency                int         `json:"max_concurrency"` // 最大并发请求数，0表示无限制
 	Enabled                       bool        `json:"enabled"`
@@ -708,6 +711,7 @@ func (c *Config) Clone() *Config {
 		ProtocolTransformMode:         c.ProtocolTransformMode,
 		URLs:                          c.URLs.Clone(),
 		Priority:                      c.Priority,
+		SortOverride:                  c.SortOverride,
 		RPMLimit:                      c.RPMLimit,
 		MaxConcurrency:                c.MaxConcurrency,
 		Enabled:                       c.Enabled,
@@ -741,6 +745,19 @@ func (c *Config) Clone() *Config {
 	}
 	dst.ModelEntries = CloneModelEntries(c.ModelEntries)
 	return dst
+}
+
+// SortPriority 返回渠道排序使用的基础优先级：
+// 手动覆盖（SortOverride）非 0 时接管，否则用 Priority。
+// 供健康度关闭时的排序路径与全冷却兜底共用。
+func (c *Config) SortPriority() int {
+	if c == nil {
+		return 0
+	}
+	if c.SortOverride != 0 {
+		return c.SortOverride
+	}
+	return c.Priority
 }
 
 // GetAuthType returns the normalized credential mechanism.

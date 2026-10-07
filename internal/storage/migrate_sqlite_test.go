@@ -2500,3 +2500,69 @@ func TestInitDefaultSettings_RefreshesTokenVisibilityDescription(t *testing.T) {
 		t.Fatalf("saved value changed or description not refreshed: %q %q %q", value, defaultValue, description)
 	}
 }
+
+func TestEnsureChannelsSortOverride_SQLite(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	if err := migrate(ctx, db, DialectSQLite); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// 列已存在，再次调用应为 no-op（幂等）
+	if err := ensureChannelsSortOverride(ctx, db, DialectSQLite); err != nil {
+		t.Fatalf("ensureChannelsSortOverride: %v", err)
+	}
+
+	cols, err := sqliteExistingColumns(ctx, db, "channels")
+	if err != nil {
+		t.Fatalf("sqliteExistingColumns: %v", err)
+	}
+	if !cols["sort_override"] {
+		t.Fatal("sort_override column not found in channels")
+	}
+
+	// 默认值为 0（未覆盖），且能往返读写真实值。
+	// url 列存结构化 JSON，必须走 store 写入而不能手写裸 URL。
+	store := sqlstore.NewSQLStore(db, "sqlite")
+	created, err := store.CreateConfig(ctx, &model.Config{
+		Name:       "legacy-sort",
+		AuthType:   model.AuthTypeAPIKey,
+		URLs:       model.ChannelURLs{{URL: "https://example.com"}},
+		Priority:   5,
+		Enabled:    true,
+		ModelEntries: []model.ModelEntry{{Model: "test-model"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateConfig: %v", err)
+	}
+	if created.SortOverride != 0 {
+		t.Fatalf("new channel SortOverride = %d, want 0", created.SortOverride)
+	}
+
+	loaded, err := store.GetConfig(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
+	if loaded.SortOverride != 0 {
+		t.Fatalf("scanned SortOverride = %d, want 0", loaded.SortOverride)
+	}
+
+	// 写入覆盖值后应能读回，并反映到 SortPriority()
+	if _, err := store.BatchUpdateSortOverride(ctx, []struct {
+		ID           int64
+		SortOverride int
+	}{{ID: created.ID, SortOverride: 42}}); err != nil {
+		t.Fatalf("BatchUpdateSortOverride: %v", err)
+	}
+	loaded, err = store.GetConfig(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetConfig after update: %v", err)
+	}
+	if loaded.SortOverride != 42 {
+		t.Fatalf("scanned SortOverride = %d, want 42", loaded.SortOverride)
+	}
+	if loaded.SortPriority() != 42 {
+		t.Fatalf("SortPriority() = %d, want 42", loaded.SortPriority())
+	}
+}

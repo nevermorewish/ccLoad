@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type DragEvent } from 'react'
 import { Dialog } from '../../components/dialog'
 import { getJSON } from '../../lib/api'
 import type { Channel } from '../../types'
-import { batchPriority, fetchModelsPreview, type ChannelKeyRow, type ModelEntry } from './api'
+import { batchPriority, batchSortOverride, fetchModelsPreview, loadAllChannels, type ChannelKeyRow, type ModelEntry } from './api'
 
 // ---------------------------------------------------------------- 确认
 
@@ -69,6 +69,69 @@ export function ChannelSortDialog({ open, channels, onClose, onSaved }: { open: 
     <Dialog open={open} onClose={onClose} size="md" title="渠道排序" description="拖拽或使用上下按钮调整顺序；保存后自上而下优先级依次递减 10。"
       footer={<><button className="btn" onClick={onClose}>取消</button><button className="btn btn-primary" disabled={busy || !items.length} onClick={() => void save()}>保存排序</button></>}>
       {items.length ? <SortableList items={items} onChange={setItems} /> : <p className="muted">当前筛选结果为空。</p>}
+    </Dialog>
+  )
+}
+
+/** 惩罚排序覆盖：按当前有效优先级排初值，保存后写 sort_override=(N-index)*10。
+ *  设为覆盖的渠道在选路时直接使用该值，不再叠加失败/首字惩罚。
+ *  作用于全部渠道（不是当前页），避免与未显示的渠道错位。 */
+export function SortOverrideDialog({ open, onClose, onSaved }: { open: boolean; onClose: () => void; onSaved: () => void }) {
+  const [items, setItems] = useState<SortItem[]>([])
+  const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setLoading(true); setError(''); setItems([])
+    void loadAllChannels()
+      .then((channels) => {
+        if (cancelled) return
+        // effective_priority 已包含覆盖值（覆盖时它等于 sort_override）；健康度关闭时回退到优先级。
+        const key = (channel: Channel) => Number(channel.effective_priority ?? channel.sort_override ?? channel.priority ?? 0)
+        const sorted = [...channels].sort((a, b) => key(b) - key(a) || a.name.localeCompare(b.name))
+        setItems(sorted.map((channel) => ({
+          id: String(channel.id),
+          label: channel.name,
+          hint: Number(channel.sort_override ?? 0) !== 0
+            ? `已覆盖 ${Number(channel.sort_override)}`
+            : `当前排序值 ${key(channel).toFixed(1)}`,
+        })))
+      })
+      .catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : '渠道加载失败') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [open])
+
+  const save = async () => {
+    setBusy(true); setError('')
+    try {
+      await batchSortOverride(items.map((item, index) => ({ id: Number(item.id), sort_override: (items.length - index) * 10 })))
+      onSaved(); onClose()
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '保存失败') }
+    finally { setBusy(false) }
+  }
+  const clearAll = async () => {
+    setBusy(true); setError('')
+    try {
+      await batchSortOverride(items.map((item) => ({ id: Number(item.id), sort_override: 0 })))
+      onSaved(); onClose()
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '清除失败') }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <Dialog open={open} onClose={onClose} size="md" title="惩罚排序覆盖"
+      description="拖拽调整顺序，保存后自上而下排序值依次递减 10。被覆盖的渠道直接按该值选路，不再叠加失败率与首字惩罚；真正冷却/故障的渠道仍会被排除在候选之外。"
+      footer={<>
+        <button className="btn" onClick={onClose}>取消</button>
+        <button className="btn" disabled={busy || loading || !items.length} onClick={() => void clearAll()}>清除全部覆盖</button>
+        <button className="btn btn-primary" disabled={busy || loading || !items.length} onClick={() => void save()}>保存覆盖</button>
+      </>}>
+      {error && <p className="error-text">{error}</p>}
+      {loading ? <p className="muted">正在加载全部渠道…</p> : items.length ? <SortableList items={items} onChange={setItems} /> : <p className="muted">没有可排序的渠道。</p>}
     </Dialog>
   )
 }

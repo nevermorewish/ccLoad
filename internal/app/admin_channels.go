@@ -175,7 +175,7 @@ func (s *Server) handleListChannels(c *gin.Context) {
 
 	// 排序：健康度开启按 effective_priority 降序；关闭按 priority DESC, name ASC，
 	// 与前端 filterChannels 的排序键对齐，保证分页跨页顺序稳定。
-	priorityMap, successRateMap := s.sortChannelsByEffectivePriority(cfgs, healthEnabled)
+	priorityMap, successRateMap, healthStatsMap := s.sortChannelsByEffectivePriority(cfgs, healthEnabled)
 
 	totalCount := len(cfgs)
 
@@ -188,6 +188,7 @@ func (s *Server) handleListChannels(c *gin.Context) {
 		healthEnabled:        healthEnabled,
 		priorityMap:          priorityMap,
 		successRateMap:       successRateMap,
+		healthStatsMap:       healthStatsMap,
 		channelCooldownsMap:  cooldowns.channels,
 		keyCooldownsMap:      cooldowns.keys,
 		modelCooldownsMap:    cooldowns.models,
@@ -299,10 +300,11 @@ func applyChannelListFilters(cfgs []*model.Config, c *gin.Context, cooldowns cha
 // sortChannelsByEffectivePriority 原地排序 cfgs。
 // 健康度开启时：用 healthCache 计算 effectivePriority 与 successRate（仅 SampleCount>0），
 // 按 effective 降序；关闭时按 priority DESC, name ASC（与前端 filterChannels 排序键对齐）。
-// 返回的两个 map 供 enrichChannel 复用，避免重复计算。
-func (s *Server) sortChannelsByEffectivePriority(cfgs []*model.Config, healthEnabled bool) (priorityMap, successRateMap map[int64]float64) {
+// 返回的三个 map 供 enrichChannel 复用，避免重复计算。
+func (s *Server) sortChannelsByEffectivePriority(cfgs []*model.Config, healthEnabled bool) (priorityMap, successRateMap map[int64]float64, healthStatsMap map[int64]model.ChannelHealthStats) {
 	priorityMap = make(map[int64]float64, len(cfgs))
 	successRateMap = make(map[int64]float64, len(cfgs))
+	healthStatsMap = make(map[int64]model.ChannelHealthStats, len(cfgs))
 	if healthEnabled {
 		hcfg := s.healthCache.Config()
 		samples := make([]float64, 0, len(cfgs))
@@ -310,6 +312,7 @@ func (s *Server) sortChannelsByEffectivePriority(cfgs []*model.Config, healthEna
 		for _, cfg := range cfgs {
 			stats := s.healthCache.GetHealthStats(cfg.ID)
 			statsByID[cfg.ID] = stats
+			healthStatsMap[cfg.ID] = stats
 			if stats.FirstByteSampleCount > 0 && stats.AvgFirstByteSeconds > 0 {
 				samples = append(samples, stats.AvgFirstByteSeconds)
 			}
@@ -333,7 +336,7 @@ func (s *Server) sortChannelsByEffectivePriority(cfgs []*model.Config, healthEna
 			return cfgs[i].Name < cfgs[j].Name
 		})
 	}
-	return priorityMap, successRateMap
+	return priorityMap, successRateMap, healthStatsMap
 }
 
 // paginateChannels 按 query 中的 limit/offset 截取 cfgs。
@@ -361,6 +364,7 @@ type channelEnrichmentContext struct {
 	healthEnabled        bool
 	priorityMap          map[int64]float64
 	successRateMap       map[int64]float64
+	healthStatsMap       map[int64]model.ChannelHealthStats
 	channelCooldownsMap  map[int64]time.Time
 	keyCooldownsMap      map[int64]map[int]time.Time
 	modelCooldownsMap    map[int64]map[string]time.Time
@@ -428,10 +432,20 @@ func (ectx *channelEnrichmentContext) enrichChannel(cfg *model.Config, metadata 
 		oc.CooldownRemainingMS = int64(until.Sub(ectx.now) / time.Millisecond)
 	}
 
-	// 健康度模式：使用预计算的有效优先级和成功率
+	// 健康度模式：使用预计算的有效优先级、成功率和首字统计
 	if ectx.healthEnabled {
 		if rate, ok := ectx.successRateMap[cfg.ID]; ok {
 			oc.SuccessRate = &rate
+		}
+		if stats, ok := ectx.healthStatsMap[cfg.ID]; ok {
+			if stats.SampleCount > 0 {
+				samples := stats.SampleCount
+				oc.HealthSampleCount = &samples
+			}
+			if stats.FirstByteSampleCount > 0 && stats.AvgFirstByteSeconds > 0 {
+				firstByte := stats.AvgFirstByteSeconds
+				oc.HealthAvgFirstByteSeconds = &firstByte
+			}
 		}
 		effPriority := ectx.priorityMap[cfg.ID]
 		oc.EffectivePriority = &effPriority
@@ -1950,6 +1964,31 @@ func (s *Server) HandleBatchDeleteModels(c *gin.Context) {
 }
 
 // HandleBatchUpdatePriority 批量更新渠道优先级
+// validateBatchPriorityUpdates 校验批量优先级/排序覆盖入参：
+// 范围 [-99999, 9999999]，并拒绝同一请求内重复的渠道 ID。
+// 重复 ID 会让 CASE WHEN 只命中第一个分支，静默丢弃后续值，必须显式拒绝。
+func validateBatchPriorityUpdates(ids []int64, values []int) error {
+	seen := make(map[int64]struct{}, len(ids))
+	for i, id := range ids {
+		if id <= 0 {
+			return fmt.Errorf("invalid channel id: %d", id)
+		}
+		if _, dup := seen[id]; dup {
+			return fmt.Errorf("duplicate channel id in request: %d", id)
+		}
+		seen[id] = struct{}{}
+		if values[i] < channelPriorityMin || values[i] > channelPriorityMax {
+			return fmt.Errorf("priority out of range for channel %d: %d", id, values[i])
+		}
+	}
+	return nil
+}
+
+const (
+	channelPriorityMin = -99999
+	channelPriorityMax = 9999999
+)
+
 // POST /admin/channels/batch-priority
 // 使用单条批量 UPDATE 语句更新多个渠道优先级
 func (s *Server) HandleBatchUpdatePriority(c *gin.Context) {
@@ -1973,15 +2012,22 @@ func (s *Server) HandleBatchUpdatePriority(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// 转换为storage层的类型
+	ids := make([]int64, len(req.Updates))
+	values := make([]int, len(req.Updates))
 	updates := make([]struct {
 		ID       int64
 		Priority int
 	}, len(req.Updates))
 	for i, u := range req.Updates {
+		ids[i], values[i] = u.ID, u.Priority
 		updates[i] = struct {
 			ID       int64
 			Priority int
 		}{ID: u.ID, Priority: u.Priority}
+	}
+	if err := validateBatchPriorityUpdates(ids, values); err != nil {
+		RespondError(c, http.StatusBadRequest, err)
+		return
 	}
 
 	// 调用storage层批量更新方法
@@ -1993,6 +2039,61 @@ func (s *Server) HandleBatchUpdatePriority(c *gin.Context) {
 	}
 
 	// 清除缓存
+	s.InvalidateChannelListCache()
+
+	RespondJSON(c, http.StatusOK, gin.H{
+		"updated": rowsAffected,
+		"total":   len(req.Updates),
+	})
+}
+
+// HandleBatchUpdateSortOverride 批量设置渠道手动排序覆盖。
+// POST /admin/channels/batch-sort-override
+// sort_override=0 表示取消覆盖，恢复自动健康度排序。
+func (s *Server) HandleBatchUpdateSortOverride(c *gin.Context) {
+	var req struct {
+		Updates []struct {
+			ID           int64 `json:"id"`
+			SortOverride int   `json:"sort_override"`
+		} `json:"updates"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		RespondError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	if len(req.Updates) == 0 {
+		RespondError(c, http.StatusBadRequest, fmt.Errorf("updates cannot be empty"))
+		return
+	}
+
+	ids := make([]int64, len(req.Updates))
+	values := make([]int, len(req.Updates))
+	updates := make([]struct {
+		ID           int64
+		SortOverride int
+	}, len(req.Updates))
+	for i, u := range req.Updates {
+		ids[i], values[i] = u.ID, u.SortOverride
+		updates[i] = struct {
+			ID           int64
+			SortOverride int
+		}{ID: u.ID, SortOverride: u.SortOverride}
+	}
+	if err := validateBatchPriorityUpdates(ids, values); err != nil {
+		RespondError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	rowsAffected, err := s.store.BatchUpdateSortOverride(c.Request.Context(), updates)
+	if err != nil {
+		log.Printf("批量排序覆盖更新失败: %v", err)
+		RespondError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	// 覆盖值直接改变选路顺序，必须同时失效渠道缓存与轮询游标。
 	s.InvalidateChannelListCache()
 
 	RespondJSON(c, http.StatusOK, gin.H{

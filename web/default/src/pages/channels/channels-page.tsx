@@ -12,7 +12,7 @@ import {
   refreshModelsBatch, removeChannel, uploadJSON, type ModelEntry,
 } from './api'
 import { ChannelEditorDialog } from './channel-editor-dialog'
-import { ChannelSortDialog, ConfirmDialog, ModelImportDialog } from './dialogs'
+import { ChannelSortDialog, ConfirmDialog, ModelImportDialog, SortOverrideDialog } from './dialogs'
 import { aggregateChannelStats, formatCost, formatDuration, formatRemaining, type ChannelStats } from './stats'
 import { TestDialog } from './test-dialog'
 
@@ -34,7 +34,31 @@ const modelNames = (row: Row) => (Array.isArray(row.models) ? row.models : []).m
 const errorMessage = (cause: unknown, fallback: string) => cause instanceof Error ? cause.message : fallback
 // 指标列高亮：阈值与旧版一致（首字 5s/15s，耗时 15s/30s，成功率 95%/80%）。
 const timingTone = (seconds?: number, warn = 5, bad = 15) => { const value = Number(seconds); return !Number.isFinite(value) || value <= 0 ? '' : value >= bad ? 'metric-bad' : value >= warn ? 'metric-warn' : 'metric-good' }
-const rateTone = (ratio: number) => !Number.isFinite(ratio) ? '' : ratio >= 0.95 ? 'metric-good' : ratio >= 0.8 ? 'metric-warn' : 'metric-bad'
+const rateTone = (ratio: number | null | undefined) => !Number.isFinite(Number(ratio)) ? '' : Number(ratio) >= 0.95 ? 'metric-good' : Number(ratio) >= 0.8 ? 'metric-warn' : 'metric-bad'
+// 有效优先级按偏离基准优先级着色：扣分越多越红，无偏离为中性。
+const effectiveTone = (effective: number, base: number) => {
+  const delta = base - effective
+  return !Number.isFinite(delta) || delta < 0.1 ? '' : delta >= 10 ? 'metric-bad' : 'metric-warn'
+}
+const formatPriorityScore = (value: number) => Number.isFinite(value) ? value.toFixed(1) : '-'
+const effectiveDeltaLabel = (effective: number, base: number) => {
+  const delta = base - effective
+  if (!Number.isFinite(delta) || Math.abs(delta) < 0.1) return '无惩罚'
+  return `${delta > 0 ? '−' : '+'}${Math.abs(delta).toFixed(1)}`
+}
+// 健康度列取 healthCache 窗口口径（enable_health_score 开启时后端下发），
+// 与右侧 24h 统计列不是同一份数据，两者可能不一致。
+const healthFromRow = (row: Row) => {
+  const rate = row.success_rate == null ? null : Number(row.success_rate)
+  const firstByte = row.health_avg_first_byte_seconds == null ? null : Number(row.health_avg_first_byte_seconds)
+  const samples = row.health_sample_count == null ? null : Number(row.health_sample_count)
+  if (rate == null && firstByte == null) return null
+  return {
+    rate: Number.isFinite(rate as number) ? rate : null,
+    firstByte: Number.isFinite(firstByte as number) && (firstByte as number) > 0 ? firstByte : null,
+    samples: Number.isFinite(samples as number) ? samples : null,
+  }
+}
 
 export function ChannelsPage() {
   const readOnly = useMemo(() => isAPITokenRole(), [])
@@ -57,6 +81,7 @@ export function ChannelsPage() {
   const [testTarget, setTestTarget] = useState<{ channel: Channel; model?: string } | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Row | 'batch' | null>(null)
   const [sortOpen, setSortOpen] = useState(false)
+  const [sortOverrideOpen, setSortOverrideOpen] = useState(false)
   const [batchImportOpen, setBatchImportOpen] = useState(false)
   const [oauthDialog, setOAuthDialog] = useState<null | 'login' | 'import' | 'cleanup'>(null)
   // 批量
@@ -320,6 +345,7 @@ export function ChannelsPage() {
           <label className="btn">导入 JSON<input hidden type="file" accept=".json,application/json" onChange={(event) => { void importJSONFile(event.target.files?.[0]); event.target.value = '' }} /></label>
           <button className="btn" onClick={() => void exportFile('json')}>导出 JSON</button>
           <button className="btn" onClick={() => setSortOpen(true)}>排序</button>
+          <button className="btn" onClick={() => setSortOverrideOpen(true)}>惩罚排序覆盖</button>
           <button className="btn btn-primary" onClick={() => setEditor({ open: true, channel: null, duplicate: false })}>+ 添加渠道</button>
         </>}
       </div>
@@ -403,10 +429,10 @@ export function ChannelsPage() {
     {/* ---------------- 表格 ---------------- */}
     <div className="table-wrap"><table><thead><tr>
       {!readOnly && <th><input type="checkbox" aria-label="全选当前页" checked={allVisibleSelected} onChange={(event) => setSelected((current) => event.target.checked ? [...new Set([...current, ...rows.map((row) => row.id)])] : current.filter((id) => !rows.some((row) => row.id === id)))} /></th>}
-      <th>渠道</th><th>模型</th><th>优先级</th><th className="metric-col">首字</th><th className="metric-col">耗时</th><th className="metric-col">请求数</th><th className="metric-col">成功率</th><th className="metric-col">成本</th><th>状态</th>{!readOnly && <th>启用</th>}<th>操作</th>
+      <th>渠道</th><th>模型</th><th>优先级</th><th className="metric-col">健康度</th><th className="metric-col">惩罚排序优先级</th><th className="metric-col">首字</th><th className="metric-col">耗时</th><th className="metric-col">请求数</th><th className="metric-col">成功率</th><th className="metric-col">成本</th><th>状态</th>{!readOnly && <th>启用</th>}<th>操作</th>
     </tr></thead><tbody>
-      {loading && !rows.length && <tr><td colSpan={13} className="muted">加载中…</td></tr>}
-      {!loading && !rows.length && <tr><td colSpan={9} className="muted">没有符合条件的渠道</td></tr>}
+      {loading && !rows.length && <tr><td colSpan={readOnly ? 12 : 14} className="muted">加载中…</td></tr>}
+      {!loading && !rows.length && <tr><td colSpan={readOnly ? 12 : 14} className="muted">没有符合条件的渠道</td></tr>}
       {rows.map((row) => {
         const urls = Array.isArray(row.urls) ? row.urls as Array<{ url?: string }> : []
         const models = modelNames(row)
@@ -417,6 +443,11 @@ export function ChannelsPage() {
         const multiplierMin = row.cost_multiplier_min as number | undefined
         const multiplierMax = row.cost_multiplier_max as number | undefined
         const effective = row.effective_priority as number | undefined
+        const override = Number(row.sort_override ?? 0)
+        // 后端在 healthEnabled 时对每个渠道都会下发 effective_priority（含无样本渠道），
+        // 因此它等价于「健康度模式已开启」；健康度列另据 success_rate 判断有无样本。
+        const healthMode = effective != null
+        const health = healthFromRow(row)
         return <tr key={row.id} id={`channel-${row.id}`}>
           {!readOnly && <td><input type="checkbox" aria-label={`选择 ${row.name}`} checked={selected.includes(row.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, row.id] : current.filter((id) => id !== row.id))} /></td>}
           <td className="cell-stack">
@@ -424,10 +455,19 @@ export function ChannelsPage() {
             {urls[0]?.url && <span className="table-note" title={urls.map((item) => item.url).join('\n')}>{urls[0].url}{urls.length > 1 ? ` 等 ${urls.length} 个` : ''}</span>}
           </td>
           <td><span title={models.join('\n')}>{models.length ? `${models.slice(0, 3).join(', ')}${models.length > 3 ? ` 等 ${models.length} 个` : ''}` : '-'}</span></td>
-          <td className="cell-stack">
+          <td>
             {readOnly ? String(row.priority ?? 0) : <input className="input priority-input" type="number" min={-99999} max={9999999} aria-label={`${row.name} 优先级`} value={priorityDrafts[row.id] ?? String(row.priority ?? 0)} onChange={(event) => editPriority(row, event.target.value)} onBlur={() => void flushPriority(row)} onKeyDown={(event) => priorityKey(event, row)} />}
-            {effective != null && <span className="table-note" title="健康度模式下的有效优先级">有效 {effective.toFixed(1)}{row.success_rate != null ? ` · 成功率 ${(Number(row.success_rate) * 100).toFixed(1)}%` : ''}</span>}
           </td>
+          <td className="metric-cell metric-health" title={health ? `健康度统计窗口内：${health.samples?.toLocaleString() ?? '?'} 个样本（与右侧 24h 统计列口径不同）` : undefined}>{healthMode ? (health ? <>
+            <strong className={rateTone(health.rate)}>{health.rate == null ? '-' : `${(health.rate * 100).toFixed(1)}%`}</strong>
+            <span className="table-note">{health.firstByte == null ? '首字 -' : `首字 ${formatDuration(health.firstByte)}`}</span>
+          </> : <span className="muted" title="该渠道在健康度统计窗口内没有样本">无样本</span>) : <span className="muted" title={readOnly ? '只读视图不提供健康度数据' : '未开启健康度排序（enable_health_score）'}>-</span>}</td>
+          <td className="metric-cell metric-effective" title={override !== 0
+            ? `已手动覆盖为 ${override}，直接决定选路顺序（不叠加健康度惩罚）`
+            : effective != null ? `惩罚后排序优先级 P_eff = 优先级 ${Number(row.priority ?? 0)} 减去失败/首字惩罚` : undefined}>{effective != null ? <>
+            <strong className={override !== 0 ? 'metric-good' : effectiveTone(effective, Number(row.priority ?? 0))}>{formatPriorityScore(effective)}</strong>
+            <span className="table-note">{override !== 0 ? '已覆盖' : effectiveDeltaLabel(effective, Number(row.priority ?? 0))}</span>
+          </> : <span className="muted">-</span>}</td>
           <td className="metric-cell metric-ttft">{stat ? <><strong className={timingTone(stat.avgFirstByteTimeSeconds)}>{formatDuration(stat.avgFirstByteTimeSeconds)}</strong><span className="table-note">首字</span></> : <span className="muted">-</span>}</td>
           <td className="metric-cell metric-duration">{stat ? <><strong className={timingTone(stat.avgDurationSeconds, 15, 30)}>{formatDuration(stat.avgDurationSeconds)}</strong><span className="table-note">耗时</span></> : <span className="muted">-</span>}</td>
           <td className="metric-cell metric-requests">{stat ? <><strong>{stat.total.toLocaleString()}</strong><span className="table-note">成功 {stat.success.toLocaleString()}</span></> : <span className="muted">-</span>}</td>
@@ -473,6 +513,7 @@ export function ChannelsPage() {
       message={deleteTarget === 'batch' ? `确定删除选中的 ${selected.length} 个渠道吗？此操作不可恢复。` : `确定删除渠道「${deleteTarget?.name ?? ''}」吗？此操作不可恢复。`}
       confirmLabel="删除" onClose={() => setDeleteTarget(null)} onConfirm={confirmDelete} />
     <ChannelSortDialog open={sortOpen} channels={rows} onClose={() => setSortOpen(false)} onSaved={() => { notify('success', '排序已保存'); void refresh() }} />
+    <SortOverrideDialog open={sortOverrideOpen} onClose={() => setSortOverrideOpen(false)} onSaved={() => { notify('success', '惩罚排序覆盖已保存'); void refresh() }} />
     <ModelImportDialog open={batchImportOpen} batch onClose={() => setBatchImportOpen(false)} onImport={(models, mode) => runBatch('导入模型', () => batchPatch(selected, { models, model_import_mode: mode }), true)} />
     <Dialog open={oauthDialog === 'login'} onClose={() => setOAuthDialog(null)} size="md" title="OAuth 登录" description="选择认证类型，然后生成授权链接或导入凭证。"><OAuthLoginPanel onChanged={() => void refresh()} /></Dialog>
     <Dialog open={oauthDialog === 'import'} onClose={() => setOAuthDialog(null)} size="md" title="导入 OAuth 凭证"><OAuthImportPanel onChanged={() => void refresh()} /></Dialog>

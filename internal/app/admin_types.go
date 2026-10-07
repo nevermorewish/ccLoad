@@ -28,6 +28,7 @@ type ChannelRequest struct {
 	KeyStrategy                   string                        `json:"key_strategy,omitempty"` // Key使用策略:sequential, round_robin
 	URLs                          model.ChannelURLs             `json:"urls" binding:"required,min=1"`
 	Priority                      int                           `json:"priority"`
+	SortOverride                  int                           `json:"sort_override"`
 	RPMLimit                      int                           `json:"rpm_limit"`                       // 每分钟请求数限制，0表示无限制
 	MaxConcurrency                int                           `json:"max_concurrency"`                 // 最大并发请求数，0表示无限制
 	Models                        []model.ModelEntry            `json:"models" binding:"required,min=1"` // 模型配置（包含重定向）
@@ -518,6 +519,7 @@ func (cr *ChannelRequest) ToConfig() *model.Config {
 		ProtocolTransformMode:         cr.ProtocolTransformMode,
 		URLs:                          cr.URLs.Clone(),
 		Priority:                      cr.Priority,
+		SortOverride:                  cr.SortOverride,
 		RPMLimit:                      cr.RPMLimit,
 		MaxConcurrency:                cr.MaxConcurrency,
 		ModelEntries:                  normalizedModels,
@@ -682,7 +684,9 @@ type ChannelWithCooldown struct {
 	ProtocolProbeRetryAt          *time.Time             `json:"protocol_probe_retry_at,omitempty"`
 	ProtocolProbeRetryRemainingMS int64                  `json:"protocol_probe_retry_remaining_ms,omitempty"`
 	EffectivePriority             *float64               `json:"effective_priority,omitempty"` // 健康度模式下的有效优先级
-	SuccessRate                   *float64               `json:"success_rate,omitempty"`       // 成功率(0-1)
+	SuccessRate                   *float64               `json:"success_rate,omitempty"`       // 健康度窗口成功率(0-1)，仅 SampleCount>0 时下发
+	HealthAvgFirstByteSeconds     *float64               `json:"health_avg_first_byte_seconds,omitempty"`
+	HealthSampleCount             *int64                 `json:"health_sample_count,omitempty"`
 	ManagementAccount             *channelManagementView `json:"management_account,omitempty"`
 
 	// 成本倍率区间（角标展示）：api_key 渠道按启用 Key 计算，OAuth 渠道即渠道倍率；
