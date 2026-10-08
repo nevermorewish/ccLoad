@@ -115,6 +115,17 @@ func TestActiveRequestManager_BytesAndFirstByteTime(t *testing.T) {
 	}
 }
 
+func TestActiveRequestManager_SubMicrosecondFirstByteTime(t *testing.T) {
+	m := newActiveRequestManager()
+	id := beginTestActiveRequest(m, time.UnixMilli(100), "m", "1.1.1.1", true)
+	m.SetClientFirstByteTime(id, time.Nanosecond)
+	m.SetClientFirstByteTime(id, time.Second)
+	got := m.List()[0]
+	if got.ClientFirstByteTime != 1e-6 || got.UpstreamStatus != activeRequestStatusReceiving {
+		t.Fatalf("sub-microsecond first byte was lost or overwritten: %+v", got)
+	}
+}
+
 func TestActiveRequestManager_AbortCancelsAttemptWithOperatorCause(t *testing.T) {
 	m := newActiveRequestManager()
 

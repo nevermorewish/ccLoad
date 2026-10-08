@@ -77,11 +77,13 @@ export function StatsPage() {
     const current = ++generation.current
     setLoading(true)
     try {
-      const response = await getJSON<StatsResponse>('/dashboard/stats', queryParams(filters))
+      const params = queryParams(filters)
+      if (!hideChannels) params.health_timeline = 1
+      const response = await getJSON<StatsResponse>('/dashboard/stats', params)
       if (current === generation.current) { setData(response); setError('') }
     } catch (cause) { if (current === generation.current) setError(cause instanceof Error ? cause.message : '统计加载失败') }
     finally { if (current === generation.current) setLoading(false) }
-  }, [filters, queryParams])
+  }, [filters, queryParams, hideChannels])
 
   // 筛选项只带时间参数，避免当前筛选把候选缩窄（旧版 stats.js:709-711）。
   useEffect(() => {

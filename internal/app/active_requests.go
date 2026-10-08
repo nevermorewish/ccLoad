@@ -254,11 +254,8 @@ func (m *activeRequestManager) SetClientFirstByteTime(id int64, d time.Duration)
 		m.mu.Unlock()
 		return
 	}
-	usec := d.Microseconds()
-	if usec <= 0 {
-		m.mu.Unlock()
-		return
-	}
+	// 0 是尚未收到首字节的哨兵；正的亚微秒耗时不能在精度转换时丢失。
+	usec := max(d.Microseconds(), 1)
 	req.clientFirstByteTimeUsec.CompareAndSwap(0, usec) // 只有首次（0值）才写入
 	req.UpstreamStatus = activeRequestStatusReceiving
 	m.mu.Unlock()

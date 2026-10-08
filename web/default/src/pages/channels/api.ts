@@ -174,19 +174,17 @@ export function formToPayload(form: ChannelForm, isOAuth: boolean, extras: { cus
 }
 
 /**
- * URL 启停、test-url、url-stats 都按 RuntimeURL 匹配：exact URL 末尾带 '#'
+ * URL 启停、test-url、编辑器 URL 统计都按 RuntimeURL 匹配：exact URL 末尾带 '#'
  * （internal/model/config.go:RuntimeURL）。不带 '#' 会报 "url not found in channel"。
  */
 export const runtimeURL = (entry: { url: string; exact?: boolean }) => entry.exact ? `${entry.url.trim()}#` : entry.url.trim()
 
 export const loadEditor = (id: number) => getJSON<ChannelEditorData>(`/admin/channels/${id}/editor`)
-export const loadURLStats = (id: number) => getJSON<{ items?: ChannelURLStat[] }>(`/admin/channels/${id}/url-stats`)
 export const loadKeys = (id: number) => getJSON<ChannelKeyRow[]>(`/admin/channels/${id}/keys`)
 export const createChannel = (payload: Record<string, unknown>) => postJSON('/admin/channels', payload)
 export const updateChannel = (id: number, payload: Record<string, unknown>) => putJSON(`/admin/channels/${id}`, payload)
 export const removeChannel = (id: number) => deleteJSON(`/admin/channels/${id}`)
 export const toggleKey = (id: number, index: number, disabled: boolean) => postJSON(`/admin/channels/${id}/${disabled ? 'key-disable' : 'key-enable'}`, { key_index: index })
-export const setKeyCooldown = (id: number, index: number, durationMs: number) => postJSON(`/admin/channels/${id}/keys/${index}/cooldown`, { duration_ms: durationMs })
 export const deleteKey = (id: number, index: number) => deleteJSON(`/admin/channels/${id}/keys/${index}`)
 export const toggleURL = (id: number, url: string, disabled: boolean) => postJSON(`/admin/channels/${id}/${disabled ? 'url-disable' : 'url-enable'}`, { url })
 export const testChannel = (id: number, body: Record<string, unknown>) => postJSON(`/admin/channels/${id}/test`, body)
@@ -240,7 +238,6 @@ export const checkDuplicate = (urls: unknown[]) => postJSON<{ duplicates?: Array
 export const websocketProbe = (body: Record<string, unknown>) => postJSON('/admin/channels/websocket-probe', body)
 export const fetchKeyRate = (body: Record<string, unknown>) => postJSON<{ effective_rate_multiplier?: number }>('/admin/channels/billing/fetch', body)
 export const refreshCredential = (id: number, provider: string) => postJSON(`/admin/channels/${id}/${provider}-credential/refresh`, {})
-export const modelStats = (id: number) => getJSON<Array<Record<string, unknown>>>(`/admin/channels/${id}/model-stats`)
 export const oauthUsage = (id: number) => postJSON(`/admin/channels/${id}/oauth-usage`, {})
 export const codexQuotaReset = (id: number) => postJSON(`/admin/channels/${id}/codex-quota-reset`, {})
 export const codebuddyCheckin = (id: number) => postJSON(`/admin/channels/${id}/codebuddy-checkin`, {})

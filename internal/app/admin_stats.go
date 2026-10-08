@@ -203,12 +203,12 @@ func (s *Server) HandlePublicSummary(c *gin.Context) {
 }
 
 // HandleDashboardSummary 返回首页概览所需的协议与认证类型汇总。
-// GET /dashboard/summary?range=today
-// 首页不展示 RPM，跳过 RPM 查询；统计范围由 Web 身份强制作用域。
+// GET /dashboard/summary?range=today&include_rpm=1
+// RPM 按需查询；统计范围由 Web 身份强制作用域。
 func (s *Server) HandleDashboardSummary(c *gin.Context) {
 	filter := BuildLogFilter(c)
 	filter.LogSource = model.LogSourceProxy
-	s.respondSummary(c, &filter, false)
+	s.respondSummary(c, &filter, c.Query("include_rpm") == "1")
 }
 
 func (s *Server) respondSummary(c *gin.Context, logFilter *model.LogFilter, includeRPM bool) {

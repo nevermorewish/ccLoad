@@ -566,14 +566,18 @@ func TestDashboardModelsMetricsAndStatsExposeOnlyScopedChannels(t *testing.T) {
 		t.Fatalf("filter option models=%v, want %v", got, want)
 	}
 
-	summaryCtx, summaryW := newTestContext(t, newRequest(http.MethodGet, "/dashboard/summary?range=today", nil))
+	summaryCtx, summaryW := newTestContext(t, newRequest(http.MethodGet, "/dashboard/summary?range=today&include_rpm=1&auth_token_id=99", nil))
 	summaryCtx.Set(webIdentityContextKey, WebIdentity{Role: model.WebRoleAPIToken, AuthTokenID: 42})
 	server.HandleDashboardSummary(summaryCtx)
 	summary := mustParseAPIResponse[struct {
-		TotalRequests int `json:"total_requests"`
+		TotalRequests int            `json:"total_requests"`
+		RPMStats      model.RPMStats `json:"rpm_stats"`
 	}](t, summaryW.Body.Bytes()).Data
 	if summary.TotalRequests != 2 {
 		t.Fatalf("summary total=%d, want owner total 2", summary.TotalRequests)
+	}
+	if summary.RPMStats.PeakRPM != 2 || summary.RPMStats.RecentRPM != 2 {
+		t.Fatalf("summary RPM must include only the bound token's requests: %+v", summary.RPMStats)
 	}
 
 	bootstrapCtx, bootstrapW := newTestContext(t, newRequest(http.MethodGet, "/dashboard/logs/bootstrap?range=today", nil))

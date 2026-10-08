@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { build, translate, PAGES, LOCALES, SITE_URL, INDEXNOW_KEY } from './build.mjs';
+import { build, translate, renderPage, loadMessages, PAGES, LOCALES, SITE_URL, INDEXNOW_KEY } from './build.mjs';
 
 const outDir = build({ outDir: fs.mkdtempSync(path.join(os.tmpdir(), 'ccload-www-')) });
 test.after(() => fs.rmSync(outDir, { recursive: true, force: true }));
@@ -16,6 +16,19 @@ const pages = PAGES.flatMap(page => LOCALES.map(locale => {
 function canonicalOf(html) {
   return html.match(/<link rel="canonical" href="([^"]+)">/)?.[1];
 }
+
+test('Windows 换行同样注入导航、页脚和语言跳转', () => {
+  const source = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
+  const messages = loadMessages();
+  for (const locale of LOCALES) {
+    const lf = renderPage(source, 'index', locale, messages);
+    const crlf = renderPage(source.replace(/\n/g, '\r\n'), 'index', locale, messages);
+    assert.equal(crlf, lf);
+    assert.match(crlf, /<nav class="www-nav"/);
+    assert.match(crlf, /<footer class="www-footer"/);
+    assert.match(crlf, /location\.replace/);
+  }
+});
 
 test('每个页面按语言预渲染，不残留运行时 i18n', () => {
   for (const { rel, locale, html } of pages) {

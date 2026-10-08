@@ -358,7 +358,7 @@ export function renderPage(source, page, locale, messages) {
     return escapeHtml(dict[key]);
   };
 
-  let html = renderIcons(source)
+  let html = renderIcons(source.replace(/\r\n?/g, '\n'))
     .replace(/(<body\b[^>]*>\n)/, `$1  ${renderNav(page, alternate, t)}\n`)
     .replace(/(\n)<\/body>/, `$1  ${renderFooter(t)}\n</body>`)
     .replace(/<html lang="[^"]*">/, `<html lang="${locale.code}">`);

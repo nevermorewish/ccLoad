@@ -70,7 +70,7 @@ export function DashboardPage() {
     const current = ++generation.current
     setLoading(true)
     try {
-      const data = await getJSON<Summary>('/dashboard/summary', rangeParams(range))
+      const data = await getJSON<Summary>('/dashboard/summary', { ...rangeParams(range), include_rpm: 1 })
       if (current !== generation.current) return // 丢弃过期响应
       setSummary(data); setError(null)
     } catch (cause) { if (current === generation.current) setError(cause instanceof Error ? cause.message : '概览加载失败') }

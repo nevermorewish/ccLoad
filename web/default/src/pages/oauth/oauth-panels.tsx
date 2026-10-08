@@ -25,7 +25,7 @@ const PROVIDERS = [
 const METHODS: Record<string, Array<{ value: string; label: string }>> = {
   codex: [{ value: 'oauth', label: '浏览器 OAuth' }, { value: 'pat', label: 'Personal Access Token' }],
   xai: [{ value: 'manual', label: '手动授权' }, { value: 'refresh_token', label: '刷新令牌' }, { value: 'sso', label: 'SSO Cookie' }],
-  anthropic: [{ value: 'code', label: '授权码' }, { value: 'cookie', label: 'sessionKey Cookie' }],
+  anthropic: [{ value: 'code', label: '授权码' }],
   zai: [{ value: 'oauth', label: 'ZCode 浏览器登录' }, { value: 'api_key', label: 'Coding Plan API Key' }],
   codebuddy: [{ value: 'oauth', label: '浏览器 OAuth' }, { value: 'file', label: '认证文件' }],
 }
@@ -129,18 +129,6 @@ export function OAuthLoginPanel({ onChanged }: { onChanged?: () => void }) {
           setProgress({ ...tally, errors: [...tally.errors] })
         })
         setNotice(`导入完成：新增 ${tally.created}，跳过 ${tally.skipped}，失败 ${tally.failed}`)
-      } else if (provider === 'anthropic') {
-        // 每行一个 sessionKey，逐个提交并汇总行号级失败。
-        const lines = value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
-        const tally = { processed: 0, total: lines.length, created: 0, skipped: 0, failed: 0, errors: [] as string[] }
-        setProgress({ ...tally })
-        for (const [index, sessionKey] of lines.entries()) {
-          try { await postJSON('/admin/anthropic/oauth/cookie', { session_key: sessionKey }); tally.created++ }
-          catch (cause) { tally.failed++; tally.errors.push(`第 ${index + 1} 行：${cause instanceof Error ? cause.message : '失败'}`) }
-          tally.processed++
-          setProgress({ ...tally, errors: [...tally.errors] })
-        }
-        setNotice(`导入完成：成功 ${tally.created}，失败 ${tally.failed}`)
       } else if (provider === 'zai' || provider === 'cursor') {
         await postJSON(`/admin/${provider}/credentials/import`, { api_key: value })
         setNotice('已导入凭证')
@@ -156,7 +144,7 @@ export function OAuthLoginPanel({ onChanged }: { onChanged?: () => void }) {
 
   const readFile = async (file: File | undefined) => { if (file) setSecret(await file.text()) }
 
-  const secretPlaceholder = provider === 'codex' ? 'at-...' : provider === 'anthropic' ? 'sk-ant-sid01-...（每行一个）' : provider === 'xai' ? '每行一个凭证' : provider === 'codebuddy' ? '认证文件 JSON 内容' : 'API Key'
+  const secretPlaceholder = provider === 'codex' ? 'at-...' : provider === 'xai' ? '每行一个凭证' : provider === 'codebuddy' ? '认证文件 JSON 内容' : 'API Key'
   const pending = Boolean(flow?.state) && !TERMINAL.has(String(flow?.status ?? ''))
 
   return <div className="cell-stack">

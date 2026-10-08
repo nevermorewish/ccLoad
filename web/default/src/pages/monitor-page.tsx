@@ -61,7 +61,7 @@ export function MonitorPage() {
     if (!Number.isFinite(value) || value < bounds.min || value > bounds.max) { setError(`检测间隔需在 ${bounds.min}–${bounds.max} 分钟之间`); return }
     setSavingInterval(true); setError(''); setNotice('')
     try {
-      await putJSON(`/admin/settings/${encodeURIComponent('channel_monitor_interval_minutes')}`, { value: String(value) })
+      await postJSON('/admin/settings/batch', { channel_monitor_interval_minutes: String(value) })
       // 该项不是热更新设置，后端会重启进程；提示后轮询等待服务恢复。
       setNotice('间隔已保存，服务正在重启，稍后自动刷新')
       setIntervalMinutes(value)

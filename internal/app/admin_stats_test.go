@@ -186,26 +186,29 @@ func TestStatsEndpoints_HeavyFieldsAreOptIn(t *testing.T) {
 		t.Fatal("by_channel=1 时应附带逐渠道 channels")
 	}
 
-	summaryFields := func(handler func(*gin.Context), identity *WebIdentity) map[string]json.RawMessage {
+	summaryFields := func(handler func(*gin.Context), identity *WebIdentity, query string) map[string]json.RawMessage {
 		t.Helper()
-		c, w := newTestContext(t, newRequest(http.MethodGet, "/summary?range=today", nil))
+		c, w := newTestContext(t, newRequest(http.MethodGet, "/summary?range=today"+query, nil))
 		if identity != nil {
 			c.Set(webIdentityContextKey, *identity)
 		}
 		handler(c)
 		return mustParseAPIResponse[map[string]json.RawMessage](t, w.Body.Bytes()).Data
 	}
-	dashboard := summaryFields(server.HandleDashboardSummary, &WebIdentity{Role: model.WebRoleAdmin})
+	dashboard := summaryFields(server.HandleDashboardSummary, &WebIdentity{Role: model.WebRoleAdmin}, "")
 	if _, ok := dashboard["rpm_stats"]; ok {
 		t.Fatalf("dashboard summary 不应计算 rpm_stats: %v", dashboard)
 	}
 	if string(dashboard["total_requests"]) != "1" {
 		t.Fatalf("dashboard total_requests=%s, want 1", dashboard["total_requests"])
 	}
-	public := summaryFields(server.HandlePublicSummary, nil)
-	for _, field := range []string{"rpm_stats", "duration_seconds", "is_today", "range"} {
-		if _, ok := public[field]; !ok {
-			t.Fatalf("public summary 缺少 %s: %v", field, public)
+	dashboardWithRPM := summaryFields(server.HandleDashboardSummary, &WebIdentity{Role: model.WebRoleAdmin}, "&include_rpm=1")
+	public := summaryFields(server.HandlePublicSummary, nil, "")
+	for name, summary := range map[string]map[string]json.RawMessage{"public": public, "dashboard with RPM": dashboardWithRPM} {
+		for _, field := range []string{"rpm_stats", "duration_seconds", "is_today", "range"} {
+			if _, ok := summary[field]; !ok {
+				t.Fatalf("%s summary 缺少 %s: %v", name, field, summary)
+			}
 		}
 	}
 }

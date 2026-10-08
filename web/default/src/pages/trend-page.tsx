@@ -79,6 +79,7 @@ export function TrendPage() {
     setLoading(true)
     try {
       const params: Record<string, string | number> = { ...rangeParams(range), bucket_min: bucket }
+      if (!hideChannels) params.by_channel = 1
       if (state.clientProtocol) params.client_protocol = state.clientProtocol
       if (state.model) params.model = state.model
       if (state.authToken && tokenOptions) params.auth_token_id = state.authToken

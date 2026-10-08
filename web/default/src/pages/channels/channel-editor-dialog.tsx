@@ -5,7 +5,7 @@ import { SearchableMultiSelect } from '../../components/searchable-multi-select'
 import type { Channel, ChannelURLStat } from '../../types'
 import {
   AUTH_TYPES, URL_PROTOCOLS, checkDuplicate, createChannel, fetchChannelModels, fetchKeyRate, fetchModelsPreview,
-  formFromEditor, formToPayload, loadEditor, loadKeys, loadURLStats, mergeModelEntries, normalizeModelEntries,
+  formFromEditor, formToPayload, loadEditor, loadKeys, mergeModelEntries, normalizeModelEntries,
   runtimeURL, testChannelURL, toggleKey, toggleURL, updateChannel, websocketProbe,
   type ChannelEditorData, type ChannelForm, type ChannelKeyRow, type ModelEntry,
 } from './api'
@@ -220,7 +220,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
   // ---- URL ----
   const flipURL = async (index: number, disabled: boolean) => {
     if (!editing || duplicateOf) return
-    try { await toggleURL(editing.id, runtimeURL(form.urls[index]), disabled); setUrlStats((await loadURLStats(editing.id)).items ?? []) }
+    try { await toggleURL(editing.id, runtimeURL(form.urls[index]), disabled); setUrlStats((await loadEditor(editing.id)).url_stats?.items ?? []) }
     catch (cause) { setError(cause instanceof Error ? cause.message : '操作失败') }
   }
   const testURL = async (index: number) => {
