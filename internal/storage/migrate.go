@@ -600,6 +600,8 @@ func initDefaultSettings(ctx context.Context, db *sql.DB, dialect Dialect) error
 		{"responses_ws_max_transcript_bytes", "0", "int", responsesWSMaxTranscriptBytesDescription, "0"},
 		{"responses_ws_max_connections", "0", "int", responsesWSMaxConnectionsDescription, "0"},
 		{"responses_ws_max_connections_per_token", "0", "int", responsesWSMaxConnectionsPerTokenDescription, "0"},
+		// 会话粘性：同一会话绑定上次成功的渠道与 Key，避免同层轮询换账号导致 prompt cache 整段重写
+		{config.SessionAffinityEnabledSettingKey, "true", "bool", "启用会话粘性(同一会话优先复用上次成功的渠道与 Key)", "true"},
 	}
 
 	// 单条多行 INSERT：逐条写入是迁移里语句数最多的一段，每次启动/建库都要付一遍往返。

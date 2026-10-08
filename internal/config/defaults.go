@@ -16,6 +16,8 @@ const (
 	// HTTPReadTimeoutSettingKey 控制下游请求读取超时（0 = 内建默认值）。
 	HTTPReadTimeoutSettingKey  = "http_read_timeout_seconds"
 	CodexMap429To503SettingKey = "codex_map_429_to_503"
+	// SessionAffinityEnabledSettingKey 控制会话粘性：开启后同一会话绑定上次成功的渠道与 Key。
+	SessionAffinityEnabledSettingKey = "enable_session_affinity"
 )
 
 // HTTP服务器配置常量

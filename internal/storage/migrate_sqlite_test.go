@@ -1809,6 +1809,7 @@ func TestInitDefaultSettings_SQLite(t *testing.T) {
 		"responses_ws_max_transcript_bytes",
 		"responses_ws_max_connections",
 		"responses_ws_max_connections_per_token",
+		"enable_session_affinity",
 	}
 
 	for _, key := range expectedKeys {

@@ -1520,6 +1520,7 @@ window.I18N_LOCALES['en'] = {
   'settings.desc.ttfb_max_slow_ratio': 'Max relative TTFB slowness ratio (s-1; 0 or greater)',
   'settings.desc.ttfb_min_confident_sample': 'TTFB confidence sample threshold (1 or greater)',
   'settings.desc.cooldown_fallback_enabled': 'Use best cooldown channel as fallback when all channels in cooldown (otherwise reject request)',
+  'settings.desc.enable_session_affinity': 'Enable session affinity: reuse the channel and Key a session last succeeded on, avoiding prompt-cache rewrites caused by same-tier account rotation',
   'settings.desc.cooldown_auth_seconds': 'Auth error (401/402/403) initial cooldown (seconds)',
   'settings.desc.cooldown_server_seconds': 'Server error (5xx) initial cooldown (seconds)',
   'settings.desc.cooldown_timeout_seconds': 'Timeout error (597/598) initial cooldown (seconds)',

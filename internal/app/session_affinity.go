@@ -2,9 +2,11 @@ package app
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	"ccLoad/internal/config"
 	"ccLoad/internal/model"
 )
 
@@ -101,8 +103,56 @@ func codexSessionAffinityKey(tokenHash string, headers http.Header) string {
 	return tokenHash + "\x00codex\x00" + sessionID
 }
 
+// sessionAffinityEnabled 读取会话粘性开关。设置缺失时按开启处理，与 initDefaultSettings
+// 的种子默认值一致；关闭后不再读写绑定，请求退回常规选路。
+func (s *Server) sessionAffinityEnabled() bool {
+	if s == nil || s.configService == nil {
+		return true
+	}
+	return s.configService.GetBool(config.SessionAffinityEnabledSettingKey, true)
+}
+
+// clientSessionIDHeaders 是 OpenAI/Gemini 兼容客户端显式声明会话身份的 Header，
+// 按优先级排列。net/http 会把 `session_id` 规范成 `Session_id`，故两种写法都列。
+var clientSessionIDHeaders = []string{
+	"X-Session-Affinity",
+	"X-Session-Id",
+	"X-OpenCode-Session",
+	"X-Conversation-ID",
+	"Session_id",
+	"Conversation_id",
+}
+
+func clientSessionIDFromHeaders(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	for _, name := range clientSessionIDHeaders {
+		if value := strings.TrimSpace(headers.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// openAICompatSessionAffinityKey 按令牌隔离 OpenAI/Gemini 兼容客户端的会话，键带协议段
+// 与 Anthropic/Codex 不相交。只认客户端显式给出的会话 Header：`prompt_cache_key` 是缓存
+// 路由提示而非会话身份，拿它绑定会把不同会话错固到同一渠道（同 anthropic/codex 的取舍）。
+func openAICompatSessionAffinityKey(protocolSegment, tokenHash string, headers http.Header) string {
+	if tokenHash == "" {
+		return ""
+	}
+	sessionID := clientSessionIDFromHeaders(headers)
+	if sessionID == "" {
+		return ""
+	}
+	return tokenHash + "\x00" + protocolSegment + "\x00" + sessionID
+}
+
 // preferSessionAffinityChannel 仅在绑定渠道仍属候选中最高配置优先级时置顶：
 // 粘性只替代同层轮询，更高优先级渠道恢复后会话随之迁移，主备意图优先于缓存命中。
+// 用 SortPriority()：手动排序覆盖（SortOverride）在选路路径同样生效，与
+// selector_balancer/selector_cooldown 的同一契约保持一致。
 func preferSessionAffinityChannel(cands []*model.Config, channelID int64) []*model.Config {
 	var bound *model.Config
 	for _, cfg := range cands {
@@ -115,7 +165,7 @@ func preferSessionAffinityChannel(cands []*model.Config, channelID int64) []*mod
 		return cands
 	}
 	for _, cfg := range cands {
-		if cfg != nil && cfg.Priority > bound.Priority {
+		if cfg != nil && cfg.SortPriority() > bound.SortPriority() {
 			return cands
 		}
 	}

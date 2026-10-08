@@ -1520,6 +1520,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.desc.ttfb_max_slow_ratio': '首字相对慢速比（s-1）上限，不能小于 0',
   'settings.desc.ttfb_min_confident_sample': '首字置信样本量阈值（至少为 1）',
   'settings.desc.cooldown_fallback_enabled': '所有渠道冷却时选最优渠道兜底(关闭则直接拒绝请求)',
+  'settings.desc.enable_session_affinity': '启用会话粘性：同一会话优先复用上次成功的渠道与 Key，减少同层轮询换账号导致的 prompt cache 重写',
   'settings.desc.cooldown_auth_seconds': '认证错误(401/402/403)初始冷却时间(秒)',
   'settings.desc.cooldown_server_seconds': '服务器错误(5xx)初始冷却时间(秒)',
   'settings.desc.cooldown_timeout_seconds': '超时错误(597/598)初始冷却时间(秒)',

@@ -16839,3 +16839,104 @@ func TestProxy_AnthropicSessionAffinityPinsKey(t *testing.T) {
 		}
 	}
 }
+
+// OpenAI 兼容入口（chat/completions）按客户端显式会话 Header 粘在渠道上。
+// Gemini 入口共用同一实现，键按协议段隔离，与 Anthropic/Codex 不相交。
+func TestProxy_OpenAICompatSessionAffinity(t *testing.T) {
+	t.Parallel()
+	names := []string{"peer-a", "peer-b"}
+	served := make(chan string, 64)
+	upstreams := make(map[int]string, len(names))
+	channels := make([]testChannel, 0, len(names))
+	for index, name := range names {
+		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			served <- name
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"chat-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+		}))
+		defer upstream.Close()
+		upstreams[index] = upstream.URL
+		channels = append(channels, testChannel{name: name, upstreamProtocol: "openai", models: "gpt-test", priority: 100})
+	}
+	env := setupProxyTestEnv(t, channels, upstreams)
+
+	send := func(sessionID string) string {
+		t.Helper()
+		headers := map[string]string{}
+		if sessionID != "" {
+			headers["X-Session-Id"] = sessionID
+		}
+		response := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
+			"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		}, headers)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		select {
+		case name := <-served:
+			return name
+		default:
+			t.Fatal("request succeeded without reaching an upstream")
+			return ""
+		}
+	}
+
+	// 无会话标识时在同层两个渠道间轮询：证明粘性不是测试环境的巧合。
+	rotated := map[string]bool{}
+	for range 4 {
+		rotated[send("")] = true
+	}
+	if !rotated["peer-a"] || !rotated["peer-b"] {
+		t.Fatalf("requests without session hit %v, want rotation across both peers", rotated)
+	}
+
+	session := uuid.NewString()
+	bound := send(session)
+	for range 3 {
+		if got := send(session); got != bound {
+			t.Fatalf("session moved from %s to %s while %s stayed healthy", bound, got, bound)
+		}
+	}
+}
+
+// 关闭 enable_session_affinity 后忽略会话标识，回到常规同层轮询。
+func TestProxy_SessionAffinityDisabledFallsBackToRotation(t *testing.T) {
+	t.Parallel()
+	names := []string{"peer-a", "peer-b"}
+	served := make(chan string, 64)
+	upstreams := make(map[int]string, len(names))
+	channels := make([]testChannel, 0, len(names))
+	for index, name := range names {
+		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			served <- name
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"chat-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+		}))
+		defer upstream.Close()
+		upstreams[index] = upstream.URL
+		channels = append(channels, testChannel{name: name, upstreamProtocol: "openai", models: "gpt-test", priority: 100})
+	}
+	env := setupProxyTestEnvWithSettings(t, channels, upstreams,
+		map[string]string{config.SessionAffinityEnabledSettingKey: "false"})
+
+	// 同一个会话反复请求也必须轮到两个渠道，证明显式会话标识没有生效。
+	session := uuid.NewString()
+	rotated := map[string]bool{}
+	for range 4 {
+		response := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
+			"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		}, map[string]string{"X-Session-Id": session})
+		if response.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		select {
+		case name := <-served:
+			rotated[name] = true
+		default:
+			t.Fatal("request succeeded without reaching an upstream")
+		}
+	}
+	if !rotated["peer-a"] || !rotated["peer-b"] {
+		t.Fatalf("sticky disabled but session pinned to %v, want rotation across both peers", rotated)
+	}
+}

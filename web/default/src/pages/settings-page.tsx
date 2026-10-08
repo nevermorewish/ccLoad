@@ -39,7 +39,7 @@ const CONSTRAINTS: Record<string, { min?: number; max?: number }> = {
 const ADVANCED_KEYS = new Set(['typesafe_enabled', 'typesafe_api_key', 'api_token_login_enabled', 'api_token_show_channels', 'auto_update_interval_hours', 'auto_update_channel', 'auto_refresh_interval_seconds', 'codex_map_429_to_503', 'model_catalog_sync_interval_hours', 'model_fuzzy_match'])
 const GROUPS: Array<{ id: string; name: string; order: number; match: (key: string) => boolean }> = [
   { id: 'advanced', name: '高级', order: 70, match: (k) => ADVANCED_KEYS.has(k) },
-  { id: 'channel', name: '渠道', order: 10, match: (k) => k.startsWith('channel_') || k === 'max_key_retries' },
+  { id: 'channel', name: '渠道', order: 10, match: (k) => k.startsWith('channel_') || k === 'max_key_retries' || k === 'enable_session_affinity' },
   { id: 'upstream-connection', name: '上游连接', order: 19, match: (k) => k === 'upstream_connection_reuse_limit_seconds' || OAUTH_URL_KEYS.has(k) },
   { id: 'websocket', name: 'WebSocket', order: 25, match: (k) => k.startsWith('responses_ws_') },
   { id: 'stream-timeout', name: '流式超时', order: 20, match: (k) => k === 'stream_timeout' || k.endsWith('stream_idle_timeout') || k.endsWith('_first_byte_timeout') },

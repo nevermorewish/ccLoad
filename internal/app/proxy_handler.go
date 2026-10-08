@@ -622,11 +622,17 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 		}
 	}
 	var sessionAffinityKey string
-	switch {
-	case clientProtocol == protocol.Anthropic && requestFamily == protocol.RequestFamilyMessages:
-		sessionAffinityKey = anthropicSessionAffinityKey(tokenHashStr, c.Request.Header, all)
-	case clientProtocol == protocol.Codex && requestFamily == protocol.RequestFamilyResponses:
-		sessionAffinityKey = codexSessionAffinityKey(tokenHashStr, c.Request.Header)
+	if s.sessionAffinityEnabled() {
+		switch {
+		case clientProtocol == protocol.Anthropic && requestFamily == protocol.RequestFamilyMessages:
+			sessionAffinityKey = anthropicSessionAffinityKey(tokenHashStr, c.Request.Header, all)
+		case clientProtocol == protocol.Codex && requestFamily == protocol.RequestFamilyResponses:
+			sessionAffinityKey = codexSessionAffinityKey(tokenHashStr, c.Request.Header)
+		case clientProtocol == protocol.OpenAI && requestFamily == protocol.RequestFamilyChatCompletions:
+			sessionAffinityKey = openAICompatSessionAffinityKey("openai", tokenHashStr, c.Request.Header)
+		case clientProtocol == protocol.Gemini && requestFamily == protocol.RequestFamilyGenerateContent:
+			sessionAffinityKey = openAICompatSessionAffinityKey("gemini", tokenHashStr, c.Request.Header)
+		}
 	}
 	sessionAffinity, hasSessionAffinity := s.sessionAffinity.lookup(sessionAffinityKey, time.Now())
 	if hasSessionAffinity {
