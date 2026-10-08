@@ -1,0 +1,1272 @@
+{
+  "version": 1,
+  "exported_at": "2026-10-07T14:22:45.262860+08:00",
+  "channels": [
+    {
+      "config": {
+        "id": 0,
+        "name": "yaoyaozzz-glm-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://yaoyaozzz.com/",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "glm-5.3"
+          },
+          {
+            "model": "glm-5.3-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-zJFsLR2sPkPu2kzDDIPRSKiag99t5Bw2zHX9geiQdVJDLCpz",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "yaoyaozzz-glm-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://yaoyaozzz.com/",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "glm-5.3"
+          },
+          {
+            "model": "glm-5.3-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-zJFsLR2sPkPu2kzDDIPRSKiag99t5Bw2zHX9geiQdVJDLCpz",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "yaoyaozzz-deepseek-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://yaoyaozzz.com/",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "deepseek-v4.1-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-zJFsLR2sPkPu2kzDDIPRSKiag99t5Bw2zHX9geiQdVJDLCpz",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "yaoyaozzz-deepseek-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://yaoyaozzz.com/",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "deepseek-v4.1-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-zJFsLR2sPkPu2kzDDIPRSKiag99t5Bw2zHX9geiQdVJDLCpz",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "nat6-glm-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://pro.nat6.net/",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "glm-5.3"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-4IvfU4PY9nfw8sozW9AJW8uX8Il7Lnqk4tFDSVIPcvGYeD3O",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "nat6-glm-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://pro.nat6.net/",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "glm-5.3"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-4IvfU4PY9nfw8sozW9AJW8uX8Il7Lnqk4tFDSVIPcvGYeD3O",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "yydsrouter-kimi-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://yydsrouter.cc",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "kimi-k3"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-bO4xwJvEv1IhFVQi4JCKsoPLqLdA0kr1Aq9OIp3wZyl2KJzT",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "yydsrouter-kimi-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://yydsrouter.cc",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "kimi-k3"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-bO4xwJvEv1IhFVQi4JCKsoPLqLdA0kr1Aq9OIp3wZyl2KJzT",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "106-55-12-78-6200-kimi-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "http://106.55.12.78:6200",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "kimi-k3"
+          },
+          {
+            "model": "kimi-k2.6"
+          },
+          {
+            "model": "kimi-k2.7-code"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-k2a-NFRk8b_mr5n7xlx50Bhhl7LHAz1rv1d_cVy_x5NpIvg",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "106-55-12-78-6200-kimi-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "http://106.55.12.78:6200",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "kimi-k3"
+          },
+          {
+            "model": "kimi-k2.6"
+          },
+          {
+            "model": "kimi-k2.7-code"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-k2a-NFRk8b_mr5n7xlx50Bhhl7LHAz1rv1d_cVy_x5NpIvg",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "tokeng0d-kimi-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://nx.tokeng0d.com",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "kimi-k3"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-8Wa2Erb7w05AWiFesvzk9eG1ihLU6qoFGungxMWIPar8J3wb",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "tokeng0d-kimi-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://nx.tokeng0d.com",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "kimi-k3"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-8Wa2Erb7w05AWiFesvzk9eG1ihLU6qoFGungxMWIPar8J3wb",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "dahlo-kimi-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://dahlo.live",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "kimi-k3"
+          },
+          {
+            "model": "kimi-k2.6"
+          },
+          {
+            "model": "kimi-k2.7-code"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-8iMH6vRgaY1Agr2a4Qpd2EWCpmpRD0ezBUGj89P1cwRnJIuD",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "dahlo-kimi-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://dahlo.live",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "kimi-k3"
+          },
+          {
+            "model": "kimi-k2.6"
+          },
+          {
+            "model": "kimi-k2.7-code"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-8iMH6vRgaY1Agr2a4Qpd2EWCpmpRD0ezBUGj89P1cwRnJIuD",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "aiplay-deepseek-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://aiplay.gee.cn/new-api/",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "deepseek-v4.1-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-ciFj4cY10hbMAuer6RBmTT0PsLunLIEWa71GG5vSWa65GoCc",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "aiplay-deepseek-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://aiplay.gee.cn/new-api/",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "deepseek-v4.1-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-ciFj4cY10hbMAuer6RBmTT0PsLunLIEWa71GG5vSWa65GoCc",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "nat6-deepseek-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://pro.nat6.net/",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "deepseek-v4.1-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-zLb9omArNqtf2HCtVrlKnGyZXNUNGIxil1Y5L8BUbYuXwpuE",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "nat6-deepseek-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://pro.nat6.net/",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "deepseek-v4.1-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-zLb9omArNqtf2HCtVrlKnGyZXNUNGIxil1Y5L8BUbYuXwpuE",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "tokeng0d-deepseek-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://nx.tokeng0d.com",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "deepseek-v4-pro"
+          },
+          {
+            "model": "deepseek-v4.1-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-3yvnJQBJh8JREw58lPWqPlxdqKLaRhQEaXwpZiDO7kqoswCC",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "tokeng0d-deepseek-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://nx.tokeng0d.com",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "deepseek-v4-pro"
+          },
+          {
+            "model": "deepseek-v4.1-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-3yvnJQBJh8JREw58lPWqPlxdqKLaRhQEaXwpZiDO7kqoswCC",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "nat6-glm-flash-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://pro.nat6.net/",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "glm-5.3-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-rv2eGHAFuqKVOv7BQRM69g68KZIjbGmNCOSKW1LaodNJlpcu",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "nat6-glm-flash-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://pro.nat6.net/",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "glm-5.3-flash"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-rv2eGHAFuqKVOv7BQRM69g68KZIjbGmNCOSKW1LaodNJlpcu",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "tokeng0d-glm-anthropic",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://nx.tokeng0d.com/",
+            "protocols": [
+              "anthropic"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "glm-5.3-flash"
+          },
+          {
+            "model": "glm-5.3"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-7YCSLoCahkmpbNZWSTfE27cyv5yEbUmgUziOSGF7I758Ha9u",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "config": {
+        "id": 0,
+        "name": "tokeng0d-glm-openai",
+        "auth_type": "api_key",
+        "websockets": false,
+        "protocol_transform_mode": "auto",
+        "urls": [
+          {
+            "url": "https://nx.tokeng0d.com/",
+            "protocols": [
+              "openai"
+            ]
+          }
+        ],
+        "priority": 0,
+        "sort_override": 0,
+        "rpm_limit": 0,
+        "max_concurrency": 0,
+        "enabled": true,
+        "scheduled_check_enabled": false,
+        "scheduled_check_model": "",
+        "scheduled_check_interval_minutes": 0,
+        "scheduled_check_start_time": "",
+        "models": [
+          {
+            "model": "glm-5.3-flash"
+          },
+          {
+            "model": "glm-5.3"
+          }
+        ],
+        "cooldown_until": 0,
+        "cooldown_duration_ms": 0,
+        "daily_cost_limit": 0,
+        "cost_multiplier": 1,
+        "retry_other_keys_on_failure": false
+      },
+      "api_keys": [
+        {
+          "id": 0,
+          "channel_id": 0,
+          "key_index": 0,
+          "api_key": "sk-7YCSLoCahkmpbNZWSTfE27cyv5yEbUmgUziOSGF7I758Ha9u",
+          "note": "",
+          "priority": 0,
+          "key_strategy": "sequential",
+          "disabled": false,
+          "cost_multiplier": 1,
+          "cooldown_until": 0,
+          "cooldown_duration_ms": 0
+        }
+      ]
+    }
+  ]
+}

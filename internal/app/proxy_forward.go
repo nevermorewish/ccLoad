@@ -269,7 +269,8 @@ func (s *Server) buildProxyRequest(
 			body = deleteJSONPath(body, "metadata.user_id")
 		}
 	}
-	body, err = s.prepareTranslatedUpstreamBody(
+	var thinkingOmitStrategy string
+	body, thinkingOmitStrategy, err = s.prepareTranslatedUpstreamBody(
 		cfg, upstreamProtocol, requestPath, requestModel, body, sourceBody, apiKey, hdr,
 		reqCtx != nil && reqCtx.anthropicClaudeCodeWire, parsedUpstreamURL,
 		reqCtx != nil && reqCtx.replayBodyRulesApplied,
@@ -277,6 +278,9 @@ func (s *Server) buildProxyRequest(
 	)
 	if err != nil {
 		return nil, err
+	}
+	if reqCtx != nil {
+		reqCtx.anthropicThinkingOmitStrategy = thinkingOmitStrategy
 	}
 	// 重试回放的是已改写的 wire，沿用首轮映射；只有 OAuth 模拟路径改名。
 	if reqCtx != nil && reqCtx.anthropicToolAliases == nil && cfg.UsesAnthropicOAuth() && !callerOwnsAnthropicWire &&
@@ -508,7 +512,8 @@ func (s *Server) prepareTranslatedUpstreamBody(
 	target *url.URL,
 	wireBodyRulesApplied bool,
 	callerBodyIsAnthropic bool,
-) ([]byte, error) {
+) ([]byte, string, error) {
+	thinkingOmitStrategy := ""
 	callerBody := sourceBody
 	if len(callerBody) == 0 {
 		callerBody = body
@@ -518,7 +523,7 @@ func (s *Server) prepareTranslatedUpstreamBody(
 		callerWire = classifyAnthropicRequestCallerWire(callerBody, headers, upstreamProtocol, requestPath, callerBodyIsAnthropic)
 		if callerBodyIsAnthropic {
 			if err := validateAnthropicOpus55Request(callerBody, requestModel); err != nil {
-				return nil, err
+				return nil, "", err
 			}
 		}
 	}
@@ -551,7 +556,7 @@ func (s *Server) prepareTranslatedUpstreamBody(
 		var err error
 		body, err = finalizeAnthropicCountTokensBody(body, cfg, target, callerWire.nativeClaudeCode)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	} else if isAnthropicMessagesRequest(upstreamProtocol, requestPath) {
 		var err error
@@ -562,15 +567,15 @@ func (s *Server) prepareTranslatedUpstreamBody(
 		case anthropicAlreadyFinalized:
 			// 重试重放已经是完整 wire，请求修复后的 body 不再重判原生身份。
 			if !isAnthropicJSONObject(body) {
-				return nil, errors.New("finalize Anthropic Claude Code request: invalid JSON body")
+				return nil, "", errors.New("finalize Anthropic Claude Code request: invalid JSON body")
 			}
-			body, err = finishAnthropicPassthrough(body,
-				callerWire.haikuHelper == anthropicHaikuHelperStructured && anthropicCCHSigningEnabled(cfg, target))
+			body, thinkingOmitStrategy, err = finishAnthropicPassthrough(body,
+				callerWire.haikuHelper == anthropicHaikuHelperStructured && anthropicCCHSigningEnabled(cfg, target), cfg, target, headers)
 		default:
-			body, err = finalizeAnthropicClaudeCodeMessagesBodyForCaller(body, cfg, apiKey, headers, target, callerWire)
+			body, thinkingOmitStrategy, err = finalizeAnthropicClaudeCodeMessagesBodyForCaller(body, cfg, apiKey, headers, target, callerWire)
 		}
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 	body = injectAnyrouterClaudeCodeFallbackTools(cfg, upstreamProtocol, requestPath, headers, callerBody, body)
@@ -580,7 +585,7 @@ func (s *Server) prepareTranslatedUpstreamBody(
 		var err error
 		body, err = finalizeZAICodingPlanBody(body, cfg)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 	if cfg != nil && cfg.UsesAntigravityOAuth() {
@@ -589,13 +594,14 @@ func (s *Server) prepareTranslatedUpstreamBody(
 			cfg, requestModel, body, sourceBody, headers, s.antigravityPromptMatcher,
 		)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 	if isCodeBuddyChatRequest(cfg, upstreamProtocol) {
-		return finalizeCodeBuddyBody(body, s.antigravityPromptMatcher)
+		body, err := finalizeCodeBuddyBody(body, s.antigravityPromptMatcher)
+		return body, thinkingOmitStrategy, err
 	}
-	return body, nil
+	return body, thinkingOmitStrategy, nil
 }
 
 func refreshAnthropicCallerCCH(body, callerBody []byte, callerWire anthropicCallerWire) ([]byte, error) {
@@ -954,7 +960,7 @@ func translatedStreamChunkCompletes(clientProtocol protocol.Protocol, chunk []by
 	}
 }
 
-// sseSynthesizedDoneEvent 是网关补喂给转换器的 Chat Completions 终止哨兵。
+// sseSynthesizedDoneEvent 是网关补喂给转换器的流终止哨兵。
 var sseSynthesizedDoneEvent = []byte("data: [DONE]\n\n")
 
 // needsSynthesizedStreamTerminator 判断跨协议转换是否要补一个终止序列。
@@ -964,13 +970,25 @@ var sseSynthesizedDoneEvent = []byte("data: [DONE]\n\n")
 // Codex 的 response.completed）。而部分 OpenAI 兼容上游给完 finish_reason 就断流，
 // 客户端会一直等不到终止事件。上游语义既然已判完整，就必须给下游一个完整的终止序列。
 //
+// Gemini 线协议没有 [DONE]，但 CLIProxyAPI executor 会在 EOF 补喂一次；
+// gemini→Responses 转换器在 finishReason 后等 usage 或 [DONE] 才发终态，
+// 末帧不带 usageMetadata 时同样要靠这里收尾。只补 Responses：gemini→Claude
+// 在 [DONE] 上不保留 finishReason，补喂会把 MAX_TOKENS 截断报成 end_turn。
+//
 // 补的是 [DONE] 而不是手搓终止帧：open content block、stop_reason、usage 都在
 // 转换器的内部状态里，只有它自己收得干净。同协议直通不补，避免改动透传字节。
 func needsSynthesizedStreamTerminator(upstream, client protocol.Protocol, upstreamComplete, translatedComplete, committed bool) bool {
 	if !committed || !upstreamComplete || translatedComplete {
 		return false
 	}
-	return upstream == protocol.OpenAI && client != protocol.OpenAI
+	switch upstream {
+	case protocol.OpenAI:
+		return client != upstream
+	case protocol.Gemini:
+		return client == protocol.Codex
+	default:
+		return false
+	}
 }
 
 // parseSSEEventChunk 在 []byte 视图上解析 SSE 事件块，避免 string(chunk) 与 []byte(data) 来回拷贝。
@@ -1458,6 +1476,9 @@ func (s *Server) handleSuccessResponse(
 	result.ReasoningTokens = parser.GetReasoningTokens()
 	result.Cache5mInputTokens, result.Cache1hInputTokens, result.ServiceTier = parser.GetCacheBreakdown()
 	result.ToolCostUSD = parser.GetToolCostUSD()
+	if jsonParser, ok := parser.(*jsonUsageParser); ok && reqCtx.transformPlan.RequestFamily == protocol.RequestFamilyCountTokens {
+		result.InputTokens = jsonParser.countTokensResult()
+	}
 	if reqCtx.transformPlan.RequestFamily == protocol.RequestFamilyImages && !reqCtx.transformPlan.NeedsTransform {
 		usage := parser.GetImageUsage()
 		result.ImageUsage = &usage
@@ -1677,10 +1698,8 @@ func (s *Server) handleTranslatedStreamSuccessResponse(
 		if reqCtx.antigravityOAuth {
 			var providerEvent []byte
 			if len(rawEvent) > 0 {
-				var err error
-				providerEvent, err = antigravitySSEData(rawEvent)
-				if err != nil {
-					return nil, err
+				if providerEvent = antigravitySSEData(rawEvent); providerEvent == nil {
+					return nil, nil
 				}
 			}
 			chunks, translateErr := translateAntigravityResponseStream(
@@ -1732,9 +1751,13 @@ func (s *Server) handleTranslatedStreamSuccessResponse(
 			return nil, reqCtx.Duration().Seconds(), err
 		}
 	}
+	streamBody := resp.Body
+	if reqCtx.antigravityOAuth {
+		streamBody = terminateAntigravitySSE(streamBody)
+	}
 	streamErr := streamTransformSSEEventsUntil(
 		reqCtx.ctx,
-		resp.Body,
+		streamBody,
 		deferredWriter,
 		func(rawEvent []byte) error {
 			parserEvent := rawEvent
@@ -1743,9 +1766,16 @@ func (s *Server) handleTranslatedStreamSuccessResponse(
 				parserEvent = normalizeCodeBuddySSEEvent(parserEvent)
 			}
 			if reqCtx.antigravityOAuth {
+				// 终态之后追加的后端错误不能把已完整送达的流改判为失败。
+				if parser.IsStreamComplete() {
+					if payload := antigravityEventPayload(rawEvent); isAntigravityErrorPayload(payload) {
+						log.Printf("[WARN] ignored Antigravity error after stream completion: %s", payload)
+						return nil
+					}
+				}
 				var err error
 				parserEvent, err = unwrapAntigravitySSEEvent(rawEvent)
-				if err != nil {
+				if err != nil || parserEvent == nil {
 					return err
 				}
 			}
@@ -1773,7 +1803,8 @@ func (s *Server) handleTranslatedStreamSuccessResponse(
 
 	// 上游已给出语义终态（如 finish_reason）时先补发终止事件，转换器据此完成收尾；
 	// 之后的 Finalize 只拦截真正缺少终态的截断流。
-	if protocol.ResponseToolInputError(state) == nil && needsSynthesizedStreamTerminator(
+	// 上游已报错时不替转换器伪造正常终态。
+	if protocol.ResponseToolInputError(state) == nil && parser.GetLastError() == nil && needsSynthesizedStreamTerminator(
 		reqCtx.transformPlan.UpstreamProtocol,
 		reqCtx.transformPlan.ClientProtocol,
 		parser.IsStreamComplete(),
@@ -2010,6 +2041,12 @@ func classifySSEErrorStatus(body []byte) int {
 	}
 	if status, _ := websocketErrorStatusAndHeaders(body); status >= 400 && status <= 599 {
 		return status
+	}
+	// Google 风格错误帧（Gemini / Antigravity）用数字 error.code 携带 HTTP 状态，
+	// 以字符串 error.status 为结构特征；其他上游的数字 code 不可信，交给后面的分类。
+	if code := gjson.GetBytes(body, "error.code"); code.Type == gjson.Number && code.Int() >= 400 && code.Int() <= 599 &&
+		gjson.GetBytes(body, "error.status").Type == gjson.String {
+		return int(code.Int())
 	}
 	if _, is1308 := util.ParseResetTimeFrom1308Error(body); is1308 {
 		return util.StatusQuotaExceeded
@@ -2262,23 +2299,14 @@ func (s *Server) handleResponse(
 // 核心转发函数
 // ============================================================================
 
-// forwardOnceAsync 异步流式转发，透明转发客户端原始请求
-// 从proxy.go提取，遵循SRP原则
-// 参数新增 apiKey 用于直接传递已选中的API Key（从KeySelector获取）
-// 参数新增 method 用于支持任意HTTP方法（GET、POST、PUT、DELETE等）
-func (s *Server) forwardOnceAsync(ctx context.Context, cfg *model.Config, apiKey string, method string, plan protocol.TransformPlan, hdr http.Header, rawQuery string, baseURL string, w http.ResponseWriter, observer *ForwardObserver) (*fwResult, float64, error) {
-	return s.forwardOnceAsyncWithNativeCodexWebsocket(
-		ctx, cfg, apiKey, method, plan, hdr, rawQuery, baseURL, w, observer, nil, "", nil,
-		false, upstreamWireAliases{},
-	)
-}
-
 type nativeCodexWebsocketAttempt struct {
 	session                     *codexUpstreamWebsocketSession
 	incrementalBody             []byte
 	incrementalBodyRulesApplied bool
 }
 
+// forwardOnceAsyncWithNativeCodexWebsocket 异步流式转发，透明转发客户端原始请求
+// apiKey 为 KeySelector 已选中的 API Key；method 支持任意 HTTP 方法。
 func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 	ctx context.Context,
 	cfg *model.Config,
@@ -2578,6 +2606,7 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 	res, duration, err = s.handleResponse(reqCtx, resp, responseWriter, string(reqCtx.upstreamProtocol), cfg, apiKey, observer)
 	if res != nil {
 		res.errorReceivedAt = time.Now()
+		res.RetryStrategy = reqCtx.anthropicThinkingOmitStrategy
 	}
 	reqCtx.antigravityReplay.finish(res, err)
 	if res != nil && (res.Status == http.StatusBadRequest || res.Status == http.StatusNotFound ||
@@ -2858,10 +2887,17 @@ func (s *Server) handleCommittedAwareProxyError(
 	}
 	// 上游断流时 Anthropic 客户端只看到半截流：没有 message_stop 也没有 error，
 	// Claude Code 会把残缺回复当成完成。补一条 error 事件让客户端报错并自行重试；
-	// 上游已经发过 error 事件的不重复补。
-	if reqCtx.isStreaming && reqCtx.clientProtocol == protocol.Anthropic &&
-		len(res.SSEErrorEvent) == 0 && ctx.Err() == nil && w != nil {
-		writeAnthropicStreamErrorEvent(w, "upstream stream interrupted before completion")
+	// 上游已经发过 error 事件的不重复补。Antigravity 转换器不转发后端错误帧，按未发过处理。
+	if reqCtx.isStreaming && reqCtx.clientProtocol == protocol.Anthropic && ctx.Err() == nil && w != nil {
+		if len(res.SSEErrorEvent) == 0 {
+			writeAnthropicStreamErrorEvent(w, "upstream stream interrupted before completion")
+		} else if cfg.UsesAntigravityOAuth() {
+			message := gjson.GetBytes(res.SSEErrorEvent, "error.message").String()
+			if message == "" {
+				message = "upstream stream failed before completion"
+			}
+			writeAnthropicStreamErrorEvent(w, message)
+		}
 	}
 	return s.handleStreamingErrorNoRetry(ctx, cfg, keyIndex, actualModel, selectedKey, res, duration, reqCtx)
 }
@@ -2921,7 +2957,7 @@ func (s *Server) forwardAttempt(
 	reqCtx.debugData = nil
 	actualModel, bodyToSend := s.prepareRequestBody(cfg, reqCtx, upstreamProtocol)
 	if cfg.UsesAntigravityOAuth() && (wantsAntigravityWebSearch(reqCtx.body) || wantsAntigravityWebSearch(bodyToSend)) {
-		actualModel = antigravityWebSearchFallbackModel
+		actualModel = antigravityWebSearchModel(actualModel)
 	}
 	if reqCtx.routingSession != nil {
 		reqCtx.routingSession.noteActualModel(actualModel)
@@ -3093,7 +3129,10 @@ func (s *Server) forwardAttempt(
 	}
 	retryStrategies := make([]string, 0, 2)
 	missingStoredItemRetries := 0
+	// 只有主机名参与官方 Anthropic 判定，解析失败按非官方处理。
+	retryTarget, _ := url.Parse(strings.TrimSpace(baseURL))
 	for !cfg.AntigravityCredits && ctx.Err() == nil {
+		retryStrategies = appendSendStrategy(retryStrategies, res)
 		retrySourcePlan := plan
 		retryBodyRulesApplied := false
 		// Use the last wire body so retry strategies see the upstream-protocol
@@ -3102,7 +3141,7 @@ func (s *Server) forwardAttempt(
 			retrySourcePlan.TranslatedBody = res.upstreamRequestBody
 			retryBodyRulesApplied = true
 		}
-		retryBody, retryStrategy, ok := retryBodyForRejectedRequest(upstreamProtocol, cfg, retrySourcePlan, res)
+		retryBody, retryStrategy, ok := retryBodyForRejectedRequest(upstreamProtocol, cfg, retryTarget, retrySourcePlan, res)
 		if !ok || hasRetryStrategy(retryStrategies, retryStrategy) {
 			break
 		}
@@ -3113,6 +3152,9 @@ func (s *Server) forwardAttempt(
 			missingStoredItemRetries++
 		}
 		retryStrategies = append(retryStrategies, retryStrategy)
+		if retryStrategy == stripAnthropicInvalidThinkingSignatureStrategy {
+			rememberAnthropicThinkingOmit(reqCtx.header, retrySourcePlan.TranslatedBody)
+		}
 		retryPlan := plan
 		retryPlan.TranslatedBody = retryBody
 		// 可复用的 WS 连接优先发 attempt.incrementalBody。status
@@ -3161,6 +3203,7 @@ func (s *Server) forwardAttempt(
 	// default/standard 都不能把它降档。resolveBillingServiceTier 仍允许更贵的
 	// ultrafast 以及非 priority 请求的真实终态覆盖请求值。
 	if res != nil {
+		retryStrategies = appendSendStrategy(retryStrategies, res)
 		if len(retryStrategies) > 0 {
 			res.RetryStrategy = strings.Join(retryStrategies, ",")
 		}
@@ -3414,10 +3457,11 @@ func isInvalidResponsesRequestError(body []byte) bool {
 func retryBodyForRejectedRequest(
 	upstreamProtocol protocol.Protocol,
 	cfg *model.Config,
+	target *url.URL,
 	plan protocol.TransformPlan,
 	res *fwResult,
 ) ([]byte, string, bool) {
-	if retryBody, strategy, ok := anthropicRetryBodyFor400(upstreamProtocol, plan, res); ok {
+	if retryBody, strategy, ok := anthropicRetryBodyFor400(upstreamProtocol, cfg, target, plan, res); ok {
 		return retryBody, strategy, true
 	}
 	if retryBody, strategy, ok := responsesRetryBodyForUnknownParameter(upstreamProtocol, plan, res); ok {
@@ -3460,6 +3504,15 @@ func codexRetryBodyFor400(
 // 便于日志和渠道测试结果按前缀统一解析。
 func modelCapacityRetryStrategy(retries int) string {
 	return fmt.Sprintf("model_capacity_retry_%d", retries)
+}
+
+// appendSendStrategy keeps the body rewrite a single upstream send applied
+// (res.RetryStrategy before aggregation) so later sends do not erase it.
+func appendSendStrategy(strategies []string, res *fwResult) []string {
+	if res == nil || res.RetryStrategy == "" || hasRetryStrategy(strategies, res.RetryStrategy) {
+		return strategies
+	}
+	return append(strategies, res.RetryStrategy)
 }
 
 func hasRetryStrategy(strategies []string, strategy string) bool {
@@ -3851,19 +3904,6 @@ func keyByIndex(apiKeys []*model.APIKey, keyIndex int) *model.APIKey {
 		}
 	}
 	return nil
-}
-
-func filterAPIKeysForModel(apiKeys []*model.APIKey, modelName string) ([]*model.APIKey, bool) {
-	if modelName == "" || modelName == "*" {
-		return apiKeys, false
-	}
-	filtered := make([]*model.APIKey, 0, len(apiKeys))
-	for _, apiKey := range apiKeys {
-		if apiKey != nil && apiKey.AllowsModel(modelName) {
-			filtered = append(filtered, apiKey)
-		}
-	}
-	return filtered, len(filtered) != len(apiKeys)
 }
 
 func (s *Server) filterAPIKeysForModelRow(cfg *model.Config, apiKeys []*model.APIKey, selected modelRoutingSelection, requestProtocol string) ([]*model.APIKey, bool) {

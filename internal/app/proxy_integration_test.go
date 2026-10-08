@@ -1682,7 +1682,7 @@ func TestProxy_AnthropicOAuthPreservesRelayedClaudeCodeRequest(t *testing.T) {
 		t.Fatalf("status=%d upstream_headers=%v body=%s", response.Code, capturedHeaders, response.Body.String())
 	}
 	if got, want := gjson.GetBytes(capturedBody, "system.0.text").String(),
-		"x-anthropic-billing-header: cc_version="+anthropicCLIVersion+".790; cc_entrypoint=claude-vscode;"; got != want {
+		strings.Replace(anthropicBillingHeader("hello", anthropicEffectiveCLIVersion()), "cc_entrypoint=cli;", "cc_entrypoint=claude-vscode;", 1); got != want {
 		t.Fatalf("billing block=%q, want %q; body=%s", got, want, capturedBody)
 	}
 	if got := gjson.GetBytes(capturedBody, "system.1.text").String(); got != "caller prompt" ||
@@ -1762,7 +1762,7 @@ func TestProxy_AnthropicOAuthAccountFingerprintPersistsAndUpgrades(t *testing.T)
 	})
 	if headerValueFold(second.headers, "User-Agent") != baseUA ||
 		headerValueFold(second.headers, "X-Stainless-OS") != "Darwin" ||
-		headerValueFold(second.headers, "X-Stainless-Package-Version") != "0.120.0" {
+		headerValueFold(second.headers, "X-Stainless-Package-Version") != anthropicStainlessPackageVersion {
 		t.Fatalf("older client changed account fingerprint: %v", second.headers)
 	}
 	parts, ok := parseAnthropicCLIVersion(baseVersion)
@@ -1776,7 +1776,7 @@ func TestProxy_AnthropicOAuthAccountFingerprintPersistsAndUpgrades(t *testing.T)
 	})
 	if headerValueFold(third.headers, "User-Agent") != newerUA ||
 		headerValueFold(third.headers, "X-Stainless-OS") != "Linux" ||
-		headerValueFold(third.headers, "X-Stainless-Package-Version") != "0.120.0" {
+		headerValueFold(third.headers, "X-Stainless-Package-Version") != anthropicStainlessPackageVersion {
 		t.Fatalf("newer client did not merge account fingerprint: %v", third.headers)
 	}
 	fourth := send("/v1/messages", map[string]string{
@@ -1806,7 +1806,7 @@ func TestProxy_AnthropicOAuthAccountFingerprintPersistsAndUpgrades(t *testing.T)
 	}
 	credential, err := anthropicauth.ParseCredential([]byte(configs[0].OAuthCredential))
 	if err != nil || credential.Fingerprint == nil || credential.Fingerprint.UserAgent != newerUA ||
-		credential.Fingerprint.StainlessOS != "Linux" || credential.Fingerprint.StainlessPackageVersion != "0.120.0" {
+		credential.Fingerprint.StainlessOS != "Linux" || credential.Fingerprint.StainlessPackageVersion != anthropicStainlessPackageVersion {
 		t.Fatalf("persisted account fingerprint=%+v err=%v", credential, err)
 	}
 	env.server.anthropicOAuthFingerprintMu.Lock()
@@ -2032,7 +2032,7 @@ func TestProxy_AnthropicNativeBodyRulesKeepNativeWire(t *testing.T) {
 				t.Fatalf("native body changed after rule: %s", capturedBody)
 			}
 			for name, want := range map[string]string{
-				"User-Agent":        "claude-cli/2.1.280 (external, cli)",
+				"User-Agent":        "claude-cli/" + anthropicEffectiveCLIVersion() + " (external, cli)",
 				"Accept-Language":   "zh-CN,zh;q=0.9",
 				"Sec-Fetch-Mode":    "cors",
 				"X-Stainless-Async": "false",
@@ -2117,7 +2117,7 @@ func TestProxy_AnthropicCountTokensUsesUpstreamOAuthWire(t *testing.T) {
 	native := sent[1]
 	if gjson.GetBytes(native.body, "metadata").Exists() ||
 		gjson.GetBytes(native.body, "system.0.text").String() != anthropicBillingHeader("hello", anthropicCLIVersion) ||
-		headerValueFold(native.headers, "User-Agent") != "claude-cli/2.1.280 (external, cli)" ||
+		headerValueFold(native.headers, "User-Agent") != "claude-cli/"+anthropicEffectiveCLIVersion()+" (external, cli)" ||
 		!strings.Contains(headerValueFold(native.headers, "Anthropic-Beta"), "token-counting-2024-11-01") {
 		t.Fatalf("native wire headers=%v body=%s", native.headers, native.body)
 	}
@@ -2186,6 +2186,11 @@ func TestProxy_AnthropicCountTokensAPIKeyUsesUpstream(t *testing.T) {
 		t.Fatalf("status=%d url=%s headers=%v upstream=%s downstream=%s", response.Code,
 			sentURL, sentHeaders, sentBody, response.Body.String())
 	}
+	entry := waitForCountTokensLogs(t, env, 1)[0]
+	if entry.StatusCode != http.StatusOK || entry.ChannelID <= 0 || entry.Cost != 0 ||
+		entry.Model != "claude-sonnet-4-6" || entry.InputTokens != 19 {
+		t.Fatalf("count_tokens log=%+v", entry)
+	}
 }
 
 func TestProxy_AnthropicCountTokensRecognizesNativeUAWithoutMetadata(t *testing.T) {
@@ -2238,11 +2243,23 @@ func TestProxy_AnthropicCountTokensCustomOriginUsesLocalEstimate(t *testing.T) {
 func TestProxy_AnthropicCountTokensWithoutChannelsUsesLocalEstimate(t *testing.T) {
 	t.Parallel()
 	env := setupProxyTestEnv(t, nil, nil)
+	env.server.configService.cache["debug_log_enabled"] = &model.SystemSetting{Key: "debug_log_enabled", Value: "true"}
 	response := doProxyRequest(t, env.engine, "/v1/messages/count_tokens", map[string]any{
 		"model": "claude-sonnet-4-6", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
 	}, nil)
 	if response.Code != http.StatusOK || gjson.Get(response.Body.String(), "input_tokens").Int() <= 0 {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	entry := waitForCountTokensLogs(t, env, 1)[0]
+	if entry.StatusCode != http.StatusOK || entry.ChannelID != 0 || entry.Model != "claude-sonnet-4-6" ||
+		entry.Message != "local: no official channel" ||
+		int64(entry.InputTokens) != gjson.Get(response.Body.String(), "input_tokens").Int() {
+		t.Fatalf("local count_tokens log=%+v body=%s", entry, response.Body.String())
+	}
+	debug, err := env.store.GetDebugLogByLogID(context.Background(), entry.ID)
+	if err != nil || debug == nil || gjson.GetBytes(debug.ReqBody, "model").String() != "claude-sonnet-4-6" ||
+		debug.RespStatus != http.StatusOK || string(debug.RespBody) != response.Body.String() {
+		t.Fatalf("local count_tokens debug=%+v err=%v", debug, err)
 	}
 }
 
@@ -2254,6 +2271,7 @@ func TestProxy_AnthropicCountTokensFailureFallsBackWithoutModelCooldown(t *testi
 		{name: "official-anthropic", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6", apiKey: "sk-ant-test"},
 		{name: "official-anthropic-2", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6", apiKey: "sk-ant-test-2"},
 	}, map[int]string{0: "https://api.anthropic.com", 1: "https://api.anthropic.com"})
+	env.server.configService.cache["debug_log_enabled"] = &model.SystemSetting{Key: "debug_log_enabled", Value: "true"}
 	var countCalls, messageCalls atomic.Int32
 	env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		if strings.HasSuffix(r.URL.Path, "/count_tokens") {
@@ -2276,6 +2294,33 @@ func TestProxy_AnthropicCountTokensFailureFallsBackWithoutModelCooldown(t *testi
 		message.Code != http.StatusOK || countCalls.Load() != 1 || messageCalls.Load() != 1 {
 		t.Fatalf("count=%d %s, message=%d %s, upstream count=%d messages=%d",
 			count.Code, count.Body.String(), message.Code, message.Body.String(), countCalls.Load(), messageCalls.Load())
+	}
+	// 上游失败与本地估算各记一条 count_tokens 日志，请求日志（渠道健康度来源）只有 messages。
+	countLogs := waitForCountTokensLogs(t, env, 2)
+	statuses := map[int]int64{}
+	for _, entry := range countLogs {
+		statuses[entry.StatusCode] = entry.ChannelID
+		if entry.StatusCode != http.StatusBadRequest {
+			continue
+		}
+		// 上游失败那条的 debug 保留官方原始响应，本地估算那条只有本地应答。
+		debug, err := env.store.GetDebugLogByLogID(context.Background(), entry.ID)
+		if err != nil || debug == nil || !strings.HasPrefix(debug.ReqURL, "https://api.anthropic.com/v1/messages/count_tokens") ||
+			debug.RespStatus != http.StatusBadRequest || gjson.GetBytes(debug.RespBody, "error.message").String() != "unsupported" {
+			t.Fatalf("upstream count_tokens debug=%+v err=%v", debug, err)
+		}
+	}
+	if channelID, ok := statuses[http.StatusBadRequest]; !ok || channelID <= 0 {
+		t.Fatalf("missing upstream 400 count_tokens log: %+v", countLogs)
+	}
+	if channelID, ok := statuses[http.StatusOK]; !ok || channelID != 0 {
+		t.Fatalf("missing local estimate count_tokens log: %+v", countLogs)
+	}
+	waitForProxyLog(t, env, "claude-sonnet-4-6")
+	proxyLogs, err := env.store.ListLogs(context.Background(), time.Now().Add(-time.Minute), 20, 0,
+		&model.LogFilter{LogSource: model.LogSourceProxy})
+	if err != nil || len(proxyLogs) != 1 || proxyLogs[0].StatusCode != http.StatusOK {
+		t.Fatalf("proxy logs=%+v err=%v, want only the messages request", proxyLogs, err)
 	}
 }
 
@@ -4231,6 +4276,112 @@ func TestProxy_AntigravityProviderAdapterStreamResponse(t *testing.T) {
 	}
 }
 
+func TestProxy_AntigravityStreamErrorFrames(t *testing.T) {
+	t.Parallel()
+	textFrame := `data: {"response":{"responseId":"r1","candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}],"modelVersion":"gemini-3-flash"}}` + "\n\n"
+	quotaFrame := `data: {"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED"}}` + "\n\n"
+	// 后端在已发帧后追加多行裸 JSON 错误且不补空行。
+	trailingError := "{\n  \"error\": {\n    \"code\": 503,\n    \"message\": \"backend unavailable\",\n    \"status\": \"UNAVAILABLE\"\n  }\n}"
+	multilineData := "data: {\"response\":{\"responseId\":\"r1\",\n" +
+		`data: "candidates":[{"content":{"role":"model","parts":[{"text":"joined"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3-flash"}}` + "\n\n"
+	fallbackFrame := `data: {"response":{"responseId":"r2","candidates":[{"content":{"role":"model","parts":[{"text":"fallback"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3-flash"}}` + "\n\n"
+	completeFrame := `data: {"response":{"responseId":"r1","candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4},"modelVersion":"gemini-3-flash"}}` + "\n\n"
+
+	cases := []struct {
+		name         string
+		stream       string
+		wantClient   int
+		wantLog      int
+		wantText     string
+		wantFallback bool
+	}{
+		{name: "first-frame-error-fails-over", stream: quotaFrame, wantClient: http.StatusOK, wantLog: http.StatusTooManyRequests, wantText: "fallback", wantFallback: true},
+		{name: "mid-stream-error", stream: textFrame + quotaFrame, wantClient: http.StatusOK, wantLog: http.StatusTooManyRequests, wantText: "partial"},
+		{name: "trailing-bare-json-error", stream: textFrame + trailingError, wantClient: http.StatusOK, wantLog: http.StatusServiceUnavailable, wantText: "partial"},
+		{name: "multiline-data", stream: multilineData, wantClient: http.StatusOK, wantLog: http.StatusOK, wantText: "joined"},
+		// 终态已送达后的后端错误不能把完整流改判为失败，也不能在终态后补 error 事件。
+		{name: "error-after-complete", stream: completeFrame + trailingError, wantClient: http.StatusOK, wantLog: http.StatusOK, wantText: "done"},
+	}
+	for _, adapter := range antigravityProviderAdapterCases() {
+		if adapter.name != "Claude" && adapter.name != "OpenAI" {
+			continue
+		}
+		for _, tc := range cases {
+			t.Run(adapter.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				primary := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, tc.stream)
+				}))
+				t.Cleanup(primary.Close)
+				var fallbackHits atomic.Int64
+				fallback := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					fallbackHits.Add(1)
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, fallbackFrame)
+				}))
+				t.Cleanup(fallback.Close)
+
+				requestBody := maps.Clone(adapter.body)
+				requestBody["stream"] = true
+				env := setupProxyTestEnv(t, []testChannel{
+					{
+						name: "antigravity-primary", upstreamProtocol: "gemini", models: "gemini-3-flash", priority: 100,
+						authType: model.AuthTypeAntigravityOAuth, oauthCredential: antigravityProxyTestCredential(t, "at-primary"),
+					},
+					{
+						name: "antigravity-fallback", upstreamProtocol: "gemini", models: "gemini-3-flash", priority: 10,
+						authType: model.AuthTypeAntigravityOAuth, oauthCredential: antigravityProxyTestCredential(t, "at-fallback"),
+					},
+				}, map[int]string{0: primary.URL, 1: fallback.URL})
+				response := doProxyRequest(t, env.engine, adapter.path, requestBody, nil)
+				if response.Code != tc.wantClient {
+					t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+				}
+				if got := fallbackHits.Load() > 0; got != tc.wantFallback {
+					t.Fatalf("fallback hit=%v, want %v", got, tc.wantFallback)
+				}
+
+				var texts []string
+				var errorEvents int
+				for _, block := range strings.Split(response.Body.String(), "\n\n") {
+					event, data := parseSSEEventChunk([]byte(block))
+					if len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+						continue
+					}
+					if !gjson.ValidBytes(data) {
+						t.Fatalf("invalid SSE JSON payload: %q", data)
+					}
+					if gjson.GetBytes(data, "error").Exists() || gjson.GetBytes(data, "response").Exists() {
+						if event != "error" {
+							t.Fatalf("backend frame leaked to client: %s", data)
+						}
+						errorEvents++
+						continue
+					}
+					if text := gjson.GetBytes(data, adapter.streamTextPath).String(); text != "" {
+						texts = append(texts, text)
+					}
+				}
+				if strings.Join(texts, "") != tc.wantText {
+					t.Fatalf("stream text=%q, want %q: %s", texts, tc.wantText, response.Body.String())
+				}
+				wantErrorEvent := adapter.name == "Claude" && tc.wantLog != http.StatusOK && !tc.wantFallback
+				if (errorEvents > 0) != wantErrorEvent {
+					t.Fatalf("error events=%d, want present=%v: %s", errorEvents, wantErrorEvent, response.Body.String())
+				}
+
+				entry := waitForProxyLogMatching(t, env, func(entry *model.LogEntry) bool {
+					return entry.StatusCode == tc.wantLog
+				})
+				if entry == nil {
+					t.Fatalf("missing proxy log with status %d", tc.wantLog)
+				}
+			})
+		}
+	}
+}
+
 func TestProxy_AntigravityOAuthPreservesAnthropicToolIDs(t *testing.T) {
 	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4304,6 +4455,54 @@ func TestProxy_AntigravityOAuthHandlesCountTokensLocally(t *testing.T) {
 	}
 }
 
+func TestProxy_AntigravityOAuthMixedWebSearchUsesAgentRequest(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, model, path string
+		body              map[string]any
+	}{
+		{name: "anthropic", model: "claude-sonnet-4-6", path: "/v1/messages", body: map[string]any{
+			"model": "claude-sonnet-4-6", "max_tokens": 100,
+			"messages": []any{map[string]any{"role": "user", "content": "weather"}},
+			"tools": []any{
+				map[string]any{"type": "web_search_20250305", "name": "web_search"},
+				map[string]any{"name": "get_weather", "input_schema": map[string]any{"type": "object"}},
+			},
+		}},
+		{name: "gemini", model: "gemini-3.8-flash-high", path: "/v1beta/models/gemini-3.8-flash-high:generateContent", body: map[string]any{
+			"contents": []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "weather"}}}},
+			"tools": []any{
+				map[string]any{"googleSearch": map[string]any{}},
+				map[string]any{"functionDeclarations": []any{map[string]any{"name": "get_weather", "parameters": map[string]any{"type": "object"}}}},
+			},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				wireBody, _ := io.ReadAll(r.Body)
+				// Antigravity 拒绝内置搜索与函数混用，只能保留原模型按普通 agent 请求发送。
+				if gjson.GetBytes(wireBody, "requestType").String() != "agent" ||
+					gjson.GetBytes(wireBody, "model").String() != tc.model ||
+					strings.Contains(string(wireBody), `"googleSearch"`) ||
+					gjson.GetBytes(wireBody, "request.tools.0.functionDeclarations.0.name").String() != "get_weather" {
+					t.Errorf("mixed tools wire=%s", wireBody)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}}`)
+			}))
+			t.Cleanup(upstream.Close)
+			env := setupProxyTestEnv(t, []testChannel{{
+				name: "antigravity-mixed-" + tc.name, upstreamProtocol: "gemini", models: tc.model, priority: 100,
+				authType: model.AuthTypeAntigravityOAuth, oauthCredential: antigravityProxyTestCredential(t, "at-mixed"),
+			}}, map[int]string{0: upstream.URL})
+			if response := doProxyRequest(t, env.engine, tc.path, tc.body, nil); response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestProxy_AntigravityOAuthUsesWebSearchWireContract(t *testing.T) {
 	t.Parallel()
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4314,8 +4513,11 @@ func TestProxy_AntigravityOAuthUsesWebSearchWireContract(t *testing.T) {
 		if got := gjson.GetBytes(wireBody, "requestType").String(); got != "web_search" {
 			t.Errorf("requestType=%q body=%s", got, wireBody)
 		}
-		if got := gjson.GetBytes(wireBody, "model").String(); got != antigravityWebSearchFallbackModel {
+		if got := gjson.GetBytes(wireBody, "model").String(); got != "gemini-3.8-flash-high" {
 			t.Errorf("model=%q body=%s", got, wireBody)
+		}
+		if !gjson.GetBytes(wireBody, "request.tools.0.googleSearch").Exists() {
+			t.Errorf("googleSearch tool missing: %s", wireBody)
 		}
 		if got := gjson.GetBytes(wireBody, "request.systemInstruction.parts.0.text").String(); !strings.Contains(got, "You are Antigravity") {
 			t.Errorf("identity prompt missing: %q", got)
@@ -4361,8 +4563,8 @@ func TestProxy_AntigravityOAuthUsesWebSearchWireContract(t *testing.T) {
 		}
 	}
 	entry := logs[0]
-	if entry.ActualModel != antigravityWebSearchFallbackModel || math.Abs(entry.Cost-0.003) > 1e-12 {
-		t.Fatalf("Web Search actual model=%q cost=%v, want %s and 0.003", entry.ActualModel, entry.Cost, antigravityWebSearchFallbackModel)
+	if entry.ActualModel != "gemini-3.8-flash-high" || math.Abs(entry.Cost-0.003) > 1e-12 {
+		t.Fatalf("Web Search actual model=%q cost=%v, want gemini-3.8-flash-high and 0.003", entry.ActualModel, entry.Cost)
 	}
 	if projected := projectDashboardLogs(logs, env.server.logModelPrices(ctx, logs)); projected[0].CostBreakdown != nil {
 		t.Fatalf("Web Search cost=%v exposed mismatched breakdown=%+v", entry.Cost, projected[0].CostBreakdown)
@@ -8263,6 +8465,29 @@ func waitForProxyLog(t testing.TB, env *proxyTestEnv, modelName string) *model.L
 	}
 	t.Fatalf("proxy log for model %q not found within deadline", modelName)
 	return nil
+}
+
+// waitForCountTokensLogs 等待 count_tokens 来源的日志条数达到 want，按时间倒序返回。
+func waitForCountTokensLogs(t testing.TB, env *proxyTestEnv, want int) []*model.LogEntry {
+	t.Helper()
+
+	ctx := context.Background()
+	since := time.Now().Add(-time.Minute)
+	var logs []*model.LogEntry
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		var err error
+		logs, err = env.store.ListLogs(ctx, since, 20, 0, &model.LogFilter{LogSource: model.LogSourceCountTokens})
+		if err != nil {
+			t.Fatalf("ListLogs failed: %v", err)
+		}
+		if len(logs) >= want {
+			break
+		}
+	}
+	if len(logs) != want {
+		t.Fatalf("count_tokens logs=%d, want %d: %+v", len(logs), want, logs)
+	}
+	return logs
 }
 
 func waitForProxyLogMatching(t testing.TB, env *proxyTestEnv, match func(*model.LogEntry) bool) *model.LogEntry {
@@ -15772,12 +15997,15 @@ func TestProxy_AntigravityResponsesWebSearch(t *testing.T) {
 				if got := gjson.GetBytes(raw, "requestType").String(); (got == "web_search") != search {
 					t.Errorf("requestType=%s body=%s", got, raw)
 				}
+				if gjson.GetBytes(raw, "model").String() != "gemini-3-flash" {
+					t.Errorf("Gemini model replaced: %s", raw)
+				}
 				if search {
-					if gjson.GetBytes(raw, "model").String() != "gemini-2.5-flash" || gjson.GetBytes(raw, "request.tools.0.googleSearch.includedDomains.0").String() != "example.com" {
+					if gjson.GetBytes(raw, "request.tools.0.googleSearch.includedDomains.0").String() != "example.com" {
 						t.Errorf("missing search wire: %s", raw)
 					}
-				} else if gjson.GetBytes(raw, "model").String() != "gemini-3-flash" || strings.Contains(string(raw), `"googleSearch"`) {
-					t.Errorf("non-search request changed model/tools: %s", raw)
+				} else if strings.Contains(string(raw), `"googleSearch"`) {
+					t.Errorf("non-search request kept googleSearch: %s", raw)
 				}
 				body := `{"response":{"responseId":"search-response","candidates":[{"content":{"role":"model","parts":[{"text":"答案"}]},"groundingMetadata":{"webSearchQueries":["question"],"groundingChunks":[{"web":{"uri":"https://example.com/result","title":"Source"}}],"groundingSupports":[{"groundingChunkIndices":[0],"segment":{"startIndex":0,"endIndex":6,"text":"答案"}}]},"finishReason":"STOP"}]}}`
 				if tc.stream {

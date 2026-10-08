@@ -1,13 +1,14 @@
 /**
- * 介绍网站通用交互逻辑
- * 功能：代码复制、Tab 切换、锚点平滑滚动
+ * Shared interactions for the website
+ * Features: code copy, tab switching, and smooth anchor scrolling. Text is pre-rendered per language by build.mjs.
  */
 (function() {
   'use strict';
 
-  /**
-   * 代码复制功能
-   */
+  const zh = document.documentElement.lang === 'zh-CN';
+  const COPIED_TEXT = zh ? '已复制！' : 'Copied!';
+  const COPY_FAILED_TEXT = zh ? '复制失败，请手动选择复制' : 'Copy failed. Please select the text and copy it manually.';
+
   function initCodeCopy() {
     document.querySelectorAll('.www-code-copy').forEach(button => {
       button.addEventListener('click', async () => {
@@ -16,10 +17,8 @@
 
         try {
           await navigator.clipboard.writeText(codeContent);
-
-          // 更新按钮状态
           const originalText = button.textContent;
-          button.textContent = window.t ? window.t('www.common.copied') : '已复制';
+          button.textContent = COPIED_TEXT;
           button.classList.add('copied');
 
           setTimeout(() => {
@@ -28,15 +27,12 @@
           }, 2000);
         } catch (err) {
           console.error('Failed to copy code:', err);
-          alert('复制失败，请手动选择复制');
+          alert(COPY_FAILED_TEXT);
         }
       });
     });
   }
 
-  /**
-   * Tab 切换功能
-   */
   function initTabs() {
     document.querySelectorAll('.www-tabs').forEach(tabsContainer => {
       const buttons = tabsContainer.querySelectorAll('.www-tab-button');
@@ -44,11 +40,8 @@
 
       buttons.forEach((button, index) => {
         button.addEventListener('click', () => {
-          // 移除所有激活状态
           buttons.forEach(btn => btn.classList.remove('active'));
           panels.forEach(panel => panel.classList.remove('active'));
-
-          // 激活当前 tab
           button.classList.add('active');
           if (panels[index]) {
             panels[index].classList.add('active');
@@ -58,9 +51,6 @@
     });
   }
 
-  /**
-   * 锚点平滑滚动
-   */
   function initSmoothScroll() {
     document.querySelectorAll('a[href^="#"]').forEach(anchor => {
       anchor.addEventListener('click', function(e) {
@@ -71,77 +61,64 @@
         if (targetElement) {
           e.preventDefault();
           const navHeight = document.querySelector('.www-nav')?.offsetHeight || 64;
-          const targetPosition = targetElement.offsetTop - navHeight - 20;
-
           window.scrollTo({
-            top: targetPosition,
+            top: targetElement.offsetTop - navHeight - 20,
             behavior: 'smooth'
           });
+          history.replaceState(null, '', targetId);
         }
       });
     });
   }
 
-  /**
-   * 页脚内容生成
-   */
-  function initFooter() {
-    const footer = document.querySelector('.www-footer');
-    if (!footer) {
-      // 创建页脚
-      const footerHTML = `
-        <footer class="www-footer">
-          <div class="www-footer-bottom">
-            <p>
-              © 2025 ccLoad ·
-              <a href="https://github.com/caidaoli/ccLoad/blob/master/LICENSE" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline;">
-                MIT License
-              </a>
-            </p>
-          </div>
-        </footer>
-      `;
+  // 区块内容进入视口时渐入；网格内卡片按序错开。不支持或偏好减少动效时保持静态
+  function initReveal() {
+    if (!('IntersectionObserver' in window)) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
 
-      document.body.insertAdjacentHTML('beforeend', footerHTML);
-
-      // 如果 i18n 已加载，翻译页脚
-      if (window.translatePage) {
-        window.translatePage();
+    const GRID = '.www-bento, .www-feature-grid, .www-deployment-grid, .www-doc-grid, .www-step-list';
+    const targets = [];
+    document.querySelectorAll('.www-section .www-container > *, .www-cta-inner').forEach(el => {
+      if (el.matches(GRID)) {
+        Array.from(el.children).forEach((child, i) => {
+          child.style.transitionDelay = `${Math.min(i, 6) * 60}ms`;
+          targets.push(child);
+        });
+      } else {
+        targets.push(el);
       }
-    }
+    });
+
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        const el = entry.target;
+        el.classList.add('is-visible');
+        observer.unobserve(el);
+        // 动画结束后撤掉临时类，恢复卡片自身的 hover 过渡
+        setTimeout(() => {
+          el.classList.remove('www-reveal', 'is-visible');
+          el.style.transitionDelay = '';
+        }, 1000);
+      });
+    }, { rootMargin: '0px 0px -8% 0px' });
+
+    targets.forEach(el => {
+      el.classList.add('www-reveal');
+      observer.observe(el);
+    });
   }
 
-  /**
-   * 初始化所有功能
-   */
   function init() {
     initCodeCopy();
     initTabs();
     initSmoothScroll();
-    initFooter();
-
-    // 监听语言变化，重新初始化代码复制按钮文本
-    window.addEventListener('localechange', () => {
-      // 更新复制按钮文本
-      document.querySelectorAll('.www-code-copy').forEach(button => {
-        if (!button.classList.contains('copied')) {
-          button.textContent = window.t ? window.t('www.common.copy') : '复制';
-        }
-      });
-    });
+    initReveal();
   }
 
-  // DOM 加载完成后初始化
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
     init();
   }
-
-  // 导出全局函数供其他脚本使用
-  window.WWW = {
-    initCodeCopy,
-    initTabs,
-    initSmoothScroll
-  };
 })();

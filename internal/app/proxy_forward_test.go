@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -1130,6 +1131,59 @@ func TestOpenAIStreamCompleteWithoutDoneMarkerSurvivesClientCancel(t *testing.T)
 	})
 }
 
+// Antigravity 在终态块（finishReason）之后客户端断开时，数据已完整，按成功记账。
+func TestAntigravityStreamCompleteSurvivesClientCancel(t *testing.T) {
+	t.Parallel()
+
+	partial := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}]}}` + "\n\n"
+	complete := partial + `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":5,"totalTokenCount":12}}}` + "\n\n"
+	reg := protocol.NewRegistry()
+	builtin.Register(reg)
+	original := []byte(`{"model":"gemini-3-flash","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	translated, err := reg.TranslateRequest(protocol.Anthropic, protocol.Gemini, "gemini-3-flash", original, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	translated = append(append([]byte(`{"request":`), translated...), '}')
+	run := func(sse string) (*fwResult, error) {
+		reqCtx := &requestContext{
+			ctx: context.Background(), startTime: time.Now(), isStreaming: true, antigravityOAuth: true,
+			clientProtocol: protocol.Anthropic, upstreamProtocol: protocol.Gemini,
+			transformPlan: protocol.TransformPlan{ClientProtocol: protocol.Anthropic, UpstreamProtocol: protocol.Gemini, OriginalModel: "gemini-3-flash", ActualModel: "gemini-3-flash", OriginalBody: original, TranslatedBody: translated, NeedsTransform: true},
+		}
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(io.MultiReader(strings.NewReader(sse), iotest.ErrReader(context.Canceled))),
+		}
+		result, _, err := (&Server{protocolRegistry: reg}).handleSuccessResponse(
+			reqCtx, resp, resp.Header.Clone(), newRecorder(), string(protocol.Gemini), &streamReadStats{}, nil,
+		)
+		return result, err
+	}
+
+	t.Run("cancel after finish reason", func(t *testing.T) {
+		t.Parallel()
+		result, err := run(complete)
+		if err != nil {
+			t.Fatalf("终态块之后的客户端取消不得判为失败: %v", err)
+		}
+		if result.Status != http.StatusOK || result.StreamDiagMsg != "" {
+			t.Fatalf("status=%d diag=%q", result.Status, result.StreamDiagMsg)
+		}
+		if result.OutputTokens != 5 {
+			t.Fatalf("usage 未计入: %#v", result)
+		}
+	})
+
+	t.Run("cancel before finish reason", func(t *testing.T) {
+		t.Parallel()
+		if _, err := run(partial); err == nil {
+			t.Fatal("未见终态就取消必须保留失败语义，交给 499 路径")
+		}
+	})
+}
+
 // 598 语义比 599 更精确（冷却时长不同），流诊断不得把它降级覆盖。
 func TestMarkIncompleteStreamForwardResultKeepsFirstByteTimeout(t *testing.T) {
 	res := &fwResult{Status: util.StatusFirstByteTimeout, StreamDiagMsg: "流传输中断"}
@@ -1225,6 +1279,10 @@ func TestClassifySSEErrorStatus_RateLimits(t *testing.T) {
 			name: "responses_api_response_failed_nested_rate_limit",
 			body: []byte(`{"type":"response.failed","response":{"id":"resp_5ca0fb7943504d6a93576c7fb7e3a760","object":"response","model":"gpt-5.6-sol","status":"failed","output":[],"error":{"code":"rate_limit_exceeded","message":"Upstream rate limit exceeded, please retry later"}}}`),
 		},
+		{
+			name: "google_resource_exhausted",
+			body: []byte(`{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED"}}`),
+		},
 	}
 
 	for _, tt := range tests {
@@ -1233,6 +1291,18 @@ func TestClassifySSEErrorStatus_RateLimits(t *testing.T) {
 				t.Fatalf("classifySSEErrorStatus()=%d, want %d", got, http.StatusTooManyRequests)
 			}
 		})
+	}
+}
+
+// Only Google-shaped frames (numeric code plus string status) carry an HTTP
+// status; another relay's numeric code must not turn a stream error into a
+// client-facing 400 that skips failover.
+func TestClassifySSEErrorStatus_NumericCodeRequiresGoogleStatus(t *testing.T) {
+	if got := classifySSEErrorStatus([]byte(`{"error":{"code":400,"message":"upstream overloaded"}}`)); got != util.StatusSSEError {
+		t.Fatalf("relay numeric code = %d, want %d", got, util.StatusSSEError)
+	}
+	if got := classifySSEErrorStatus([]byte(`{"error":{"code":503,"message":"No capacity","status":"UNAVAILABLE"}}`)); got != http.StatusServiceUnavailable {
+		t.Fatalf("Google frame = %d, want 503", got)
 	}
 }
 
@@ -1654,7 +1724,7 @@ func TestRetryBodyForRejectedRequest_StripsMissingRequiredInput(t *testing.T) {
 	}
 	plan := protocol.TransformPlan{TranslatedBody: body}
 
-	got, strategy, ok := retryBodyForRejectedRequest(protocol.OpenAI, nil, plan, res)
+	got, strategy, ok := retryBodyForRejectedRequest(protocol.OpenAI, nil, nil, plan, res)
 	if !ok {
 		t.Fatal("retryBodyForRejectedRequest returned ok=false")
 	}
@@ -1674,7 +1744,7 @@ func TestAnthropicRetryBodyFor400PreservesOrderWhileDowngradingThinking(t *testi
 		Body:   []byte(`{"error":{"type":"invalid_request_error","message":"thinking blocks are not supported"}}`),
 	}
 
-	got, strategy, ok := anthropicRetryBodyFor400(protocol.Anthropic, protocol.TransformPlan{TranslatedBody: body}, res)
+	got, strategy, ok := anthropicRetryBodyFor400(protocol.Anthropic, nil, nil, protocol.TransformPlan{TranslatedBody: body}, res)
 	if !ok || strategy != "downgrade_anthropic_thinking" {
 		t.Fatalf("retry = (%q, %v), body=%s", strategy, ok, got)
 	}
@@ -1778,7 +1848,7 @@ func TestRetryBodyForRejectedRequest_StripsUnknownInputStatus(t *testing.T) {
 		ClientProtocol: protocol.Codex, UpstreamProtocol: protocol.Codex,
 		RequestFamily: protocol.RequestFamilyResponses, TranslatedBody: body,
 	}
-	got, strategy, ok := retryBodyForRejectedRequest(protocol.Codex, nil, plan, res)
+	got, strategy, ok := retryBodyForRejectedRequest(protocol.Codex, nil, nil, plan, res)
 	if !ok {
 		t.Fatal("retryBodyForRejectedRequest returned ok=false")
 	}
@@ -2062,7 +2132,7 @@ func TestResponsesRetryBodyForMissingStoredInputItem_StripsNamedReasoning(t *tes
 		t.Fatalf("unrelated item lost: %s", got)
 	}
 
-	got, strategy, ok = retryBodyForRejectedRequest(protocol.Codex, nil, plan, &fwResult{
+	got, strategy, ok = retryBodyForRejectedRequest(protocol.Codex, nil, nil, plan, &fwResult{
 		Status: http.StatusNotFound,
 		Body:   errorEvent,
 	})
@@ -2970,7 +3040,7 @@ func TestAnthropicOpus55GuardUsesCallerBody(t *testing.T) {
 		{name: "native Anthropic request", callerIsAnthropic: true, wantErr: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			got, err := (&Server{}).prepareTranslatedUpstreamBody(
+			got, _, err := (&Server{}).prepareTranslatedUpstreamBody(
 				cfg, protocol.Anthropic, "/v1/messages", "claude-opus-5-5", body, body,
 				"sk-ant-key", http.Header{}, false, anthropicOfficialTestURL, false, testCase.callerIsAnthropic,
 			)
@@ -3008,7 +3078,7 @@ func TestAnthropicOAuthNativeClaudeCodeRetryPreservesCallerCCH(t *testing.T) {
 		t.Fatalf("native OAuth body changed before retry:\n got %s\nwant %s", finalized, body)
 	}
 
-	replayed, err := (&Server{}).prepareTranslatedUpstreamBody(
+	replayed, _, err := (&Server{}).prepareTranslatedUpstreamBody(
 		cfg, protocol.Anthropic, "/v1/messages", "", finalized, finalized,
 		"", headers, true, anthropicOfficialTestURL, false, true,
 	)
@@ -3813,7 +3883,7 @@ func TestAnthropicClaudeCodeRetryReplaysUnsignedMimicWire(t *testing.T) {
 			if !isNativeAnthropicClaudeCodeRequest(finalized, outboundHeaders) {
 				t.Fatalf("gateway-owned wire failed its own outbound identity check: %s", finalized)
 			}
-			replayed, err := server.prepareTranslatedUpstreamBody(
+			replayed, _, err := server.prepareTranslatedUpstreamBody(
 				cfg, protocol.Anthropic, "/v1/messages", "", finalized, finalized,
 				"sk-ant-key", headers, true, testCase.target, false, true)
 			if err != nil {
@@ -3840,7 +3910,7 @@ func TestPrepareTranslatedUpstreamBodyInjectsAnyrouterFallbackTools(t *testing.T
 		"Anthropic-Beta": {"claude-code-20250219"},
 	}
 
-	got, err := (&Server{}).prepareTranslatedUpstreamBody(
+	got, _, err := (&Server{}).prepareTranslatedUpstreamBody(
 		anyrouterAnthropicCfg(), protocol.Anthropic, "/v1/messages", "",
 		[]byte(body), []byte(body), "sk-ant-key", headers, false, anthropicThirdPartyTestURL,
 		false, true,
@@ -3872,7 +3942,7 @@ func TestPrepareTranslatedUpstreamBodyCapsAntigravityOutputUsingRequestModel(t *
 		modelName, want*2,
 	))
 	cfg := &model.Config{AuthType: model.AuthTypeAntigravityOAuth, AntigravityProjectID: "gravity-project"}
-	got, err := (&Server{}).prepareTranslatedUpstreamBody(
+	got, _, err := (&Server{}).prepareTranslatedUpstreamBody(
 		cfg, protocol.Gemini, "/v1internal:generateContent", modelName,
 		body, body, "", http.Header{}, false, nil, false, false,
 	)
@@ -4189,5 +4259,92 @@ func TestCodexPurchasedCreditsReachProxyLog(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestAnthropicNativeTitleHelperPreservesStructuredOutput(t *testing.T) {
+	t.Parallel()
+	// Synthetic fixture matching name.txt's title helper shape; no captured identity or prompt.
+	const body = `{
+		"model":"claude-opus-5-5",
+		"messages":[{"role":"user","content":[{"type":"text","text":"Synthetic conversation summary"}]}],
+		"system":[
+			{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},
+			{"type":"text","text":"Generate a short title for this synthetic conversation."}
+		],
+		"tools":[],
+		"metadata":{"user_id":"{\"device_id\":\"synthetic-device\",\"account_uuid\":\"\",\"session_id\":\"synthetic-session\"}"},
+		"max_tokens":128000,
+		"output_config":{"effort":"medium","format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},
+		"stream":true
+	}`
+	const apiKeyBetas = "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,structured-outputs-2025-12-15"
+	const oauthBetas = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,structured-outputs-2025-12-15"
+	credentialJSON, err := (&anthropicauth.Credential{
+		Type: anthropicauth.ChannelType, AccessToken: "synthetic-access", RefreshToken: "synthetic-refresh",
+		Expired: "2030-01-01T00:00:00Z", AccountUUID: "synthetic-account",
+	}).JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &model.Config{AuthType: model.AuthTypeAnthropicOAuth, OAuthCredential: credentialJSON}
+	for _, test := range []struct {
+		name  string
+		betas string
+	}{
+		{name: "OAuth caller", betas: oauthBetas},
+		{name: "API key caller using OAuth channel", betas: apiKeyBetas},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			headers := http.Header{
+				"User-Agent":                  {"claude-cli/2.1.292 (external, cli)"},
+				"X-App":                       {"cli"},
+				"Anthropic-Beta":              {test.betas},
+				"X-Stainless-Package-Version": {"0.128.0"},
+				"X-Stainless-Runtime-Version": {"v26.3.0"},
+				"X-Stainless-Runtime":         {"node"},
+				"X-Stainless-Lang":            {"js"},
+				"X-Stainless-OS":              {"MacOS"},
+				"X-Stainless-Arch":            {"arm64"},
+			}
+			reqCtx := &requestContext{
+				ctx: context.Background(), startTime: time.Now(), isStreaming: true,
+				clientProtocol: protocol.Anthropic, upstreamProtocol: protocol.Anthropic,
+			}
+			request, err := (&Server{}).buildProxyRequest(reqCtx, cfg, "synthetic-access", http.MethodPost,
+				[]byte(body), headers, "", "/v1/messages", "https://api.anthropic.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = request.Body.Close() }()
+			finalized, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !gjson.ValidBytes(finalized) {
+				t.Fatal("final request body is invalid JSON")
+			}
+			for _, path := range []string{"model", "messages", "system", "tools", "max_tokens", "output_config", "stream"} {
+				if got, want := gjson.GetBytes(finalized, path).Value(), gjson.Get(body, path).Value(); !reflect.DeepEqual(got, want) {
+					t.Fatalf("caller field %s changed: got %#v, want %#v", path, got, want)
+				}
+			}
+			for _, path := range []string{"thinking", "context_management", "diagnostics", "cache_control", "temperature"} {
+				if gjson.GetBytes(finalized, path).Exists() {
+					t.Fatalf("title helper gained unexpected %s", path)
+				}
+			}
+			if got := headerValueFold(request.Header, "X-Claude-Code-Request-Class"); got != "" {
+				t.Fatalf("title helper gained request class %q", got)
+			}
+			if got := headerValueFold(request.Header, "Anthropic-Beta"); got != oauthBetas {
+				t.Fatalf("title helper beta = %q, want %q", got, oauthBetas)
+			}
+			for _, name := range []string{"User-Agent", "X-Stainless-Package-Version", "X-Stainless-Runtime-Version"} {
+				if got, want := headerValueFold(request.Header, name), headers.Get(name); got != want {
+					t.Fatalf("native header %s = %q, want %q", name, got, want)
+				}
+			}
+		})
 	}
 }

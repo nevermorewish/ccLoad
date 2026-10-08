@@ -1789,8 +1789,6 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		admin.POST("/channels/import", s.HandleImportChannelsCSV)
 		admin.GET("/channels/export.json", s.HandleExportChannelsJSON)
 		admin.POST("/channels/import.json", s.HandleImportChannelsJSON)
-		admin.POST("/oauth/credentials/import", s.HandleImportOAuthCredentials)
-		admin.POST("/oauth/credentials/import/stream", s.HandleImportOAuthCredentialsStream)
 		admin.POST("/oauth/credentials/import/jobs", s.HandleStartOAuthCredentialImportJob)
 		admin.GET("/oauth/credentials/import/jobs/:id", s.HandleOAuthCredentialImportJob)
 		admin.GET("/oauth/credentials/cleanup/options", s.HandleOAuthCredentialCleanupOptions)
@@ -1802,7 +1800,6 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		admin.POST("/codex/oauth/cancel", s.HandleCancelCodexOAuth)
 		admin.POST("/codex/oauth/callback", s.HandleSubmitCodexOAuthCallback)
 		admin.POST("/codex/personal-access-token", s.HandleCreateCodexPersonalAccessToken)
-		admin.POST("/codex/credentials/import", s.HandleImportCodexCredential)
 		admin.POST("/channels/:id/codex-credential/refresh", s.HandleRefreshCodexCredential)
 		admin.POST("/channels/:id/oauth-usage", s.HandleOAuthUsage)
 		admin.GET("/channels/:id/anthropic-reset-credits", s.HandleAnthropicResetCredits)
@@ -1814,20 +1811,17 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		admin.GET("/antigravity/oauth/status", s.HandleAntigravityOAuthStatus)
 		admin.POST("/antigravity/oauth/cancel", s.HandleCancelAntigravityOAuth)
 		admin.POST("/antigravity/oauth/callback", s.HandleSubmitAntigravityOAuthCallback)
-		admin.POST("/antigravity/credentials/import", s.HandleImportAntigravityCredential)
 		admin.POST("/channels/:id/antigravity-credential/refresh", s.HandleRefreshAntigravityCredential)
 		admin.POST("/xai/oauth/start", s.HandleStartXAIOAuth)
 		admin.GET("/xai/oauth/status", s.HandleXAIOAuthStatus)
 		admin.POST("/xai/oauth/cancel", s.HandleCancelXAIOAuth)
 		admin.POST("/xai/oauth/callback", s.HandleSubmitXAIOAuthCallback)
 		admin.POST("/xai/credentials/import/stream", s.HandleImportXAICredentialsStream)
-		admin.POST("/xai/credentials/import/jobs", s.HandleStartXAICredentialImportJob)
 		admin.POST("/channels/:id/xai-credential/refresh", s.HandleRefreshXAICredential)
 		admin.POST("/anthropic/oauth/start", s.HandleStartAnthropicOAuth)
 		admin.GET("/anthropic/oauth/status", s.HandleAnthropicOAuthStatus)
 		admin.POST("/anthropic/oauth/cancel", s.HandleCancelAnthropicOAuth)
 		admin.POST("/anthropic/oauth/callback", s.HandleSubmitAnthropicOAuthCode)
-		admin.POST("/anthropic/oauth/cookie", s.HandleAnthropicCookieAuth)
 		admin.POST("/channels/:id/anthropic-credential/refresh", s.HandleRefreshAnthropicCredential)
 		admin.POST("/zai/oauth/start", s.HandleStartZAIOAuth)
 		admin.POST("/codebuddy/oauth/start", s.HandleStartCodeBuddyOAuth)
@@ -1867,8 +1861,6 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		admin.POST("/channel-management/sub2api-login", s.HandleChannelManagementSub2APILogin)
 		admin.POST("/channels/:id/management-account/balance", s.HandleChannelManagementBalance)
 		admin.POST("/channels/:id/management-account/checkin", s.HandleChannelManagementCheckin)
-		admin.GET("/channels/:id/model-stats", s.HandleChannelModelStats)
-		admin.GET("/channels/:id/url-stats", s.HandleChannelURLStats)
 		admin.POST("/channels/:id/url-disable", s.HandleURLDisable)
 		admin.POST("/channels/:id/url-enable", s.HandleURLEnable)
 		admin.POST("/channels/:id/key-disable", s.HandleAPIKeyDisable)
@@ -1885,23 +1877,15 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		admin.POST("/channels/:id/test-url", s.HandleChannelURLTest)
 		admin.POST("/channels/:id/chat", s.HandleChannelChat)
 		admin.POST("/channels/:id/images/generations", s.HandleChannelImageGeneration)
-		admin.POST("/channels/:id/cooldown", s.HandleSetChannelCooldown)
-		admin.POST("/channels/:id/keys/:keyIndex/cooldown", s.HandleSetKeyCooldown)
 		admin.DELETE("/channels/:id/keys/:keyIndex", s.HandleDeleteAPIKey)
 
-		// 统计分析
-		admin.GET("/logs", s.HandleErrors)
-		admin.GET("/logs/bootstrap", s.HandleLogsBootstrap)
+		// 日志与运行态
 		admin.POST("/debug-logs/merged-response", s.HandleMergeDebugResponse)
 		admin.GET("/debug-logs/:log_id", s.HandleGetDebugLog)
 		admin.GET("/active-requests", s.HandleActiveRequests) // 进行中请求（内存状态）
 		admin.GET("/runtime-metrics", s.HandleRuntimeMetrics)
 		admin.GET("/active-requests/:request_id/debug-log", s.HandleGetActiveRequestDebugLog)
 		admin.POST("/active-requests/:request_id/abort", s.HandleAbortActiveRequest) // 手动中断当前上游尝试（按上游断链处理）
-		admin.GET("/metrics", s.HandleMetrics)
-		admin.GET("/stats", s.HandleStats)
-		admin.GET("/stats/filter-options", s.HandleStatsFilterOptions)
-		admin.GET("/models", s.HandleGetModels)
 
 		// API访问令牌管理
 		admin.GET("/auth-tokens", s.HandleListAuthTokens)
@@ -1914,8 +1898,6 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		admin.POST("/typesafe/test", s.AdminTestTypeSafe)
 		admin.GET("/settings", s.AdminListSettings)
 		admin.GET("/settings/:key", s.AdminGetSetting)
-		admin.PUT("/settings/:key", s.AdminUpdateSetting)
-		admin.POST("/settings/:key/reset", s.AdminResetSetting)
 		admin.POST("/settings/batch", s.AdminBatchUpdateSettings)
 
 		// 手动触发完整更新流程（检查、下载、校验、替换、空闲后重启）
@@ -1927,7 +1909,7 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 	dashboard.Use(s.authService.RequireWebAuth())
 	{
 		dashboard.GET("/session", s.authService.HandleWebSession)
-		dashboard.GET("/summary", s.HandlePublicSummary)
+		dashboard.GET("/summary", s.HandleDashboardSummary)
 		dashboard.GET("/logs", s.HandleErrors)
 		dashboard.GET("/logs/bootstrap", s.HandleLogsBootstrap)
 		dashboard.GET("/metrics", s.HandleMetrics)
@@ -2037,7 +2019,8 @@ func (s *Server) AddLogAsync(entry *model.LogEntry) {
 }
 
 func (s *Server) recordURLRequestFromLog(entry *model.LogEntry) {
-	if s == nil || s.urlSelector == nil || entry == nil || entry.LogSource == model.LogSourceJev {
+	if s == nil || s.urlSelector == nil || entry == nil ||
+		entry.LogSource == model.LogSourceJev || entry.LogSource == model.LogSourceCountTokens {
 		return
 	}
 	s.urlSelector.RecordRequestResult(entry.ChannelID, entry.BaseURL, entry.StatusCode)

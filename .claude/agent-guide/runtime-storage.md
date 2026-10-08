@@ -4,7 +4,7 @@
 
 ## 系统设置与连接生命周期
 
-- **系统设置无热重载,唯一例外是多模态回退映射**(`config_service.go`+`admin_settings.go`):`LoadDefaults` 启动读一次进内存,运行期只读;单改/重置/批量三个写入口都是写库后 `go s.triggerRestart()`,2 秒后重启进程生效。重启回调属于 `Server` 实例并由锁保护,禁止恢复为包级可变全局。例外由 `settingsRequireRestart` 判定:仅当一次提交的**唯一修改键**是 `model_multimodal_fallback` 时跳过重启,`commitSettingUpdates` 把持久化与运行态发布绑定成同一有序操作(含该映射的提交整体串行化,防并发提交让数据库终值与运行态快照错序),代理热路径只做一次原子快照读取。除该键外别在 `AdminUpdateSetting` 里加"顺手刷新缓存"——重启才是生效机制
+- **系统设置无热重载,唯一例外是多模态回退映射**(`config_service.go`+`admin_settings.go`):`LoadDefaults` 启动读一次进内存,运行期只读;唯一写入口 `POST /admin/settings/batch` 写库后 `go s.triggerRestart()`,2 秒后重启进程生效。重启回调属于 `Server` 实例并由锁保护,禁止恢复为包级可变全局。例外由 `settingsRequireRestart` 判定:仅当一次提交的**唯一修改键**是 `model_multimodal_fallback` 时跳过重启,`commitSettingUpdates` 把持久化与运行态发布绑定成同一有序操作(含该映射的提交整体串行化,防并发提交让数据库终值与运行态快照错序),代理热路径只做一次原子快照读取。除该键外别在 `AdminBatchUpdateSettings` 里加"顺手刷新缓存"——重启才是生效机制
 - **引导期配置只能是环境变量**:`ConfigService` 依赖已建好的 `storage.Store`,建库阶段消费的配置不可能迁进系统设置(要读设置得先开库,要开库得先知道设置)。`SQLITE_PATH`/`SQLITE_JOURNAL_MODE`(拼 DSN,`factory.go:buildSQLiteDSN`)、`CCLOAD_MYSQL`/`CCLOAD_POSTGRES`/`CCLOAD_ENABLE_SQLITE_REPLICA`/`CCLOAD_SQLITE_LOG_DAYS`(`factory.go:NewStore`)全属这一类,保持环境变量;运行期策略才进系统设置
 - **全局限额与冷却时长**(`server.go:loadServerRuntimeConfig`):均为系统设置,启动读一次,改后重启生效。`max_concurrency`(全局并发信号量;三层同名警告见渠道级限流条)、`max_body_bytes`/`max_image_body_bytes`(Images 路径独立上限,同时约束 Responses WS 帧与 transcript,注入见 `newRequestBodyLimits`)、`cooldown_{auth,server,timeout,rate_limit,min,max}_seconds`(`loadCooldownSettings` 读出 `util.CooldownSettings`,经 `Store.ConfigureCooldown` 注入;下限>上限时整对回退默认)。旧 `CCLOAD_MAX_CONCURRENCY`/`CCLOAD_MAX_BODY_BYTES`/`CCLOAD_COOLDOWN_*` 已废弃,仍设置时启动打 WARN
 - **下游请求读取超时**(`config/defaults.go`+`server.go:loadHTTPReadTimeout`+`main.go`):系统设置 `http_read_timeout_seconds`(秒,0=内建默认 120 秒,负数回退默认),启动读一次注入 `http.Server.ReadTimeout`,改后重启生效。它覆盖**请求头+请求体的整段读取**,和 `max_body_bytes` 是两件事:体积超限立即 413(`errBodyTooLarge`),读取超时是 408(`errBodyReadTimeout`),两条错误文案分别点名对应设置,别再互相误判——注意调大体积上限反而会让原本快速 413 的请求改为等到读取超时才失败
@@ -40,8 +40,9 @@
 
 - 发布必须使用仓库 Skill:Codex 调 `$ccload-release`,Claude Code 调 `/ccload-release`;唯一源码在 `.agents/skills/ccload-release/`,`.claude/skills/ccload-release` 只是软链接
 - 无参数默认 Beta;只有显式 `stable` 才发稳定版。Tag 只允许 `vX.Y.Z-beta.N` / `vX.Y.Z`
-- `.github/workflows/test.yml` 是提交级唯一发布门禁:`master` 的完整 SHA 必须通过后端测试、Web 验证、构建、lint 和 PostgreSQL 集成测试,发布脚本才允许打 Tag。`.github/workflows/release.yml` 只校验 Tag、构建多平台产物并生成 Release 和 GHCR 镜像;Beta=`prerelease=true` 且不改 GitHub latest,镜像发布精确版本 Tag+`beta`;稳定版更新 GitHub latest,镜像发布精确版本 Tag+`latest`,且该稳定版为 SemVer 最高版本时同步把 `beta` 别名推进到它(存在更高 Beta Tag 时不动,禁止降级)——`beta` 别名语义=全渠道 SemVer 最高版本,与 `preview` 更新渠道一致
+- `.github/workflows/test.yml` 是提交级唯一发布门禁:`master` 的完整 SHA 必须通过后端测试、Web 验证、构建、五平台交叉编译、lint 和 PostgreSQL 集成测试,发布脚本才允许打 Tag;交叉编译同时为 Release 预热按平台区分的 Go 构建缓存(Tag ref 的缓存互不可见,Release 只恢复不保存),GOCACHE 仅 master push 保存且保存前剔除本 Job 未用条目,防止滚动缓存无限膨胀。`.github/workflows/release.yml` 只校验 Tag、构建多平台产物并生成 Release 和 GHCR 镜像;Beta=`prerelease=true` 且不改 GitHub latest,镜像发布精确版本 Tag+`beta`;稳定版更新 GitHub latest,镜像发布精确版本 Tag+`latest`,且该稳定版为 SemVer 最高版本时同步把 `beta` 别名推进到它(存在更高 Beta Tag 时不动,禁止降级)——`beta` 别名语义=全渠道 SemVer 最高版本,与 `preview` 更新渠道一致
 - GitHub Release 仅上传 ccLoad 各平台二进制和 `checksums.txt`,不再分发 `cursor-sdk-bridge-*` 旧更新器兼容附件;使用 `v4.7.3-beta.1` 旧更新器的用户需手动升级。
+- Homebrew 使用本仓库 `Formula/ccload.rb` 作为 tap,安装四种 macOS/Linux Release 二进制并校验 SHA-256;稳定版 Release 成功后工作流更新 Formula 并普通推送 `master`,Beta 不更新。更新脚本拒绝版本回退。安装入口设置 `CCLOAD_CONTAINER=1` 复用现有外部更新托管模式,统一通过 `brew upgrade` 升级;服务工作目录为 Homebrew `var/ccload`,配置和数据保留在 Cellar 外。使用与失败恢复见 `docs/guide/deployment.zh-CN.md#homebrew`。
 - 官方容器直接打包同一 Release 的 ccLoad Linux 二进制;Cursor SDK Bridge 在镜像构建时从 Cursor 官方下载 `bridge.lock` 锁定版本并校验 SHA-256。`CCLOAD_CONTAINER=1` 时不启动版本检查或进程内更新,`auto_update_*` 设置只读;稳定版/测试版分别通过 `latest`/`beta` 镜像标签切换
 - 非容器部署的单一更新管理器同时负责前端版本提示和可选自动应用;默认 `auto_update_channel=stable`,`preview` 同时考虑稳定版/测试版并按 SemVer 取最高版本;`auto_update_interval_hours=0` 只关闭定时检查——设置页「检测更新」按钮走 `POST /admin/update/check`(`HandleManualUpdate` → `UpdateManager.CheckNow`,互斥单飞),在任何间隔值下都执行完整检查/校验/替换流程;容器部署不注册该入口
 
@@ -57,3 +58,4 @@
 - 混合健康:Ping 只检查权威 SQLite;`RuntimeMetrics` 暴露主库 pending/failures/dropped/last_success
 - 混合队列:按实体合并内存终态;高基数脏实体达到 10000 时折叠为一次 SQLite→主库全量状态对账,不静默丢失运行中配置任务
 - 模型冷却与 URL 禁用状态写 SQLite 后作为渠道聚合终态异步复制主库,渠道删除时级联清理
+- **Claude 重置并发控制**：按组织在当前进程内拒绝并发兑换，兑换前重新查询资格，每次操作最多发送一次兑换 POST。结果为 `unknown` 时不自动重试，管理员必须重新查询券状态后再决定是否兑换；不保存租约、组织封锁或确认结果，不提供 `Idempotency-Key` 结果重放。

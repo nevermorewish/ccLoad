@@ -4,27 +4,6 @@ let channelAuthTypeFilterCombobox = null; // 认证类型筛选组合框实例
 let modelFilterCombobox = null; // 通用组件实例
 let channelNameCombobox = null; // 渠道名筛选组合框实例
 
-function getChannelAuthTypeOptions() {
-  return [
-    { value: 'all', label: window.t('channels.authTypeAll') },
-    { value: 'api_key', label: window.t('channels.authTypeAPI') },
-    { value: 'codex_oauth', label: window.t('channels.authTypeCodex') },
-    { value: 'antigravity_oauth', label: window.t('channels.authTypeAntigravity') },
-    { value: 'xai_oauth', label: window.t('channels.authTypeXAI') },
-    { value: 'anthropic_oauth', label: window.t('channels.authTypeAnthropic') },
-    { value: 'zai_oauth', label: window.t('channels.authTypeZAI') },
-    { value: 'cursor_oauth', label: window.t('channels.authTypeCursor') },
-    { value: 'zed_oauth', label: window.t('channels.authTypeZed') },
-    { value: 'codebuddy_oauth', label: window.t('channels.authTypeCodeBuddy') }
-  ];
-}
-
-function channelAuthTypeFilterLabel(value) {
-  const options = getChannelAuthTypeOptions();
-  const option = options.find(item => item.value === value);
-  return option ? option.label : options[0].label;
-}
-
 function getModelAllLabel() {
   return (window.t && window.t('channels.modelAll')) || '所有模型';
 }
@@ -59,18 +38,56 @@ function isExactChannelNameFilter(value) {
   return isExactChannelFilterValue(value, allAvailableChannelNames);
 }
 
-function filterChannels() {
-  const filtered = channels.slice();
+function channelListPriority(channel) {
+  return Number(channel.effective_priority ?? channel.priority) || 0;
+}
 
-  // 排序：优先使用 effective_priority（健康度模式），否则使用 priority
-  filtered.sort((a, b) => {
-    const prioA = a.effective_priority ?? a.priority;
-    const prioB = b.effective_priority ?? b.priority;
-    if (prioB !== prioA) {
-      return prioB - prioA;
-    }
-    return a.name.localeCompare(b.name);
-  });
+function compareChannelText(a, b) {
+  const left = String(a ?? '');
+  const right = String(b ?? '');
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+// 与服务端 sortChannelList 同一规则：先按排序键，平局依次按优先级降序、名称升序、ID 升序。
+// 本地改动（如行内改优先级）后重排当前页，结果与重新请求一致。
+function compareChannelsForList(a, b, sort = channelsSort) {
+  let result;
+  if (sort.key === 'name') {
+    result = compareChannelText(a.name, b.name);
+  } else if (sort.key === 'enabled') {
+    result = Number(Boolean(a.enabled)) - Number(Boolean(b.enabled));
+  } else {
+    result = channelListPriority(a) - channelListPriority(b);
+  }
+  if (result !== 0) return sort.order === 'desc' ? -result : result;
+  const priorityDiff = channelListPriority(b) - channelListPriority(a);
+  if (priorityDiff !== 0) return priorityDiff;
+  return compareChannelText(a.name, b.name) || (Number(a.id) - Number(b.id));
+}
+
+function toggleChannelsSort(key) {
+  const order = channelsSort.key === key
+    ? (channelsSort.order === 'asc' ? 'desc' : 'asc')
+    : defaultChannelSortOrder(key);
+  applyChannelsSort({ key, order });
+}
+
+// 窄屏排序下拉的取值为 "key:order"，与表头排序共用 channelsSort
+function syncChannelSortSelect() {
+  const select = document.getElementById('channelSortSelect');
+  if (select) select.value = `${channelsSort.key}:${channelsSort.order}`;
+}
+
+function applyChannelsSort(sort) {
+  channelsSort = normalizeChannelsSort(sort);
+  syncChannelSortSelect();
+  channelsCurrentPage = 1;
+  if (typeof saveChannelsFilters === 'function') saveChannelsFilters();
+  loadChannels();
+}
+
+function filterChannels() {
+  const filtered = channels.slice().sort((a, b) => compareChannelsForList(a, b));
 
   filteredChannels = filtered; // 当前页筛选结果（服务端已过滤）
   renderChannels(filtered);
@@ -115,6 +132,15 @@ function setupFilterListeners() {
     if (typeof saveChannelsFilters === 'function') saveChannelsFilters();
     loadChannels();
   });
+
+  const sortSelect = document.getElementById('channelSortSelect');
+  if (sortSelect) {
+    syncChannelSortSelect();
+    sortSelect.addEventListener('change', (e) => {
+      const [key, order] = String(e.target.value).split(':');
+      applyChannelsSort({ key, order });
+    });
+  }
 
   const authTypeFilterInput = document.getElementById('channelAuthTypeFilter');
   if (authTypeFilterInput) {
@@ -209,13 +235,6 @@ function setupFilterListeners() {
     });
   }
 
-  // 筛选按钮：手动触发筛选
-  document.getElementById('btn_filter').addEventListener('click', () => {
-    channelsCurrentPage = 1;
-    if (typeof saveChannelsFilters === 'function') saveChannelsFilters();
-    loadChannels();
-  });
-
   const clearSearchBtn = document.getElementById('clearSearchBtn');
   if (clearSearchBtn) {
     clearSearchBtn.addEventListener('click', () => {
@@ -262,5 +281,5 @@ function setupFilterListeners() {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { setupFilterListeners };
+  module.exports = { setupFilterListeners, compareChannelsForList };
 }

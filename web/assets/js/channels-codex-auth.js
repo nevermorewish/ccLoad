@@ -13,7 +13,6 @@ let activeCodexPersonalAccessTokenFlow = null;
 let codexOAuthStopPromise = null;
 let activeXAIImportFlow = null;
 let xaiImportStopPromise = null;
-let activeAnthropicCookieFlow = null;
 let activeZAIKeyFlow = null;
 let activeCursorImportFlow = null;
 let activeCodeBuddyFileFlow = null;
@@ -26,9 +25,13 @@ let currentOAuthCredentialJSON = '';
 let currentOAuthCredential = null;
 let currentOAuthCredentialInfo = null;
 let currentOAuthCredentialView = 'decoded';
+let currentOAuthCredentialAuthType = '';
 let oauthLoginDialogTrigger = null;
 let oauthCredentialImportDialogTrigger = null;
 const oauthUsageStateByChannelID = new Map();
+const anthropicResetCreditsByChannelID = new Map();
+const anthropicResetCreditsOperationByChannelID = new Map();
+const anthropicResetCreditsChannelVersionByID = new Map();
 const oauthUsageOperationByChannelID = new Map();
 const oauthUsageLastOperationByChannelID = new Map();
 let oauthUsageOperationSequence = 0;
@@ -114,11 +117,123 @@ function renderCurrentOAuthCredential() {
   }
 }
 
+// 各提供商凭证的到期字段不同：expired 为 RFC3339，expires_at 为秒或毫秒时间戳
+function oauthCredentialExpiryMs(credential) {
+  const expired = Date.parse(String(credential?.expired || ''));
+  if (Number.isFinite(expired)) return expired;
+  const raw = credential?.expires_at;
+  const numeric = Number(raw);
+  if (raw !== '' && raw !== null && Number.isFinite(numeric) && numeric > 0) {
+    return numeric < 1e12 ? numeric * 1000 : numeric;
+  }
+  const parsed = Date.parse(String(raw || ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatOAuthCredentialTime(ms) {
+  const date = new Date(ms);
+  if (!ms || Number.isNaN(date.getTime())) return '';
+  const pad = value => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function oauthCredentialExpiryState(credential, nowMs = Date.now()) {
+  const expiresAt = oauthCredentialExpiryMs(credential);
+  if (!expiresAt) return null;
+  const remaining = expiresAt - nowMs;
+  if (remaining <= 0) return { expiresAt, tone: 'expired', text: window.t('channels.oauthCredential.expired') };
+  const text = typeof formatRemainingStatusTime === 'function'
+    ? formatRemainingStatusTime(
+      remaining,
+      'channels.oauthCredential.secondsUntilExpiry',
+      'channels.oauthCredential.minutesUntilExpiry',
+      'channels.oauthCredential.hoursMinutesUntilExpiry',
+      'channels.oauthCredential.daysHoursUntilExpiry'
+    )
+    : formatOAuthCredentialTime(expiresAt);
+  return { expiresAt, tone: remaining < 60 * 60 * 1000 ? 'warning' : 'ok', text };
+}
+
+function oauthCredentialSummaryRows(authType, credential, credentialInfo, expiry) {
+  const t = key => window.t(`channels.oauthCredential.${key}`);
+  const provider = typeof channelAuthTypeFilterLabel === 'function' ? channelAuthTypeFilterLabel(authType) : authType;
+  const rawPlan = String(credential.plan_type || credentialInfo?.plan_type || credential.subscription_tier || '').trim();
+  const plan = rawPlan && authType === 'codex_oauth' && typeof codexPlanLabel === 'function' ? codexPlanLabel(rawPlan) : rawPlan;
+  const refreshToken = String(credential.refresh_token || '').trim();
+  const lastRefresh = formatOAuthCredentialTime(Date.parse(String(credential.last_refresh || '')));
+  return [
+    { label: t('account'), value: credential.email || credential.email_address || '' },
+    { label: t('provider'), value: provider },
+    { label: t('plan'), value: plan, pill: true },
+    {
+      label: 'Access Token',
+      value: expiry ? formatOAuthCredentialTime(expiry.expiresAt) : '',
+      note: expiry?.text || '',
+      tone: expiry?.tone || ''
+    },
+    { label: 'Refresh Token', value: refreshToken ? t('refreshTokenAuto') : t('refreshTokenMissing') },
+    { label: t('lastRefresh'), value: lastRefresh },
+    {
+      label: t('accountId'),
+      value: credential.account_id || credentialInfo?.chatgpt_account_id || credential.user_id || credential.project_id || '',
+      mono: true
+    }
+  ].filter(row => String(row.value || '').trim());
+}
+
+// 凭证概要：左侧键值卡片 + 标题旁的 Access Token 到期提示，JSON 原文仍在右侧代码面板
+function renderOAuthCredentialSummary() {
+  if (typeof document === 'undefined') return;
+  const summary = document.getElementById('oauthCredentialSummary');
+  const pill = document.getElementById('oauthCredentialExpiryPill');
+  const credential = currentOAuthCredential;
+  const expiry = credential ? oauthCredentialExpiryState(credential) : null;
+  if (pill) {
+    pill.hidden = !expiry;
+    pill.textContent = expiry ? `Access Token ${expiry.text}` : '';
+    if (pill.dataset) pill.dataset.tone = expiry?.tone || '';
+  }
+  if (!summary || typeof summary.replaceChildren !== 'function') return;
+  if (!credential) {
+    summary.replaceChildren();
+    summary.hidden = true;
+    return;
+  }
+  const rows = oauthCredentialSummaryRows(currentOAuthCredentialAuthType, credential, currentOAuthCredentialInfo, expiry);
+  summary.replaceChildren(...rows.map(row => {
+    const item = document.createElement('div');
+    item.className = 'oauth-credential-summary__row';
+    const term = document.createElement('dt');
+    term.textContent = row.label;
+    const value = document.createElement('dd');
+    if (row.pill) {
+      const badge = document.createElement('span');
+      badge.className = 'oauth-credential-summary__pill';
+      badge.textContent = row.value;
+      value.append(badge);
+    } else {
+      value.textContent = row.value;
+    }
+    if (row.mono) value.classList.add('oauth-credential-summary__mono');
+    if (row.note) {
+      const note = document.createElement('span');
+      note.className = 'oauth-credential-summary__note';
+      note.dataset.tone = row.tone;
+      note.textContent = row.note;
+      value.append(document.createElement('br'), note);
+    }
+    item.append(term, value);
+    return item;
+  }));
+  summary.hidden = rows.length === 0;
+}
+
 function renderOAuthCredential(credential, credentialInfo = null, view = 'decoded') {
   currentOAuthCredential = credential || null;
   currentOAuthCredentialInfo = credentialInfo || null;
   currentOAuthCredentialView = view === 'raw' ? 'raw' : 'decoded';
   renderCurrentOAuthCredential();
+  renderOAuthCredentialSummary();
 }
 
 function setOAuthCredentialView(view) {
@@ -148,7 +263,6 @@ function applyChannelAuthEditorMode(
   const zedOAuth = authType === 'zed_oauth';
   const credentialVisible = codexOAuth || authType === 'antigravity_oauth' || authType === 'codebuddy_oauth' || xaiOAuth || anthropicOAuth || zaiOAuth || cursorOAuth || zedOAuth;
   const oauth = credentialVisible;
-  const notice = document.getElementById('codexCredentialReadOnlyNotice');
   const keyHeader = document.getElementById('channelAPIKeyHeader');
   const keyTable = document.getElementById('channelAPIKeyTable');
   const hiddenKey = document.getElementById('channelApiKey');
@@ -168,19 +282,13 @@ function applyChannelAuthEditorMode(
   const planBadgeText = codexOAuth
     ? formatCodexPlanBadgeText(planType, channel?.codex_subscription_active_until)
     : ((xaiOAuth || anthropicOAuth) ? planType : '');
-  if (notice) {
-    const noticeKey = xaiOAuth
-      ? 'channels.xai.editorReadOnly'
-      : (codexPersonalAccessToken ? 'channels.codex.personalAccessTokenReadOnly' : 'channels.oauthCredentialReadOnly');
-    notice.hidden = !oauth;
-    notice.setAttribute?.('data-i18n', noticeKey);
-    if (oauth && typeof window !== 'undefined' && typeof window.t === 'function') {
-      notice.textContent = window.t(noticeKey);
-    }
-  }
   if (planBadge) {
     planBadge.textContent = planBadgeText;
     planBadge.hidden = !planBadgeText;
+    const planTone = typeof oauthPlanBadgeTone === 'function' ? oauthPlanBadgeTone(authType, planType) : '';
+    ['plus', 'pro', 'team'].forEach(tone => {
+      planBadge.classList?.toggle(`ch-oauth-plan-badge--${tone}`, Boolean(planBadgeText) && tone === planTone);
+    });
   }
   // xAI OAuth now receives a masked synthetic Key row from the editor API so
   // its channel-level multiplier remains editable. Keep the empty create form
@@ -199,6 +307,8 @@ function applyChannelAuthEditorMode(
   if (batchDeleteButton) batchDeleteButton.disabled = oauth;
   if (selectAll) selectAll.disabled = oauth;
   if (credentialTab) credentialTab.hidden = !credentialVisible;
+  const credentialPanel = document.getElementById('advancedSettingsPanelCredential');
+  if (credentialPanel) credentialPanel.hidden = !credentialVisible;
   if (credentialViewDescription) credentialViewDescription.hidden = !codexOAuth;
   if (credentialViewSwitch) credentialViewSwitch.hidden = !codexOAuth;
   if (credentialRefreshButton) {
@@ -206,6 +316,7 @@ function applyChannelAuthEditorMode(
       codexPersonalAccessToken || (authType === 'codebuddy_oauth' && !credential?.refresh_token) || (zaiOAuth && !String(credential?.access_token || '').trim())
     );
   }
+  currentOAuthCredentialAuthType = authType;
   renderOAuthCredential(
     credentialVisible ? credential : null,
     codexOAuth ? credentialInfo : null,
@@ -407,7 +518,7 @@ function updateOAuthCredentialImportProgress(event, prefix = 'oauthCredentialImp
   }
 }
 
-function openOAuthLoginDialog(trigger = null) {
+function openOAuthLoginDialog(trigger = null, provider = 'codex') {
   const dialog = document.getElementById('oauthLoginDialog');
   const providerSelect = document.getElementById('oauthProviderSelect');
   const xaiMethod = document.getElementById('xaiOAuthMethod');
@@ -423,7 +534,7 @@ function openOAuthLoginDialog(trigger = null) {
   }
 
   oauthLoginDialogTrigger = trigger;
-  providerSelect.value = 'codex';
+  providerSelect.value = provider;
   providerSelect.disabled = false;
   const codebuddyEditionSelect = document.getElementById('codebuddyOAuthEdition');
   if (codebuddyEditionSelect) {
@@ -439,7 +550,6 @@ function openOAuthLoginDialog(trigger = null) {
   callbackURL.removeAttribute?.('aria-invalid');
   resetXAIOAuthDialog();
   resetCodexPersonalAccessTokenDialog();
-  resetAnthropicCookieDialog();
   syncOAuthProviderFields();
   setCodexAuthStatus('');
   setCodexOAuthDialogStatus('');
@@ -453,7 +563,6 @@ function closeOAuthLoginDialogElement() {
   if (dialog?.open) dialog.close();
   resetXAIOAuthDialog();
   resetCodexPersonalAccessTokenDialog();
-  resetAnthropicCookieDialog();
   const trigger = oauthLoginDialogTrigger;
   oauthLoginDialogTrigger = null;
   trigger?.focus?.();
@@ -505,27 +614,6 @@ function clearCodexPersonalAccessToken(input = document.getElementById('codexPer
   input.removeAttribute?.('aria-invalid');
 }
 
-function resetAnthropicCookieDialog() {
-  const controls = document.getElementById('anthropicOAuthControls');
-  const method = document.getElementById('anthropicOAuthMethod');
-  const cookieField = document.getElementById('anthropicCookieField');
-  const input = document.getElementById('anthropicSessionKey');
-  if (controls) controls.hidden = true;
-  if (method) {
-    method.value = 'code';
-    method.disabled = false;
-  }
-  if (cookieField) cookieField.hidden = true;
-  clearAnthropicCookieSecret(input);
-  if (input) input.required = false;
-}
-
-function clearAnthropicCookieSecret(input = document.getElementById('anthropicSessionKey')) {
-  if (!input) return;
-  input.value = '';
-  input.removeAttribute?.('aria-invalid');
-}
-
 function syncOAuthProviderFields() {
   const provider = document.getElementById('oauthProviderSelect')?.value || 'codex';
   const codebuddyMethod = document.getElementById('codebuddyOAuthMethod')?.value || 'oauth';
@@ -550,7 +638,6 @@ function syncOAuthProviderFields() {
   }
   const codexMethod = document.getElementById('codexOAuthMethod')?.value || 'oauth';
   const xaiMethod = document.getElementById('xaiOAuthMethod')?.value || 'manual';
-  const anthropicMethod = document.getElementById('anthropicOAuthMethod')?.value || 'code';
   const zaiMethod = document.getElementById('zaiOAuthMethod')?.value || 'oauth';
   const xai = provider === 'xai';
   const anthropic = provider === 'anthropic';
@@ -561,13 +648,9 @@ function syncOAuthProviderFields() {
   const zaiAPIKey = zai && zaiMethod === 'api_key';
   const cursorAPIKey = cursor;
   const codexPersonalAccessToken = codex && codexMethod === 'personalAccessToken';
-  const anthropicCookie = anthropic && anthropicMethod === 'cookie';
   const controls = document.getElementById('xaiOAuthControls');
   const secretField = document.getElementById('xaiCredentialSecretField');
   const textarea = document.getElementById('xaiCredentialValues');
-  const anthropicControls = document.getElementById('anthropicOAuthControls');
-  const anthropicCookieField = document.getElementById('anthropicCookieField');
-  const anthropicSessionKey = document.getElementById('anthropicSessionKey');
   const zaiControls = document.getElementById('zaiOAuthControls');
   const zaiAPIKeyField = document.getElementById('zaiAPIKeyField');
   const zaiAPIKeyInput = document.getElementById('zaiCodingPlanKey');
@@ -585,7 +668,6 @@ function syncOAuthProviderFields() {
   resetOAuthCredentialImportProgress('xaiCredentialImport');
   if (controls) controls.hidden = !xai;
   if (codexControls) codexControls.hidden = !codex;
-  if (anthropicControls) anthropicControls.hidden = !anthropic;
   if (zaiControls) zaiControls.hidden = !zai;
   if (cursorControls) cursorControls.hidden = !cursor;
   if (zedControls) zedControls.hidden = !zed;
@@ -603,7 +685,7 @@ function syncOAuthProviderFields() {
   // Let Cursor's custom empty-value handler run so it can open the Dashboard.
   // Keep the input required for assistive technology and other form semantics.
   if (authorizeButton) authorizeButton.formNoValidate = cursorAPIKey;
-  if (sessionFields && (codebuddyFile || xai || anthropicCookie || codexPersonalAccessToken || zaiAPIKey || cursorAPIKey)) sessionFields.hidden = true;
+  if (sessionFields && (codebuddyFile || xai || codexPersonalAccessToken || zaiAPIKey || cursorAPIKey)) sessionFields.hidden = true;
   if (codexPersonalAccessTokenField) codexPersonalAccessTokenField.hidden = !codexPersonalAccessToken;
   if (codexPersonalAccessTokenInput) {
     codexPersonalAccessTokenInput.required = codexPersonalAccessToken;
@@ -614,11 +696,6 @@ function syncOAuthProviderFields() {
     textarea.required = xai && xaiMethod !== 'manual';
     textarea.setAttribute?.('aria-describedby', 'xaiCredentialSecretHint oauthLoginDialogStatus');
     if (!textarea.required) textarea.removeAttribute?.('aria-invalid');
-  }
-  if (anthropicCookieField) anthropicCookieField.hidden = !anthropicCookie;
-  if (anthropicSessionKey) {
-    anthropicSessionKey.required = anthropicCookie;
-    if (!anthropicCookie) clearAnthropicCookieSecret(anthropicSessionKey);
   }
   if (description) {
     const descriptionKey = codebuddyFile
@@ -634,7 +711,7 @@ function syncOAuthProviderFields() {
       : xai
       ? (xaiMethod === 'manual' ? 'channels.xai.manualDescription' : 'channels.xai.importDescription')
       : (anthropic
-          ? (anthropicCookie ? 'channels.anthropic.cookieDescription' : 'channels.anthropic.codeDescription')
+          ? 'channels.anthropic.codeDescription'
           : 'channels.oauth.loginDialogDescription');
     description.setAttribute?.('data-i18n', descriptionKey);
     if (typeof window !== 'undefined' && typeof window.t === 'function') {
@@ -643,7 +720,7 @@ function syncOAuthProviderFields() {
   }
   if (authorizeButton) {
     authorizeButton.hidden = false;
-    const method = codebuddyProvider ? codebuddyMethod : codex ? codexMethod : (xai ? xaiMethod : (zai ? zaiMethod : anthropicMethod));
+    const method = codebuddyProvider ? codebuddyMethod : codex ? codexMethod : (xai ? xaiMethod : (zai ? zaiMethod : 'oauth'));
     setOAuthAuthorizeButtonLabel(provider, method, authorizeButton);
   }
 }
@@ -662,8 +739,6 @@ function setOAuthAuthorizeButtonLabel(provider, method, button = document.getEle
     ? (method === 'manual' ? 'channels.xai.generateLink' : 'channels.xai.importSecrets')
     : (provider === 'codex' && method === 'personalAccessToken'
         ? 'channels.codex.personalAccessTokenSubmit'
-        : provider === 'anthropic' && method === 'cookie'
-        ? 'channels.anthropic.authorizeWithCookie'
         : 'channels.oauth.startAuthorization');
   button.setAttribute?.('data-i18n', key);
   if (typeof window !== 'undefined' && typeof window.t === 'function') button.textContent = window.t(key);
@@ -780,87 +855,6 @@ async function submitOAuthCallback(provider, callbackURL, fetcher = fetchDataWit
   });
 }
 
-async function submitCodexOAuthCallback(callbackURL, fetcher = fetchDataWithAuth) {
-  return submitOAuthCallback('codex', callbackURL, fetcher);
-}
-
-async function submitAntigravityOAuthCallback(callbackURL, fetcher = fetchDataWithAuth) {
-  return submitOAuthCallback('antigravity', callbackURL, fetcher);
-}
-
-async function submitXAIOAuthCallback(callbackURL, fetcher = fetchDataWithAuth) {
-  return submitOAuthCallback('xai', callbackURL, fetcher);
-}
-
-async function submitAnthropicOAuthCode(code, state, fetcher = fetchDataWithAuth) {
-  return submitOAuthCallback('anthropic', code, fetcher, state);
-}
-
-async function submitAnthropicCookieAuth(
-  input,
-  fetcher = fetchDataWithAuth,
-  signal = undefined,
-  onProgress = () => {}
-) {
-  let entries = String(input?.value || '')
-    .split(/\r?\n/)
-    .map((sessionKey, index) => ({ line: index + 1, sessionKey: sessionKey.trim() }))
-    .filter(entry => entry.sessionKey);
-  if (entries.length === 0) {
-    input?.setAttribute?.('aria-invalid', 'true');
-    input?.focus?.();
-    throw new Error(window.t('channels.anthropic.cookieRequired'));
-  }
-  input?.removeAttribute?.('aria-invalid');
-  clearAnthropicCookieSecret(input);
-  const summary = {
-    total: entries.length,
-    created: 0,
-    updated: 0,
-    failed: 0,
-    failedLines: [],
-    failedDetails: []
-  };
-  try {
-    for (let index = 0; index < entries.length; index++) {
-      if (signal?.aborted) {
-        const error = new Error('Anthropic Cookie authorization cancelled');
-        error.name = 'AbortError';
-        throw error;
-      }
-      const entry = entries[index];
-      onProgress({ current: index + 1, total: entries.length });
-      let body = JSON.stringify({ session_key: entry.sessionKey });
-      try {
-        const result = await fetcher('/admin/anthropic/oauth/cookie', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body,
-          signal
-        });
-        if (result?.created === true) summary.created++;
-        else summary.updated++;
-      } catch (error) {
-        if (signal?.aborted || error?.name === 'AbortError') throw error;
-        summary.failed++;
-        summary.failedLines.push(entry.line);
-        const errorMessage = String(error?.message || '').trim();
-        summary.failedDetails.push({
-          line: entry.line,
-          error: errorMessage || window.t('channels.anthropic.cookieFailed')
-        });
-      } finally {
-        body = '';
-        entry.sessionKey = '';
-      }
-    }
-    return summary;
-  } finally {
-    for (const entry of entries) entry.sessionKey = '';
-    entries = [];
-  }
-}
-
 async function cancelOAuth(provider, state, fetcher = fetchDataWithAuth) {
   const config = oauthProviderConfig(provider);
   const normalizedState = String(state || '').trim();
@@ -870,26 +864,6 @@ async function cancelOAuth(provider, state, fetcher = fetchDataWithAuth) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ state: normalizedState })
   });
-}
-
-async function cancelCodexOAuth(state, fetcher = fetchDataWithAuth) {
-  return cancelOAuth('codex', state, fetcher);
-}
-
-async function cancelAntigravityOAuth(state, fetcher = fetchDataWithAuth) {
-  return cancelOAuth('antigravity', state, fetcher);
-}
-
-async function cancelXAIOAuth(state, fetcher = fetchDataWithAuth) {
-  return cancelOAuth('xai', state, fetcher);
-}
-
-async function cancelAnthropicOAuth(state, fetcher = fetchDataWithAuth) {
-  return cancelOAuth('anthropic', state, fetcher);
-}
-
-async function cancelZAIOAuth(state, fetcher = fetchDataWithAuth) {
-  return cancelOAuth('zai', state, fetcher);
 }
 
 // submitZAICodingPlanKey imports a Coding Plan key without a browser round trip.
@@ -1113,26 +1087,6 @@ async function pollOAuthStatus(provider, state, options = {}) {
   throw new Error(window.t(`${config.i18n}.oauthTimedOut`));
 }
 
-async function pollCodexOAuthStatus(state, options = {}) {
-  return pollOAuthStatus('codex', state, options);
-}
-
-async function pollAntigravityOAuthStatus(state, options = {}) {
-  return pollOAuthStatus('antigravity', state, options);
-}
-
-async function pollXAIOAuthStatus(state, options = {}) {
-  return pollOAuthStatus('xai', state, options);
-}
-
-async function pollAnthropicOAuthStatus(state, options = {}) {
-  return pollOAuthStatus('anthropic', state, options);
-}
-
-async function pollZAIOAuthStatus(state, options = {}) {
-  return pollOAuthStatus('zai', state, options);
-}
-
 async function startOAuth(provider, button) {
   const config = oauthProviderConfig(provider);
   let resolveReady;
@@ -1259,7 +1213,6 @@ async function stopActiveOAuth(options = {}) {
     stopActiveCodexOAuth({ closeDialog: false }),
     stopActiveCodexPersonalAccessToken(),
     stopActiveXAIImport({ closeDialog: false }),
-    stopActiveAnthropicCookieAuth(),
     stopActiveZAIKeyImport(),
     stopActiveCursorImport()
   ]);
@@ -1313,22 +1266,6 @@ function stopActiveCodexPersonalAccessToken() {
   }
   clearCodexPersonalAccessToken(flow?.input);
   const method = document.getElementById('codexOAuthMethod');
-  if (method) method.disabled = false;
-}
-
-function stopActiveAnthropicCookieAuth() {
-  const flow = activeAnthropicCookieFlow;
-  if (flow) {
-    flow.cancelling = true;
-    flow.controller?.abort?.();
-    if (activeAnthropicCookieFlow === flow) activeAnthropicCookieFlow = null;
-    if (flow.button) {
-      flow.button.disabled = false;
-      flow.button.removeAttribute?.('aria-busy');
-    }
-  }
-  clearAnthropicCookieSecret();
-  const method = document.getElementById('anthropicOAuthMethod');
   if (method) method.disabled = false;
 }
 
@@ -2113,6 +2050,153 @@ function getOAuthUsageState(channelID) {
   return oauthUsageStateByChannelID.get(numericID) || null;
 }
 
+function getAnthropicResetCreditsState(channelID) {
+  const numericID = Number(channelID);
+  const state = anthropicResetCreditsByChannelID.get(numericID);
+  if (state) return state;
+  const channelList = typeof channels !== 'undefined' && Array.isArray(channels) ? channels : [];
+  const channel = channelList.find(item => Number(item?.id) === numericID && item.auth_type === 'anthropic_oauth');
+  const data = channel?.oauth_usage?.anthropic_reset_credits;
+  return data ? { status: 'ready', data, cached: true } : null;
+}
+
+function anthropicResetCreditsChannelVersion(channel) {
+  return { identity: JSON.stringify([channel.auth_type, channel.created_at || '']), updatedAt: channel.updated_at || '' };
+}
+
+function syncAnthropicResetCreditsFromChannels(channelList) {
+  for (const channel of channelList) {
+    const channelID = Number(channel?.id);
+    const previous = anthropicResetCreditsChannelVersionByID.get(channelID);
+    if (!previous) continue;
+    const next = anthropicResetCreditsChannelVersion(channel);
+    if (next.identity === previous.identity && next.updatedAt === previous.updatedAt) continue;
+    anthropicResetCreditsChannelVersionByID.set(channelID, next);
+    // Credential refreshes bump updated_at. Keep an in-flight redeem and a
+    // fresh usage result when the list contains that same persisted snapshot.
+    const state = anthropicResetCreditsByChannelID.get(channelID);
+    if (next.identity === previous.identity && (state?.reset_status === 'loading' ||
+        (state?.data?.fetched_at && state.data.fetched_at === channel.oauth_usage?.anthropic_reset_credits?.fetched_at))) continue;
+    anthropicResetCreditsOperationByChannelID.delete(channelID);
+    anthropicResetCreditsByChannelID.delete(channelID);
+  }
+}
+
+function publishOAuthUsageResult(channelID, data, operationID) {
+  oauthUsageStateByChannelID.set(channelID, { status: 'ready', data });
+  // A query started before redemption must not restore credits that may have been consumed.
+  if ((oauthUsageLastOperationByChannelID.get(channelID) || 0) > operationID ||
+      anthropicResetCreditsByChannelID.get(channelID)?.reset_status === 'loading') return;
+  const channelList = typeof channels !== 'undefined' && Array.isArray(channels) ? channels : [];
+  const channel = channelList.find(item => Number(item?.id) === channelID && item.auth_type === 'anthropic_oauth');
+  if (!channel) return;
+  anthropicResetCreditsChannelVersionByID.set(channelID, anthropicResetCreditsChannelVersion(channel));
+  const credits = data.anthropic_reset_credits;
+  anthropicResetCreditsByChannelID.set(channelID, credits
+    ? { status: 'ready', data: credits } : { status: 'idle', data: null });
+}
+
+function anthropicResetWindowLabels(windows) {
+  const keys = { five_hour: 'anthropicResetFiveHour', seven_day: 'anthropicResetSevenDay', seven_day_overage_included: 'anthropicResetSevenDayOverage' };
+  return (Array.isArray(windows) ? windows : []).map(name => keys[name]
+    ? window.t(`channels.oauth.${keys[name]}`) : name).join(', ');
+}
+
+function hasAnthropicResetCredits(state) {
+  return state?.status === 'ready' && state.data?.credits?.some(credit =>
+    Number(credit?.resets_left) > 0 && (!credit.expires_at || Date.parse(credit.expires_at) > Date.now()));
+}
+
+async function confirmAnthropicQuotaReset(channelID, fetcher = fetchDataWithAuth, options = {}) {
+  const state = getAnthropicResetCreditsState(channelID);
+  if (state?.reset_status === 'loading' || state?.status === 'loading') return null;
+  if (!hasAnthropicResetCredits(state)) return null;
+  const credit = state.data.credits.find(item => item.redeemable) ||
+    state.data.credits.find(item => Number(item?.resets_left) > 0 &&
+      (!item.expires_at || Date.parse(item.expires_at) > Date.now()));
+  const message = window.t('channels.oauth.anthropicResetConfirm', {
+    windows: anthropicResetWindowLabels(credit?.clears) || '—',
+    count: Math.max(0, state.data.credits.reduce((sum, item) => sum + Math.max(0, Number(item.resets_left) || 0), 0) - 1)
+  });
+  if (!await window.showConfirm({ message, danger: true })) return null;
+  return redeemAnthropicResetCredit(channelID, fetcher, options);
+}
+
+async function redeemAnthropicResetCredit(channelID, fetcher = fetchDataWithAuth, options = {}) {
+  const numericID = Number(channelID);
+  const channelList = typeof channels !== 'undefined' && Array.isArray(channels) ? channels : [];
+  const channel = channelList.find(item => Number(item?.id) === numericID && item?.auth_type === 'anthropic_oauth');
+  if (!Number.isInteger(numericID) || numericID <= 0 || !channel) throw new Error('An Anthropic OAuth channel is required');
+  anthropicResetCreditsChannelVersionByID.set(numericID, anthropicResetCreditsChannelVersion(channel));
+  const previous = getAnthropicResetCreditsState(numericID);
+  if (previous?.reset_status === 'loading') return null;
+  if (!hasAnthropicResetCredits(previous)) {
+    throw new Error(window.t('channels.oauth.anthropicResetUnavailable'));
+  }
+  const operation = Symbol();
+  anthropicResetCreditsOperationByChannelID.set(numericID, operation);
+  anthropicResetCreditsByChannelID.set(numericID, { ...previous, reset_status: 'loading', reset_error: '', reset_feedback: '' });
+  const usageOperation = ++oauthUsageOperationSequence;
+  oauthUsageLastOperationByChannelID.set(numericID, usageOperation);
+  rerenderOAuthUsage();
+  try {
+    const result = await fetcher(`/admin/channels/${numericID}/anthropic-reset-credits/redeem`, {
+      method: 'POST'
+    });
+    const outcomeKeys = {
+      reset: 'resetSuccess', already_used: 'anthropicResetAlreadyUsed', not_limited: 'anthropicResetNotLimited',
+      cooldown: 'anthropicResetInCooldown', ineligible: 'anthropicResetIneligible', unknown: 'anthropicResetUnknown'
+    };
+    if (!result || !Object.hasOwn(outcomeKeys, result.outcome)) throw new Error(window.t('channels.oauth.resetInvalid'));
+    if (anthropicResetCreditsOperationByChannelID.get(numericID) !== operation) return result;
+    const hasWarnings = Array.isArray(result.warnings) && result.warnings.length > 0;
+    const feedbackKey = result.outcome === 'reset' && (hasWarnings || !result.usage)
+      ? 'resetSuccessNeedsRefresh' : outcomeKeys[result.outcome];
+    const data = result.credits;
+    const validCredits = result.outcome !== 'unknown' && data && typeof data.eligible === 'boolean' && Number.isInteger(data.available_count) && Array.isArray(data.credits);
+    anthropicResetCreditsByChannelID.set(numericID, {
+      status: validCredits ? 'ready' : 'idle', data: validCredits ? data : null,
+      reset_status: result.outcome, reset_feedback: window.t(`channels.oauth.${feedbackKey}`)
+    });
+    if (oauthUsageLastOperationByChannelID.get(numericID) === usageOperation) {
+      if (result.usage && Array.isArray(result.usage.windows)) {
+        oauthUsageOperationByChannelID.delete(numericID);
+        oauthUsageStateByChannelID.set(numericID, { status: 'ready', data: result.usage });
+      } else if (result.outcome === 'reset') {
+        oauthUsageOperationByChannelID.delete(numericID);
+        oauthUsageStateByChannelID.set(numericID, { status: 'error', error: window.t('channels.oauth.resetNeedsRefresh') });
+      }
+    }
+    // Consumption has finished; a list reload failure must not turn it into a retry.
+    if (result.outcome === 'reset' && options.reload !== false && typeof loadChannels === 'function') {
+      try { await loadChannels({ refreshUsage: false }); } catch { /* The result remains visible below. */ }
+      const currentChannels = typeof channels !== 'undefined' && Array.isArray(channels) ? channels : [];
+      if (!getAnthropicResetCreditsState(numericID) && currentChannels.some(item => Number(item?.id) === numericID && item.auth_type === 'anthropic_oauth')) {
+        anthropicResetCreditsByChannelID.set(numericID, {
+          status: 'idle', reset_status: result.outcome, reset_feedback: window.t(`channels.oauth.${feedbackKey}`)
+        });
+      }
+    }
+    return result;
+  } catch (error) {
+    if (anthropicResetCreditsOperationByChannelID.get(numericID) === operation) {
+      // Coded server rejections all precede the claim POST; anything else may have consumed a reset.
+      const rejected = typeof error?.response?.data?.code === 'string';
+      anthropicResetCreditsByChannelID.set(numericID, rejected ? {
+        ...previous, reset_status: 'error',
+        reset_error: window.t('channels.oauth.anthropicResetNotPerformed', { message: error.message })
+      } : {
+        status: 'idle', data: null, reset_status: 'unknown',
+        reset_feedback: window.t('channels.oauth.anthropicResetUnknown')
+      });
+    }
+    throw error;
+  } finally {
+    if (anthropicResetCreditsOperationByChannelID.get(numericID) === operation) anthropicResetCreditsOperationByChannelID.delete(numericID);
+    rerenderOAuthUsage();
+  }
+}
+
 function snapshotOAuthUsageStates() {
   return new Map(oauthUsageStateByChannelID);
 }
@@ -2162,7 +2246,8 @@ async function maybeAutoRefreshActiveChannelUsage(channelIDs, fetcher = fetchWit
     .map(channel => typeof channel === 'object' ? channel.id : channel)
     .map(Number)
     .filter(channelID => Number.isInteger(channelID) && channelID > 0)))
-    .filter(channelID => !activeChannelUsageAutoRefreshPendingIDs.has(channelID));
+    .filter(channelID => !activeChannelUsageAutoRefreshPendingIDs.has(channelID) &&
+      anthropicResetCreditsByChannelID.get(channelID)?.reset_status !== 'loading');
   if (pendingIDs.length === 0) return null;
   for (const channelID of pendingIDs) activeChannelUsageAutoRefreshPendingIDs.add(channelID);
   const oauthOperationFloor = oauthUsageOperationSequence;
@@ -2193,7 +2278,7 @@ async function maybeAutoRefreshActiveChannelUsage(channelIDs, fetcher = fetchWit
         if (oauthUsageOperationByChannelID.has(channelID) ||
             (oauthUsageLastOperationByChannelID.get(channelID) || 0) > oauthOperationFloor) return;
         if (result.status === 'succeeded' && result.usage && Array.isArray(result.usage.windows)) {
-          oauthUsageStateByChannelID.set(channelID, { status: 'ready', data: result.usage });
+          publishOAuthUsageResult(channelID, result.usage, oauthOperationFloor);
         } else {
           oauthUsageStateByChannelID.set(channelID, {
             status: 'error', error: result.error || window.t('channels.oauth.usageFailed')
@@ -2225,6 +2310,9 @@ async function refreshOAuthUsage(channelID, fetcher = fetchDataWithAuth, options
   if (!Number.isInteger(numericID) || numericID <= 0) {
     throw new Error('A saved OAuth channel is required');
   }
+  if (anthropicResetCreditsByChannelID.get(numericID)?.reset_status === 'loading') {
+    return getOAuthUsageState(numericID)?.data || null;
+  }
   const operationID = ++oauthUsageOperationSequence;
   oauthUsageLastOperationByChannelID.set(numericID, operationID);
   oauthUsageOperationByChannelID.set(numericID, operationID);
@@ -2237,7 +2325,7 @@ async function refreshOAuthUsage(channelID, fetcher = fetchDataWithAuth, options
     }
     if (oauthUsageOperationByChannelID.get(numericID) !== operationID) return result;
     oauthUsageOperationByChannelID.delete(numericID);
-    oauthUsageStateByChannelID.set(numericID, { status: 'ready', data: result });
+    publishOAuthUsageResult(numericID, result, operationID);
     if (options.reload !== false && typeof loadChannels === 'function') {
       await loadChannels({ refreshUsage: false });
     } else {
@@ -2385,7 +2473,8 @@ async function resetCodexQuota(channelID, fetcher = fetchDataWithAuth, options =
 async function refreshOAuthUsageBatch(channelIDs, fetcher = fetchWithAuth, options = {}) {
   const ids = Array.from(new Set((channelIDs || [])
     .map(id => Number(id))
-    .filter(id => Number.isInteger(id) && id > 0)));
+    .filter(id => Number.isInteger(id) && id > 0 &&
+      anthropicResetCreditsByChannelID.get(id)?.reset_status !== 'loading')));
   const summary = { total: ids.length, succeeded: 0, failed: 0 };
   if (ids.length === 0) return summary;
 
@@ -2417,7 +2506,7 @@ async function refreshOAuthUsageBatch(channelIDs, fetcher = fetchWithAuth, optio
           if (!result.usage || !Array.isArray(result.usage.windows)) {
             throw new Error(window.t('channels.oauth.usageInvalid'));
           }
-          oauthUsageStateByChannelID.set(channelID, { status: 'ready', data: result.usage });
+          publishOAuthUsageResult(channelID, result.usage, operationID);
         } else {
           oauthUsageStateByChannelID.set(channelID, {
             status: 'error',
@@ -2534,7 +2623,7 @@ async function batchRefreshSelectedOAuthUsage(fetcher = fetchWithAuth) {
 }
 
 function setupOAuthActions() {
-  const loginButton = document.getElementById('oauthLoginBtn');
+  const addMenu = document.getElementById('channelAddMenu');
   const loginDialog = document.getElementById('oauthLoginDialog');
   const loginForm = document.getElementById('oauthLoginForm');
   const providerSelect = document.getElementById('oauthProviderSelect');
@@ -2542,8 +2631,6 @@ function setupOAuthActions() {
   const codexPersonalAccessToken = document.getElementById('codexPersonalAccessToken');
   const xaiMethod = document.getElementById('xaiOAuthMethod');
   const xaiCredentialValues = document.getElementById('xaiCredentialValues');
-  const anthropicMethod = document.getElementById('anthropicOAuthMethod');
-  const anthropicSessionKey = document.getElementById('anthropicSessionKey');
   const codebuddyMethod = document.getElementById('codebuddyOAuthMethod');
   const codebuddyEditionSelect = document.getElementById('codebuddyOAuthEdition');
   const codebuddyFile = document.getElementById('codebuddyCredentialFile');
@@ -2576,9 +2663,15 @@ function setupOAuthActions() {
   const credentialCopyButton = document.getElementById('codexCredentialCopyButton');
   const credentialRefreshButton = document.getElementById('codexCredentialRefreshButton');
 
-  if (loginButton && !loginButton.dataset.bound) {
-    loginButton.addEventListener('click', () => openOAuthLoginDialog(loginButton));
-    loginButton.dataset.bound = '1';
+  // 页头「添加」菜单的 OAuth 项：按菜单项预选认证类型，关闭对话框后焦点回到菜单触发按钮
+  if (addMenu && !addMenu.dataset.oauthBound) {
+    addMenu.addEventListener('click', (event) => {
+      const item = event.target.closest('[data-oauth-provider]');
+      if (!item) return;
+      const trigger = document.querySelector('#channelAddGroup .channel-page-menu__trigger');
+      openOAuthLoginDialog(trigger, item.dataset.oauthProvider);
+    });
+    addMenu.dataset.oauthBound = '1';
   }
   if (providerSelect && typeof providerSelect.addEventListener === 'function' && !providerSelect.dataset?.oauthBound) {
     providerSelect.addEventListener('change', syncOAuthProviderFields);
@@ -2591,10 +2684,6 @@ function setupOAuthActions() {
   if (codexMethod && !codexMethod.dataset.bound) {
     codexMethod.addEventListener('change', syncOAuthProviderFields);
     codexMethod.dataset.bound = '1';
-  }
-  if (anthropicMethod && !anthropicMethod.dataset.bound) {
-    anthropicMethod.addEventListener('change', syncOAuthProviderFields);
-    anthropicMethod.dataset.bound = '1';
   }
   if (codebuddyMethod && !codebuddyMethod.dataset.bound) {
     codebuddyMethod.addEventListener('change', syncOAuthProviderFields);
@@ -2622,7 +2711,7 @@ function setupOAuthActions() {
     loginForm.addEventListener('submit', async event => {
       event.preventDefault();
       if (activeCodexOAuthFlow || activeCodexPersonalAccessTokenFlow || activeXAIImportFlow ||
-        activeAnthropicCookieFlow || activeZAIKeyFlow || activeCursorImportFlow || activeCodeBuddyFileFlow) return;
+        activeZAIKeyFlow || activeCursorImportFlow || activeCodeBuddyFileFlow) return;
       providerSelect.disabled = true;
       const codebuddyProvider = providerSelect.value === 'codebuddy' || providerSelect.value === 'codebuddy-international';
       const codebuddyEditionValue = providerSelect.value === 'codebuddy-international'
@@ -2780,64 +2869,6 @@ function setupOAuthActions() {
           authorizeButton.disabled = false;
           authorizeButton.removeAttribute?.('aria-busy');
         }
-      } else if (providerSelect.value === 'anthropic' && anthropicMethod?.value === 'cookie') {
-        const controller = typeof AbortController === 'function' ? new AbortController() : null;
-        const flow = { button: authorizeButton, input: anthropicSessionKey, cancelling: false, controller };
-        activeAnthropicCookieFlow = flow;
-        anthropicMethod.disabled = true;
-        authorizeButton.disabled = true;
-        authorizeButton.setAttribute?.('aria-busy', 'true');
-        try {
-          const result = await submitAnthropicCookieAuth(
-            anthropicSessionKey,
-            fetchDataWithAuth,
-            controller?.signal,
-            progress => setCodexOAuthDialogStatus(
-              window.t('channels.anthropic.cookieAuthorizing', progress)
-            )
-          );
-          if (flow.cancelling || activeAnthropicCookieFlow !== flow) return;
-          const successful = result.created + result.updated;
-          let resultMessage = '';
-          if (result.failed > 0) {
-            const details = result.failedDetails
-              .map(detail => window.t('channels.anthropic.cookieFailureDetail', detail))
-              .join('\n');
-            resultMessage = window.t('channels.anthropic.cookiePartial', {
-              ...result,
-              details
-            });
-            anthropicSessionKey?.setAttribute?.('aria-invalid', 'true');
-            anthropicSessionKey?.focus?.();
-            setCodexOAuthDialogStatus(resultMessage, 'error');
-          } else {
-            resultMessage = window.t('channels.anthropic.cookieComplete', result);
-            setCodexOAuthDialogStatus(resultMessage, 'success');
-          }
-          if (successful > 0) {
-            try {
-              await reloadChannelsList({ throwOnError: true });
-            } catch {
-              if (flow.cancelling || activeAnthropicCookieFlow !== flow) return;
-              setCodexOAuthDialogStatus(window.t('channels.anthropic.cookieReloadFailedWithResult', {
-                result: resultMessage
-              }), 'error');
-            }
-          }
-          return result;
-        } catch (error) {
-          if (flow.cancelling || activeAnthropicCookieFlow !== flow) return;
-          anthropicSessionKey?.setAttribute?.('aria-invalid', 'true');
-          anthropicSessionKey?.focus?.();
-          const message = error?.message || window.t('channels.anthropic.cookieFailed');
-          setCodexOAuthDialogStatus(message, 'error');
-        } finally {
-          if (activeAnthropicCookieFlow === flow) activeAnthropicCookieFlow = null;
-          anthropicMethod.disabled = false;
-          authorizeButton.disabled = false;
-          authorizeButton.removeAttribute?.('aria-busy');
-          if (loginDialog?.open && sessionFields?.hidden) providerSelect.disabled = false;
-        }
       } else {
         await startOAuth(selectedOAuthProvider(providerSelect.value), authorizeButton);
       }
@@ -2946,8 +2977,10 @@ function setupOAuthActions() {
       });
       return flow.cancelPromise;
     };
+    const cleanupModelRetry = document.getElementById('oauthCredentialCleanupModelRetry');
     const refreshCleanupModels = async () => {
       cleanupModel.removeAttribute?.('aria-invalid');
+      if (cleanupModelRetry) cleanupModelRetry.hidden = true;
       try {
         await loadOAuthCredentialCleanupModels(
           cleanupAuthType.value,
@@ -2956,8 +2989,10 @@ function setupOAuthActions() {
         );
       } catch (error) {
         console.warn('Failed to load OAuth credential cleanup models', error);
+        if (cleanupModelRetry) cleanupModelRetry.hidden = false;
       }
     };
+    cleanupModelRetry?.addEventListener('click', () => { void refreshCleanupModels(); });
     if (cleanupOpenButton && !cleanupOpenButton.dataset.bound) {
       cleanupOpenButton.addEventListener('click', () => {
         if (!openOAuthCredentialCleanupDialog(cleanupOpenButton)) return;
@@ -3004,10 +3039,10 @@ function setupOAuthActions() {
       const confirmKey = action === 'delete'
         ? 'channels.oauth.cleanupConfirmDelete'
         : 'channels.oauth.cleanupConfirmDisable';
-      if (typeof window.confirm === 'function' && !window.confirm(window.t(confirmKey, {
-        provider,
-        model: modelName
-      }))) return;
+      if (!await window.showConfirm({
+        message: window.t(confirmKey, { provider, model: modelName }),
+        danger: true
+      })) return;
 
       const flow = {
         jobID: '',
@@ -3192,17 +3227,17 @@ if (typeof module !== 'undefined' && module.exports) {
     submitCodeBuddyCredentialFile,
     applyChannelAuthEditorMode,
     batchRefreshSelectedOAuthUsage,
-    cancelAntigravityOAuth,
-    cancelAnthropicOAuth,
-    cancelCodexOAuth,
+    cancelOAuth,
     cancelOAuthCredentialCleanup,
-    cancelXAIOAuth,
-    cancelZAIOAuth,
     cleanupOAuthCredentials,
     copyOAuthCredential,
     copyCodexOAuthLink,
     formatCodexPlanBadgeText,
     getOAuthUsageState,
+    getAnthropicResetCreditsState,
+    syncAnthropicResetCreditsFromChannels,
+    confirmAnthropicQuotaReset,
+    redeemAnthropicResetCredit,
     snapshotOAuthUsageStates,
     syncOAuthUsageFromChannels,
     maybeAutoRefreshActiveChannelUsage,
@@ -3211,10 +3246,7 @@ if (typeof module !== 'undefined' && module.exports) {
     maskOAuthSyntheticKey,
     openOAuthCredentialImportDialog,
     openOAuthLoginDialog,
-    pollAntigravityOAuthStatus,
-    pollAnthropicOAuthStatus,
-    pollCodexOAuthStatus,
-    pollXAIOAuthStatus,
+    pollOAuthStatus,
     refreshOAuthCredential,
     checkInCodeBuddy,
     refreshOAuthUsage,
@@ -3226,17 +3258,12 @@ if (typeof module !== 'undefined' && module.exports) {
     setOAuthCredentialView,
     setupOAuthActions,
     showOAuthSession,
-    submitAntigravityOAuthCallback,
-    submitAnthropicCookieAuth,
-    submitAnthropicOAuthCode,
     submitCodexPersonalAccessToken,
+    submitOAuthCallback,
     submitCursorCredential,
     looksLikeCursorCLISessionSecret,
     CURSOR_USER_API_KEYS_URL,
-    submitCodexOAuthCallback,
-    submitXAIOAuthCallback,
     submitXAICredentialBatch,
-    submitZAICodingPlanKey,
-    pollZAIOAuthStatus
+    submitZAICodingPlanKey
   };
 }

@@ -4,6 +4,94 @@ function setChannelModalTitle(i18nKey) {
 
   titleEl.setAttribute('data-i18n', i18nKey);
   titleEl.textContent = window.t(i18nKey);
+  titleEl.removeAttribute('title');
+  setChannelDrawerIdentityVisible(false);
+}
+
+function setChannelDrawerIdentityVisible(visible) {
+  ['channelDrawerAvatar', 'channelDrawerAuthBadge', 'channelDrawerStatus', 'channelDrawerMeta'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.hidden = !visible;
+  });
+}
+
+function channelDrawerAuthLabel(authType) {
+  if (!authType || authType === 'api_key') return window.t('channels.drawer.authApiKey');
+  return window.t('channels.drawer.authOAuth', { provider: channelAuthTypeFilterLabel(authType) });
+}
+
+function formatChannelDrawerDate(unixSeconds) {
+  const date = new Date(Number(unixSeconds) * 1000);
+  if (!unixSeconds || Number.isNaN(date.getTime())) return '';
+  const pad = n => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+// 编辑模式抽屉头部：名称取代"编辑渠道"标题，并展示认证类型、运行状态与统计摘要
+function renderChannelDrawerIdentity(channel) {
+  const titleEl = document.getElementById('modalTitle');
+  if (!titleEl || !channel) return;
+  titleEl.removeAttribute('data-i18n');
+  titleEl.textContent = channel.name;
+  titleEl.title = channel.name;
+
+  const authType = channel.auth_type || 'api_key';
+  const authLabel = channelDrawerAuthLabel(authType);
+
+  const avatar = document.getElementById('channelDrawerAvatar');
+  if (avatar) {
+    avatar.innerHTML = window.channelAvatarContentHTML(authType, channel.name);
+    avatar.dataset.authType = authType;
+  }
+
+  const badge = document.getElementById('channelDrawerAuthBadge');
+  if (badge) {
+    badge.textContent = authLabel;
+    badge.dataset.authType = authType;
+  }
+
+  const statusEl = document.getElementById('channelDrawerStatus');
+  if (statusEl) {
+    statusEl.dataset.cooling = Number(channel.cooldown_remaining_ms || 0) > 0 ? '1' : '';
+    renderChannelDrawerStatus(!!channel.enabled);
+  }
+
+  const metaEl = document.getElementById('channelDrawerMeta');
+  if (metaEl) {
+    const parts = [window.t('channels.drawer.metaId', { id: channel.id })];
+    const created = formatChannelDrawerDate(channel.created_at);
+    if (created) parts.push(window.t('channels.drawer.metaCreated', { date: created }));
+    const stats = typeof channelStatsById !== 'undefined' ? channelStatsById[channel.id] : null;
+    const success = Number(stats?.success) || 0;
+    const total = success + (Number(stats?.error) || 0);
+    if (total > 0) {
+      const range = typeof channelStatsRange !== 'undefined' ? channelStatsRange : 'today';
+      parts.push(window.t('channels.drawer.metaRequests', {
+        range: window.t(`index.timeRange.${range.replace(/_([a-z])/g, (_, c) => c.toUpperCase())}`),
+        count: total.toLocaleString(),
+        rate: (success / total * 100).toFixed(1)
+      }));
+    }
+    metaEl.textContent = parts.join(' · ');
+  }
+
+  setChannelDrawerIdentityVisible(true);
+}
+
+// 启用开关切换时同步头部状态，冷却状态沿用打开抽屉时的快照
+function renderChannelDrawerStatus(enabled) {
+  const statusEl = document.getElementById('channelDrawerStatus');
+  if (!statusEl) return;
+  let state = 'normal';
+  if (!enabled) state = 'disabled';
+  else if (statusEl.dataset.cooling) state = 'cooldown';
+  const labelKey = {
+    normal: 'channels.status.normal',
+    cooldown: 'channels.status.cooldown',
+    disabled: 'channels.statusDisabled'
+  }[state];
+  statusEl.textContent = window.t(labelKey);
+  statusEl.dataset.state = state;
 }
 
 function normalizeProtocolTransformMode(value) {
@@ -19,9 +107,9 @@ let modelImportTarget = 'channel';
 
 function getProtocolTransformModeOptions() {
   return [
-    { value: 'auto', label: window.t('channels.modal.protocolTransformModeAuto') },
-    { value: 'upstream', label: window.t('channels.modal.protocolTransformModeUpstream') },
-    { value: 'local', label: window.t('channels.modal.protocolTransformModeLocal') }
+    { value: 'auto', label: window.t('channels.modal.protocolTransformModeAuto'), description: window.t('channels.modal.protocolTransformModeAutoHelp') },
+    { value: 'upstream', label: window.t('channels.modal.protocolTransformModeUpstream'), description: window.t('channels.modal.protocolTransformModeUpstreamHelp') },
+    { value: 'local', label: window.t('channels.modal.protocolTransformModeLocal'), description: window.t('channels.modal.protocolTransformModeLocalHelp') }
   ];
 }
 
@@ -61,6 +149,7 @@ async function ensureProtocolTransformModeCombobox(transformMode) {
       inputId: 'protocolTransformModeInput',
       dropdownId: 'protocolTransformModeDropdown',
       minWidth: 0,
+      dropdownMinWidth: 420,
       getOptions: getProtocolTransformModeOptions,
       initialValue: 'auto',
       initialLabel: getProtocolTransformModeLabel('auto'),
@@ -222,14 +311,18 @@ async function detectChannelWebsocketSupport(button) {
 
   const baseURLs = getEnabledChannelWebsocketURLs();
   if (baseURLs.length === 0) {
-    if (window.showError) window.showError(window.t('channels.fillApiUrlFirst'));
-    else alert(window.t('channels.fillApiUrlFirst'));
+    window.showError(window.t('channels.fillApiUrlFirst'));
     return false;
   }
-  const apiKeys = getEnabledChannelWebsocketKeys();
-  if (apiKeys.length === 0) {
-    if (window.showError) window.showError(window.t('channels.addAtLeastOneEnabledKey'));
-    else alert(window.t('channels.addAtLeastOneEnabledKey'));
+  const codexOAuth = typeof editingChannelAuthType !== 'undefined' && editingChannelAuthType === 'codex_oauth';
+  const channelID = typeof editingChannelId !== 'undefined' ? editingChannelId : null;
+  if (codexOAuth && !channelID) {
+    window.showError(window.t('channels.websocketsProbeSaveOAuthFirst'));
+    return false;
+  }
+  const apiKeys = codexOAuth ? [] : getEnabledChannelWebsocketKeys();
+  if (!codexOAuth && apiKeys.length === 0) {
+    window.showError(window.t('channels.addAtLeastOneEnabledKey'));
     return false;
   }
 
@@ -248,7 +341,7 @@ async function detectChannelWebsocketSupport(button) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           url: baseURL,
-          api_key: apiKeys[index % apiKeys.length],
+          ...(codexOAuth ? { channel_id: channelID } : { api_key: apiKeys[index % apiKeys.length] }),
           proxy_url: proxyURL,
           custom_request_rules: customRules
         })
@@ -267,8 +360,7 @@ async function detectChannelWebsocketSupport(button) {
   } catch (error) {
     setChannelWebsocketChecked(checkbox, false);
     const message = window.t('channels.websocketsProbeFailed', { error: error.message });
-    if (window.showError) window.showError(message);
-    else alert(message);
+    window.showError(message);
     return false;
   } finally {
     if (button) {
@@ -363,11 +455,8 @@ function initChannelEditorActions() {
         'download-export-keys': () => invokeChannelEditorAction('downloadExportKeys'),
         'close-model-import-modal': () => invokeChannelEditorAction('closeModelImportModal'),
         'confirm-model-import': () => invokeChannelEditorAction('confirmModelImport'),
-        'open-custom-rules-modal': () => invokeChannelEditorAction('openCustomRulesModal'),
+        'channel-editor-nav': (actionTarget) => revealChannelEditorSection(actionTarget?.dataset?.editorSectionTarget || ''),
         'probe-channel-websocket': (actionTarget) => detectChannelWebsocketSupport(actionTarget),
-        'close-custom-rules-modal': () => invokeChannelEditorAction('closeCustomRulesModal'),
-        'switch-advanced-settings-tab': (actionTarget) => invokeChannelEditorAction('switchAdvancedSettingsTab', actionTarget?.dataset?.advancedSettingsTab || ''),
-        'apply-advanced-settings': () => invokeChannelEditorAction('applyAdvancedSettingsFromForm'),
         'login-channel-management': () => invokeChannelEditorAction('loginManagementAccount'),
         'add-custom-rule': (actionTarget) => invokeChannelEditorAction('addCustomRule', actionTarget?.dataset?.customRulesTarget || ''),
         'remove-custom-rule': (actionTarget) => invokeChannelEditorAction('removeCustomRule', actionTarget?.dataset?.customRulesTarget || '', Number(actionTarget?.dataset?.customRulesIndex || '-1')),
@@ -396,6 +485,8 @@ function initChannelEditorActions() {
     channelForm.addEventListener('submit', (event) => {
       return saveChannel(event);
     });
+    channelForm.addEventListener('input', () => invokeChannelEditorAction('updateCustomRulesAnyrouterHint'));
+    channelForm.addEventListener('input', clearChannelFieldInvalidOnEdit);
     channelForm.dataset.channelFormBound = '1';
   }
 
@@ -405,6 +496,14 @@ function initChannelEditorActions() {
       syncScheduledCheckModelState();
     });
     scheduledCheckCheckbox.dataset.bound = '1';
+  }
+
+  const enabledCheckbox = document.getElementById('channelEnabled');
+  if (enabledCheckbox && !enabledCheckbox.dataset.bound) {
+    enabledCheckbox.addEventListener('change', () => {
+      renderChannelDrawerStatus(enabledCheckbox.checked);
+    });
+    enabledCheckbox.dataset.bound = '1';
   }
 
   initCommonModelsModalEvents();
@@ -474,7 +573,7 @@ async function showAddModal() {
   invokeChannelEditorAction('resetCooldownDetectionState', null);
 
   resetChannelFormDirty();
-  document.getElementById('channelModal').classList.add('show');
+  showChannelEditorDrawer();
   scheduleChannelEditorTableSizingSync();
 }
 
@@ -496,13 +595,6 @@ async function editChannel(id) {
     return;
   }
 
-  const modelStatsData = editorData.model_stats || {};
-  const modelStats = modelStatsData.available === false
-    ? null
-    : new Map((Array.isArray(modelStatsData.items) ? modelStatsData.items : []).map(entry => [
-      normalizeModelStatsKey(entry.model),
-      entry
-    ]));
   const urlStats = editorData.url_stats && Array.isArray(editorData.url_stats.items)
     ? editorData.url_stats.items
     : [];
@@ -518,6 +610,7 @@ async function editChannel(id) {
   clearChannelDuplicateHint();
 
   setChannelModalTitle('channels.editChannel');
+  renderChannelDrawerIdentity(channel);
   document.getElementById('channelName').value = channel.name;
   setInlineURLTableData(channel.urls);
   applyURLStats(urlStats);
@@ -584,16 +677,13 @@ async function editChannel(id) {
     const redirectModel = m.redirect_model || '';
     const actualModel = resolveEditorActualModel(configuredModels, m);
     const cooldown = modelCooldowns.get(actualModel);
-    const stats = modelStats?.get(normalizeModelStatsKey(modelName));
     return {
       model: modelName,
       redirect_model: redirectModel,
       disabled: !!m.disabled,
       ...rowPricingField(m.pricing),
       cooldown_until: cooldown?.cooldown_until || '',
-      cooldown_remaining_ms: cooldown?.cooldown_remaining_ms || 0,
-      model_stats: stats || null,
-      model_stats_unavailable: modelStats === null
+      cooldown_remaining_ms: cooldown?.cooldown_remaining_ms || 0
     };
   });
   selectedModelIndices.clear();
@@ -614,19 +704,77 @@ async function editChannel(id) {
   if (availableTimeEnd) availableTimeEnd.value = channel.available_time_end || '';
 
   resetChannelFormDirty();
-  document.getElementById('channelModal').classList.add('show');
+  showChannelEditorDrawer();
   scheduleChannelEditorTableSizingSync();
 }
 
-function normalizeModelStatsKey(modelName) {
-  return String(modelName || '').trim().toLowerCase();
+// 抽屉打开时高级分区进入草稿态，导航回到第一个分区。
+function showChannelEditorDrawer() {
+  invokeChannelEditorAction('beginAdvancedSettingsDraft');
+  document.getElementById('channelModal').classList.add('show');
+  const main = document.getElementById('channelEditorMain');
+  if (!main) return;
+  main.scrollTop = 0;
+  bindChannelEditorScrollSpy(main);
+  setActiveChannelEditorNav('basic');
 }
 
-function closeModal() {
-  if (channelFormDirty && !confirm(window.t('channels.unsavedChanges'))) {
+function channelEditorSections(main) {
+  return Array.from(main.querySelectorAll('[data-editor-section]'))
+    .filter(section => !section.hidden);
+}
+
+function setActiveChannelEditorNav(sectionName) {
+  const nav = document.getElementById('channelEditorNav');
+  if (!nav) return;
+  nav.querySelectorAll('[data-editor-section-target]').forEach((item) => {
+    if (item.dataset.editorSectionTarget === sectionName) {
+      item.setAttribute('aria-current', 'true');
+    } else {
+      item.removeAttribute('aria-current');
+    }
+  });
+}
+
+function revealChannelEditorSection(sectionName) {
+  const main = document.getElementById('channelEditorMain');
+  const section = main?.querySelector(`[data-editor-section="${sectionName}"]`);
+  if (!section || section.hidden) return;
+  section.scrollIntoView({ block: 'start' });
+  setActiveChannelEditorNav(sectionName);
+}
+
+// 滚动时高亮最后一个顶部越过视口上沿的分区；滚到底时高亮最后一个分区。
+function bindChannelEditorScrollSpy(main) {
+  if (!main || main.dataset.scrollSpyBound === '1') return;
+  main.dataset.scrollSpyBound = '1';
+  let frame = 0;
+  main.addEventListener('scroll', () => {
+    if (frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      const sections = channelEditorSections(main);
+      if (sections.length === 0) return;
+      const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 2;
+      const threshold = main.getBoundingClientRect().top + 24;
+      let current = sections[0];
+      for (const section of sections) {
+        if (section.getBoundingClientRect().top <= threshold) current = section;
+      }
+      if (atBottom) current = sections[sections.length - 1];
+      setActiveChannelEditorNav(current.dataset.editorSection);
+    });
+  }, { passive: true });
+}
+
+// 无未保存更改时同步关闭（async 函数在首个 await 前同步执行），保存成功后的关闭不受影响
+async function closeModal() {
+  if (channelFormDirty && !await window.showConfirm({ message: window.t('channels.unsavedChanges'), danger: true })) {
     return;
   }
   document.getElementById('channelModal').classList.remove('show');
+  clearChannelRequiredFieldMarks();
+  invokeChannelEditorAction('discardAdvancedSettingsDraft');
   editingChannelId = null;
   clearChannelDuplicateHint();
   resetChannelFormDirty();
@@ -751,7 +899,7 @@ function confirmDuplicateChannel(dupes) {
       .filter(Boolean);
     return `• ${d.name}\n  ${urls.join('\n  ')}`;
   }).join('\n\n');
-  return confirm(window.t('channels.duplicateChannelFound', { list }));
+  return window.showConfirm(window.t('channels.duplicateChannelFound', { list }));
 }
 
 function setChannelSavePending(pending) {
@@ -803,10 +951,7 @@ function validateChannelScheduledCheckSchedule() {
       error.hidden = valid;
     }
     if (!valid) {
-      if (!document.getElementById('customRulesModal')?.classList.contains('show')) {
-        invokeChannelEditorAction('openCustomRulesModal');
-      }
-      invokeChannelEditorAction('switchAdvancedSettingsTab', 'other');
+      revealChannelEditorSection('schedule');
       input.setAttribute('aria-invalid', 'true');
       input.focus();
       return false;
@@ -816,27 +961,72 @@ function validateChannelScheduledCheckSchedule() {
   return true;
 }
 
+// 必填项按编辑器分区顺序排列；标签复用分区可见文案（去掉末尾的必填星号）
+const CHANNEL_REQUIRED_FIELDS = [
+  { field: 'name', section: 'basic', labelKey: 'channels.channelName', element: () => document.getElementById('channelName') },
+  { field: 'urls', section: 'urls', labelKey: 'channels.apiUrl', element: () => document.querySelector('.channel-editor-group--urls') },
+  { field: 'keys', section: 'keys', labelKey: 'channels.apiKey', element: () => document.getElementById('channelKeyEditorGroup') },
+  { field: 'models', section: 'models', labelKey: 'channels.modelConfig', element: () => document.querySelector('.channel-editor-group--models') }
+];
+
+function setChannelFieldInvalid(element, invalid) {
+  if (!element) return;
+  if (invalid) {
+    element.classList.add('is-invalid');
+    if (element.tagName === 'INPUT') element.setAttribute('aria-invalid', 'true');
+    return;
+  }
+  element.classList.remove('is-invalid');
+  element.removeAttribute('aria-invalid');
+  element.querySelectorAll?.('[aria-invalid]').forEach(node => node.removeAttribute('aria-invalid'));
+}
+
+function clearChannelRequiredFieldMarks() {
+  CHANNEL_REQUIRED_FIELDS.forEach(({ element }) => setChannelFieldInvalid(element(), false));
+}
+
+// 表格类必填项聚焦首个可编辑单元格，空表时聚焦分区的添加按钮
+function channelRequiredFieldFocusTarget(element) {
+  if (!element || element.tagName === 'INPUT') return element;
+  const target = element.querySelector('tbody input:not([type="checkbox"]), .channel-editor-section-actions button');
+  if (target?.tagName === 'INPUT') target.setAttribute('aria-invalid', 'true');
+  return target || element;
+}
+
+function clearChannelFieldInvalidOnEdit(event) {
+  const marked = event.target?.closest?.('.is-invalid');
+  if (marked) setChannelFieldInvalid(marked, false);
+}
+
+function validateChannelRequiredFields(missingByField) {
+  clearChannelRequiredFieldMarks();
+  const missing = CHANNEL_REQUIRED_FIELDS.filter(({ field }) => missingByField[field]);
+  if (missing.length === 0) return true;
+
+  missing.forEach(({ element }) => setChannelFieldInvalid(element(), true));
+  const [first] = missing;
+  revealChannelEditorSection(first.section);
+  channelRequiredFieldFocusTarget(first.element())?.focus?.();
+  const fields = missing
+    .map(({ labelKey }) => String(window.t(labelKey)).replace(/\s*\*\s*$/, ''))
+    .join(window.t('channels.requiredFieldSeparator'));
+  window.showError(window.t('channels.fillAllRequired', { fields }));
+  return false;
+}
+
 async function saveChannel(event) {
   event.preventDefault();
   if (!validateChannelScheduledCheckSchedule()) return;
+  if (invokeChannelEditorAction('commitAdvancedSettingsDraft') === false) return;
 
   const cooldownRuleErrors = invokeChannelEditorAction('validateCooldownDetectionRulesForSubmit');
   if (Array.isArray(cooldownRuleErrors) && cooldownRuleErrors.length > 0) {
     const message = `${window.t('channels.cooldownDetection.saveIncomplete', 'Cannot save channel: complete all cooldown detection rules.')} ${cooldownRuleErrors.join(' · ')}`;
-    if (window.showError) {
-      window.showError(message);
-    } else {
-      alert(message);
-    }
+    window.showError(message);
     return;
   }
 
   const validURLConfigs = getValidInlineURLConfigs();
-  if (validURLConfigs.length === 0) {
-    alert(window.t('channels.fillApiUrlFirst'));
-    return;
-  }
-
   const isOAuth = ['codebuddy_oauth', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth'].includes(editingChannelAuthType);
   const validKeyRows = isOAuth ? [] : getValidInlineKeyRows();
   if (validKeyRows.some(row => !Number.isInteger(row.priority) || row.priority < -99999 || row.priority > 9999999)) {
@@ -844,10 +1034,6 @@ async function saveChannel(event) {
     return;
   }
   const validKeys = validKeyRows.map(row => row.api_key);
-  if (!isOAuth && validKeyRows.length === 0) {
-    alert(window.t('channels.atLeastOneKey'));
-    return;
-  }
 
   document.getElementById('channelApiKey').value = validKeys.join(',');
 
@@ -900,16 +1086,18 @@ async function saveChannel(event) {
   }
   applyChannelManagementPayload(formData);
 
-  if (!formData.name || formData.urls.length === 0 || (!isOAuth && !formData.api_key) || formData.models.length === 0) {
-    if (window.showError) window.showError(window.t('channels.fillAllRequired'));
-    return;
-  }
+  if (!validateChannelRequiredFields({
+    name: !formData.name,
+    urls: formData.urls.length === 0,
+    keys: !isOAuth && !formData.api_key,
+    models: formData.models.length === 0
+  })) return;
 
   setChannelSavePending(true);
   try {
     if (!editingChannelId) {
       const dupes = await checkChannelDuplicate(validURLConfigs);
-      if (dupes.length > 0 && !confirmDuplicateChannel(dupes)) return;
+      if (dupes.length > 0 && !await confirmDuplicateChannel(dupes)) return;
     }
 
     const resp = editingChannelId
@@ -1743,7 +1931,10 @@ async function batchRefreshSelectedChannels(mode) {
     return;
   }
 
-  if (mode === 'replace' && !confirm(window.t('channels.batchRefreshReplaceConfirm', { count: channelIDs.length }))) {
+  if (mode === 'replace' && !await window.showConfirm({
+    message: window.t('channels.batchRefreshReplaceConfirm', { count: channelIDs.length }),
+    danger: true
+  })) {
     return;
   }
 
@@ -1870,7 +2061,7 @@ async function batchRefreshSelectedChannels(mode) {
 
   const closeBtn = document.createElement('button');
   closeBtn.textContent = '✕';
-  closeBtn.style.cssText = 'padding:2px 8px;font-size:0.9em;border:1px solid var(--neutral-300);border-radius:var(--radius-md);background:var(--neutral-50);color:var(--neutral-700);cursor:pointer;font-weight:bold';
+  closeBtn.style.cssText = 'padding:2px 8px;font-size:0.9em;border:1px solid var(--neutral-300);border-radius:var(--radius-base);background:var(--neutral-50);color:var(--neutral-700);cursor:pointer;font-weight:bold';
   closeBtn.onclick = dismissProgress;
   actionBar.appendChild(closeBtn);
 
@@ -1970,7 +2161,7 @@ async function copyChannel(id, name) {
   syncScheduledCheckModelState();
 
   resetChannelFormDirty();
-  document.getElementById('channelModal').classList.add('show');
+  showChannelEditorDrawer();
   scheduleChannelEditorTableSizingSync();
 }
 
@@ -2230,7 +2421,10 @@ async function confirmModelImport() {
       ? 'replace'
       : 'append';
     const channelCount = getSelectedChannelIDs().length;
-    if (mode === 'replace' && !confirm(window.t('channels.batchModelImportReplaceConfirm', { count: channelCount }))) {
+    if (mode === 'replace' && !await window.showConfirm({
+      message: window.t('channels.batchModelImportReplaceConfirm', { count: channelCount }),
+      danger: true
+    })) {
       return;
     }
 
@@ -2368,10 +2562,6 @@ function updateRedirectRow(index, field, value) {
     // 用户改动模型配置后，原运行态已不再对应当前行。
     redirectTableData[index].cooldown_until = '';
     redirectTableData[index].cooldown_remaining_ms = 0;
-    if (field === 'model') {
-      redirectTableData[index].model_stats = null;
-      redirectTableData[index].model_stats_unavailable = false;
-    }
 
     if (field === 'model') {
       markChannelFormDirty();
@@ -2428,9 +2618,7 @@ async function testRedirectModel(index, button) {
       name: document.getElementById('channelName').value,
       models: redirectTableData
     }, modelName, String(redirect.redirect_model || modelName).trim());
-    if (!opened) return false;
-    await runChannelTest();
-    return true;
+    return !!opened;
   } catch (error) {
     console.error('Model test failed', error);
     if (window.showError) {
@@ -2556,15 +2744,7 @@ function renderActiveRedirectModelStatus(statusCell, redirect) {
       badge.classList.add('redirect-model-cooldown-badge');
       statusCell.appendChild(badge);
     }
-    return;
   }
-  renderRedirectModelStats(statusCell, redirect);
-}
-
-function formatModelStatsSeconds(value) {
-  const seconds = Number(value);
-  if (!Number.isFinite(seconds) || seconds <= 0) return '—';
-  return `${seconds.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')}s`;
 }
 
 function appendRedirectModelStatus(statusCell, modifier, lines) {
@@ -2576,85 +2756,6 @@ function appendRedirectModelStatus(statusCell, modifier, lines) {
     status.appendChild(line);
   }
   statusCell.appendChild(status);
-}
-
-function appendRedirectModelPerformance(statusCell, stats) {
-  const status = document.createElement('div');
-  status.className = 'redirect-model-status redirect-model-status--performance';
-
-  // 第一行：首字/耗时 2s/14.4s
-  status.appendChild(buildRedirectModelPerformanceLine(
-    window.t('channels.modelTiming'),
-    [
-      {
-        text: formatModelStatsSeconds(stats.avg_first_byte_time_seconds),
-        color: window.getFirstByteTimingColor(stats.avg_first_byte_time_seconds)
-      },
-      {
-        text: formatModelStatsSeconds(stats.avg_duration_seconds),
-        color: window.getDurationTimingColor(stats.avg_duration_seconds)
-      }
-    ]
-  ));
-
-  // 第二行：调用/失败 成功次数/失败次数
-  status.appendChild(buildRedirectModelPerformanceLine(
-    window.t('channels.modelCallFail'),
-    [
-      { text: formatModelStatsCount(stats.success), color: 'var(--success-600)' },
-      { text: formatModelStatsCount(stats.error), color: 'var(--error-600)' }
-    ]
-  ));
-
-  statusCell.appendChild(status);
-}
-
-function buildRedirectModelPerformanceLine(labelText, values) {
-  const line = document.createElement('span');
-  line.className = 'redirect-model-performance-line';
-
-  const label = document.createElement('span');
-  label.className = 'redirect-model-performance-label';
-  label.textContent = labelText;
-  line.appendChild(label);
-
-  values.forEach((item, index) => {
-    if (index > 0) {
-      const sep = document.createElement('span');
-      sep.className = 'redirect-model-performance-sep';
-      sep.textContent = '/';
-      line.appendChild(sep);
-    }
-    const value = document.createElement('span');
-    value.className = 'redirect-model-performance-value';
-    value.textContent = item.text;
-    if (item.color) {
-      value.style.color = item.color;
-    }
-    line.appendChild(value);
-  });
-
-  return line;
-}
-
-function formatModelStatsCount(value) {
-  const count = Number(value);
-  if (!Number.isFinite(count) || count < 0) return '—';
-  return String(Math.trunc(count));
-}
-
-function renderRedirectModelStats(statusCell, redirect) {
-  const stats = redirect.model_stats;
-  if (Number(stats?.success) > 0) {
-    appendRedirectModelPerformance(statusCell, stats);
-    return;
-  }
-
-  appendRedirectModelStatus(statusCell, 'empty', [
-    window.t(redirect.model_stats_unavailable
-      ? 'channels.modelStatsUnavailable'
-      : 'channels.modelNoSamples')
-  ]);
 }
 
 /**
@@ -2865,9 +2966,9 @@ function updateModelBatchDeleteButton() {
       if (textSpan) textSpan.textContent = window.t('channels.deleteSelectedCount', { count });
       deleteBtn.style.cursor = 'pointer';
       deleteBtn.style.opacity = '1';
-      deleteBtn.style.background = 'linear-gradient(135deg, #fef2f2 0%, #fecaca 100%)';
-      deleteBtn.style.borderColor = '#fca5a5';
-      deleteBtn.style.color = '#dc2626';
+      deleteBtn.style.background = 'linear-gradient(135deg, var(--error-50) 0%, var(--error-200) 100%)';
+      deleteBtn.style.borderColor = 'var(--error-300)';
+      deleteBtn.style.color = 'var(--error-600)';
     } else {
       deleteBtn.disabled = true;
       if (textSpan) textSpan.textContent = window.t('channels.deleteSelected');
@@ -2891,9 +2992,9 @@ function updateModelBatchDeleteButton() {
     }
     button.style.cursor = count > 0 ? 'pointer' : '';
     button.style.opacity = count > 0 ? '1' : '0.5';
-    button.style.background = count > 0 ? 'linear-gradient(135deg, #eff6ff 0%, #bfdbfe 100%)' : '';
-    button.style.borderColor = count > 0 ? '#93c5fd' : '';
-    button.style.color = count > 0 ? '#2563eb' : '';
+    button.style.background = count > 0 ? 'linear-gradient(135deg, var(--primary-50) 0%, var(--primary-200) 100%)' : '';
+    button.style.borderColor = count > 0 ? 'var(--primary-300)' : '';
+    button.style.color = count > 0 ? 'var(--primary-600)' : '';
   });
 }
 
@@ -2955,11 +3056,11 @@ function updateSelectAllModelsCheckbox() {
 /**
  * 批量删除选中的模型
  */
-function batchDeleteSelectedModels() {
+async function batchDeleteSelectedModels() {
   const count = selectedModelIndices.size;
   if (count === 0) return;
 
-  if (!confirm(window.t('channels.confirmBatchDeleteModels', { count }))) {
+  if (!await window.showConfirm({ message: window.t('channels.confirmBatchDeleteModels', { count }), danger: true })) {
     return;
   }
 
@@ -3508,10 +3609,9 @@ function initQuickAddChannelModalEvents() {
 }
 
 // 单 Key 渠道不把模型范围写到 Key 上——唯一 Key 没有分流需求,限制只会误伤;多 Key 渠道一律弹确认框,确认后才应用。
-function fetchedKeyModelApplyAccepted(changedCount, isSingleKeyChannel) {
+async function fetchedKeyModelApplyAccepted(changedCount, isSingleKeyChannel) {
   if (isSingleKeyChannel) return false;
-  return typeof window.confirm === 'function' &&
-    window.confirm(window.t('channels.applyFetchedKeyModelsConfirm', { count: changedCount }));
+  return window.showConfirm(window.t('channels.applyFetchedKeyModelsConfirm', { count: changedCount }));
 }
 
 async function fetchModelsFromAPI() {
@@ -3521,8 +3621,7 @@ async function fetchModelsFromAPI() {
   let skippedKeyCount = 0;
   if (['codebuddy_oauth', 'antigravity_oauth', 'codex_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth'].includes(editingChannelAuthType)) {
     if (!editingChannelId) {
-      if (window.showError) window.showError(window.t('channels.saveBeforeModelTest'));
-      else alert(window.t('channels.saveBeforeModelTest'));
+      window.showError(window.t('channels.saveBeforeModelTest'));
       return;
     }
     endpoint = `/admin/channels/${editingChannelId}/models/fetch`;
@@ -3538,20 +3637,12 @@ async function fetchModelsFromAPI() {
     );
 
     if (!channelUrl) {
-      if (window.showError) {
-        window.showError(window.t('channels.fillApiUrlFirst'));
-      } else {
-        alert(window.t('channels.fillApiUrlFirst'));
-      }
+      window.showError(window.t('channels.fillApiUrlFirst'));
       return;
     }
 
     if (availableKeys.length === 0) {
-      if (window.showError) {
-        window.showError(window.t('channels.addAtLeastOneEnabledKey'));
-      } else {
-        alert(window.t('channels.addAtLeastOneEnabledKey'));
-      }
+      window.showError(window.t('channels.addAtLeastOneEnabledKey'));
       return;
     }
 
@@ -3608,7 +3699,7 @@ async function fetchModelsFromAPI() {
         modelFetchEntries
       );
       const shouldApply = scopeProposal.changedCount > 0 &&
-        fetchedKeyModelApplyAccepted(scopeProposal.changedCount, countConfiguredInlineKeys(getInlineKeyRows()) === 1);
+        await fetchedKeyModelApplyAccepted(scopeProposal.changedCount, countConfiguredInlineKeys(getInlineKeyRows()) === 1);
       if (shouldApply && scopeProposal.changedCount > 0) {
         inlineKeyTableData = scopeProposal.rows;
         renderInlineKeyTable();
@@ -3621,11 +3712,7 @@ async function fetchModelsFromAPI() {
     }
 
     const source = data.source === 'api' ? window.t('channels.fetchModelsSource.api') : window.t('channels.fetchModelsSource.predefined');
-    if (window.showSuccess) {
-      window.showSuccess(window.t('channels.fetchModelsSuccess', { source, total: redirectTableData.length, added: replacement.added }));
-    } else {
-      alert(window.t('channels.fetchModelsSuccess', { source, total: redirectTableData.length, added: replacement.added }));
-    }
+    window.showSuccess(window.t('channels.fetchModelsSuccess', { source, total: redirectTableData.length, added: replacement.added }));
 
     const warnings = [];
     if (failedKeyCount > 0) {
@@ -3638,18 +3725,13 @@ async function fetchModelsFromAPI() {
       warnings.push(window.t('channels.fetchModelsUnmatchedKeys', { count: unmatchedKeyCount }));
     }
     if (warnings.length > 0) {
-      if (window.showWarning) window.showWarning(warnings.join(' '));
-      else alert(warnings.join(' '));
+      window.showWarning(warnings.join(' '));
     }
 
   } catch (error) {
     console.error('Fetch models failed', error);
 
-    if (window.showError) {
-      window.showError(window.t('channels.fetchModelsFailed', { error: error.message }));
-    } else {
-      alert(window.t('channels.fetchModelsFailed', { error: error.message }));
-    }
+    window.showError(window.t('channels.fetchModelsFailed', { error: error.message }));
   }
 }
 
@@ -3674,8 +3756,7 @@ function showKeyRateError(code) {
   ]);
   const errorCode = knownCodes.has(code) ? code : 'default';
   const message = window.t(`channels.fetchRateError.${errorCode}`);
-  if (window.showError) window.showError(message);
-  else alert(message);
+  window.showError(message);
 }
 
 async function fetchKeyRate(keyIndex, actionBtn) {
@@ -3691,13 +3772,11 @@ async function fetchKeyRate(keyIndex, actionBtn) {
   const apiKey = getInlineKeyValue(keyIndex);
 
   if (!baseURL) {
-    if (window.showError) window.showError(window.t('channels.fillApiUrlFirst'));
-    else alert(window.t('channels.fillApiUrlFirst'));
+    window.showError(window.t('channels.fillApiUrlFirst'));
     return;
   }
   if (!apiKey) {
-    if (window.showError) window.showError(window.t('channels.addAtLeastOneEnabledKey'));
-    else alert(window.t('channels.addAtLeastOneEnabledKey'));
+    window.showError(window.t('channels.addAtLeastOneEnabledKey'));
     return;
   }
   if (rateConfig.profile === 'new_api' && !rateConfig.access_token) {
@@ -3741,8 +3820,7 @@ async function fetchKeyRate(keyIndex, actionBtn) {
     updateInlineKeyCostMultiplier(keyIndex, rateText);
 
     const message = window.t('channels.fetchRateSuccess', { rate: rateText });
-    if (window.showSuccess) window.showSuccess(message);
-    else alert(message);
+    window.showSuccess(message);
   } catch (error) {
     console.error('Fetch key rate failed', error);
     showKeyRateError('default');
@@ -3758,17 +3836,19 @@ const COMMON_MODELS = {
     'claude-opus-4-8',
     'claude-opus-5',
     'claude-opus-5-5',
-    'claude-fable-5',
+    'claude-fable-5-1',
+    'claude-sonnet-5-5',
     'claude-sonnet-5',
     'claude-sonnet-4-6',
   ],
   codex: [
+    'gpt-6.1-sol',
+    'gpt-6-astra',
+    'gpt-6-luna',
     'gpt-5.5',
     'gpt-5.6-sol',
     'gpt-5.6-luna',
-    'gpt-5.6-terra',
-    'gpt-5.3-codex-spark',
-    'codex-auto-review'
+    'gpt-5.6-terra'
   ],
   gemini: [
     'gemini-3.6-flash',
@@ -3888,11 +3968,7 @@ function addCommonModelsToRows(rows, protocols) {
 function addCommonModels(protocols) {
   const result = addCommonModelsToRows(redirectTableData, protocols);
   if (!result.hasSupportedTypes) {
-    if (window.showWarning) {
-      window.showWarning(window.t('channels.selectCommonModelType'));
-    } else {
-      alert(window.t('channels.selectCommonModelType'));
-    }
+    window.showWarning(window.t('channels.selectCommonModelType'));
     return 0;
   }
 
@@ -3908,11 +3984,7 @@ function addCommonModels(protocols) {
 function confirmCommonModelsSelection() {
   const selectedTypes = getSelectedCommonModelTypes();
   if (selectedTypes.length === 0) {
-    if (window.showWarning) {
-      window.showWarning(window.t('channels.selectCommonModelType'));
-    } else {
-      alert(window.t('channels.selectCommonModelType'));
-    }
+    window.showWarning(window.t('channels.selectCommonModelType'));
     getCommonModelsModalCheckboxes()[0]?.focus();
     return false;
   }

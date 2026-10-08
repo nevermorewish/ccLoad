@@ -28,7 +28,7 @@ import (
 const (
 	// anthropicCLIVersion 是 Claude Code wire 的内置最低版本/离线回退值。
 	// 运行中的服务会由 anthropic_cli_version_sync.go 向前同步官方稳定版。
-	anthropicCLIVersion  = "2.1.280"
+	anthropicCLIVersion  = "2.1.292"
 	anthropicBillingSalt = "59cf53e54c78"
 
 	// anthropicClaudeCodeIdentityPrompt 是 Claude Code CLI system 三段式的第二段。
@@ -215,20 +215,9 @@ func anthropicUsesFirstPartyHost(cfg *model.Config, target *url.URL) bool {
 	return isOfficialAnthropicURL(target)
 }
 
-// finalizeAnthropicClaudeCodeMessagesBody 是 Anthropic Messages 上游 body 的唯一
+// finalizeAnthropicClaudeCodeMessagesBodyForCaller 是 Anthropic Messages 上游 body 的唯一
 // 最终化入口。原生 Claude Code 请求保留调用方 body/CCH；模拟请求生成无 CCH
 // 的 billing block。
-func finalizeAnthropicClaudeCodeMessagesBody(
-	body []byte,
-	cfg *model.Config,
-	apiKey string,
-	headers http.Header,
-	target *url.URL,
-) ([]byte, error) {
-	return finalizeAnthropicClaudeCodeMessagesBodyForCaller(
-		body, cfg, apiKey, headers, target, classifyAnthropicCallerWire(body, headers))
-}
-
 func finalizeAnthropicClaudeCodeMessagesBodyForCaller(
 	body []byte,
 	cfg *model.Config,
@@ -236,17 +225,17 @@ func finalizeAnthropicClaudeCodeMessagesBodyForCaller(
 	headers http.Header,
 	target *url.URL,
 	callerWire anthropicCallerWire,
-) ([]byte, error) {
+) ([]byte, string, error) {
 	if !isAnthropicJSONObject(body) {
-		return nil, errors.New("finalize Anthropic Claude Code request: invalid JSON body")
+		return nil, "", errors.New("finalize Anthropic Claude Code request: invalid JSON body")
 	}
 	helperShape := callerWire.haikuHelper
 	if helperShape != anthropicHaikuHelperNone {
 		return finishAnthropicPassthrough(body,
-			helperShape == anthropicHaikuHelperStructured && anthropicCCHSigningEnabled(cfg, target))
+			helperShape == anthropicHaikuHelperStructured && anthropicCCHSigningEnabled(cfg, target), cfg, target, headers)
 	}
 	if callerWire.nativeClaudeCode {
-		return finishAnthropicPassthrough(body, false)
+		return finishAnthropicPassthrough(body, false, cfg, target, headers)
 	}
 	body = normalizeAnthropicOAuthModel(body)
 	// 缓存窗口归调用方：调用方自己声明了 1h，网关注入的 breakpoint 就跟到 1h，否则
@@ -310,7 +299,7 @@ func finalizeAnthropicClaudeCodeMessagesBodyForCaller(
 	}
 	body, err := injectAnthropicClaudeCodeMetadata(body, cfg, apiKey, headers)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	autoContextManagement := false
 	if !gjson.GetBytes(body, "context_management").Exists() && anthropicThinkingAcceptsContextManagement(body) {
@@ -353,21 +342,32 @@ func finalizeAnthropicClaudeCodeMessagesBodyForCaller(
 			}
 		}
 	}
-	return finishAnthropicPassthrough(body, false)
+	return finishAnthropicPassthrough(body, false, cfg, target, headers)
 }
 
 // finishAnthropicPassthrough is the single Anthropic Messages outbound exit.
 // Fingerprint rewrite (system cloak, sampling, cache stamps) happens before
 // this, or is skipped for native Claude Code / Haiku helper. This layer only
-// applies API-contract invariants and optional CCH, so new Anthropic 400 guards
-// extend applyAnthropicMessagesAPIInvariants instead of growing every early-
-// return branch.
-func finishAnthropicPassthrough(body []byte, signCCH bool) ([]byte, error) {
+// applies API-contract invariants, official-Anthropic thinking recovery, and
+// optional CCH. The returned strategy names a history-thinking omission so the
+// request log can show it. Thinking recovery is judged by the URL this
+// attempt hits, not by any URL on the channel.
+func finishAnthropicPassthrough(body []byte, signCCH bool, cfg *model.Config, target *url.URL, headers http.Header) ([]byte, string, error) {
 	body = applyAnthropicMessagesAPIInvariants(body)
-	if !signCCH {
-		return body, nil
+	strategy := ""
+	if anthropicUsesFirstPartyHost(cfg, target) {
+		if cloaked, ok := cloakOfficialAnthropicThinkingHistory(body); ok {
+			body, strategy = cloaked, omitAnthropicForeignThinkingStrategy
+		}
+		if omitted, ok := omitRememberedAnthropicThinkingHistory(headers, body); ok {
+			body, strategy = omitted, omitAnthropicRememberedThinkingStrategy
+		}
 	}
-	return finalizeAnthropicCCH(body)
+	if !signCCH {
+		return body, strategy, nil
+	}
+	body, err := finalizeAnthropicCCH(body)
+	return body, strategy, err
 }
 
 // applyAnthropicMessagesAPIInvariants enforces Anthropic Messages request
@@ -1667,10 +1667,10 @@ func anthropicClientVersion(headers http.Header) string {
 // OAuth fingerprints are persisted with the private credential and cached per server.
 type anthropicOAuthFingerprint = anthropicauth.Fingerprint
 
-// Claude Code 2.1.280（内置 CLI 版本下限）实测随附的 @anthropic-ai/sdk 与运行时版本（对齐 CPA）。
+// Claude Code 2.1.292 抓包（docs/claude/name.txt）随附的 SDK 与运行时版本。
 // CLI 版本只升不降，SDK 版本随之单调，低于这一组的 Stainless 版本不可能与当前 UA 配套。
 const (
-	anthropicStainlessPackageVersion = "0.112.1"
+	anthropicStainlessPackageVersion = "0.128.0"
 	anthropicStainlessRuntimeVersion = "v26.3.0"
 )
 

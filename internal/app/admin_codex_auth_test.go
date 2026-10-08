@@ -891,8 +891,7 @@ func TestCodeBuddyBatchImportWorkbuddyJSON(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	c, w := newTestContext(t, req)
-	srv.HandleImportOAuthCredentials(c)
+	w := importOAuthCredentialsViaJob(t, srv, req)
 	if w.Code != 200 {
 		t.Fatalf("import: %d %s", w.Code, w.Body.String())
 	}
@@ -1083,8 +1082,7 @@ func TestHandleImportOAuthCredentialsDetectsXAIAndExpandsCredentialsMap(t *testi
 
 	request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, response := newTestContext(t, request)
-	server.HandleImportOAuthCredentials(requestContext)
+	response := importOAuthCredentialsViaJob(t, server, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -1319,29 +1317,81 @@ func xaiTestJWT(email, subject string) string {
 	return "x." + base64.RawURLEncoding.EncodeToString(payload) + ".y"
 }
 
+// importOAuthCredentialsViaJob 走前端使用的 jobs 接口：上传后轮询到结束，
+// 再把最终结果折叠成导入汇总响应，供断言复用。上传失败时原样返回该响应。
+func importOAuthCredentialsViaJob(t *testing.T, server *Server, request *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	startContext, startResponse := newTestContext(t, request)
+	server.HandleStartOAuthCredentialImportJob(startContext)
+	if startResponse.Code != http.StatusAccepted {
+		return startResponse
+	}
+	started := mustParseAPIResponse[oauthCredentialImportJobStart](t, startResponse.Body.Bytes()).Data
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		statusContext, statusResponse := newTestContext(t, httptest.NewRequest(http.MethodGet, "/admin/oauth/credentials/import/jobs/"+started.JobID+"?after=0", nil))
+		statusContext.Params = gin.Params{{Key: "id", Value: started.JobID}}
+		server.HandleOAuthCredentialImportJob(statusContext)
+		if statusResponse.Code != http.StatusOK {
+			t.Fatalf("import job status=%d body=%s", statusResponse.Code, statusResponse.Body.String())
+		}
+		view := mustParseAPIResponse[oauthCredentialImportJobView](t, statusResponse.Body.Bytes()).Data
+		if view.Status != oauthCredentialImportJobRunning {
+			summaryContext, summaryResponse := newTestContext(t, httptest.NewRequest(http.MethodGet, "/", nil))
+			RespondJSON(summaryContext, http.StatusOK, oauthCredentialImportSummary{
+				Created: view.Created, Skipped: view.Skipped, Failed: view.Failed, Results: view.Results,
+			})
+			return summaryResponse
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("import job did not complete: %#v", view)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func startXAICredentialImportTestJob(
 	t *testing.T,
 	server *Server,
 	method string,
 	values []string,
 	priorityIncrement int,
-	requestCtx context.Context,
 ) (oauthCredentialImportJobStart, string) {
 	t.Helper()
-	request := newJSONRequest(t, http.MethodPost, "/admin/xai/credentials/import/jobs", map[string]any{
+	request := newJSONRequest(t, http.MethodPost, "/admin/xai/credentials/import/stream", map[string]any{
 		"method": method, "values": strings.Join(values, "\n"), "priority_increment": priorityIncrement,
 	})
-	if requestCtx != nil {
-		request = request.WithContext(requestCtx)
-	}
 	requestContext, response := newTestContext(t, request)
-	server.HandleStartXAICredentialImportJob(requestContext)
-	if response.Code != http.StatusAccepted {
+	server.HandleImportXAICredentialsStream(requestContext)
+	if response.Code != http.StatusOK {
 		t.Fatalf("start xAI import status=%d body=%s", response.Code, response.Body.String())
 	}
-	started := mustParseAPIResponse[oauthCredentialImportJobStart](t, response.Body.Bytes()).Data
+	var started oauthCredentialImportJobStart
+	eventTypes := make([]string, 0, 2*len(values)+2)
+	for line := range strings.SplitSeq(response.Body.String(), "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var event oauthCredentialImportEvent
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Event == "start" {
+			started = oauthCredentialImportJobStart{JobID: event.JobID, Total: event.Total}
+		}
+		eventTypes = append(eventTypes, event.Event)
+	}
 	if started.JobID == "" || started.Total != len(values) {
 		t.Fatalf("start xAI import=%#v", started)
+	}
+	// 前端依赖的 SSE 契约：start，逐条 processing/progress，最后 complete。
+	wantTypes := []string{"start"}
+	for range values {
+		wantTypes = append(wantTypes, "processing", "progress")
+	}
+	wantTypes = append(wantTypes, "complete")
+	if !slices.Equal(eventTypes, wantTypes) {
+		t.Fatalf("xAI import events=%v, want %v", eventTypes, wantTypes)
 	}
 	return started, response.Body.String()
 }
@@ -1406,7 +1456,7 @@ func TestXAIRefreshTokenImportAcceptsMoreThanHundredWithBoundedConcurrencyAndRed
 	for i := range values {
 		values[i] = fmt.Sprintf("refresh-secret-%d", i+1)
 	}
-	started, startBody := startXAICredentialImportTestJob(t, server, "refresh_token", values, 10, nil)
+	started, startBody := startXAICredentialImportTestJob(t, server, "refresh_token", values, 10)
 	view, statusBody := waitXAICredentialImportTestJob(t, server, started.JobID)
 	if view.Created != len(values) || view.Processed != len(values) || view.Failed != 0 {
 		t.Fatalf("completed refresh import=%#v", view)
@@ -1674,7 +1724,7 @@ func TestXAISSOImportAcceptsMoreThanTenItems(t *testing.T) {
 	for i := range values {
 		values[i] = fmt.Sprintf("sso-secret-%d", i)
 	}
-	started, _ := startXAICredentialImportTestJob(t, server, "sso", values, 0, nil)
+	started, _ := startXAICredentialImportTestJob(t, server, "sso", values, 0)
 	view, _ := waitXAICredentialImportTestJob(t, server, started.JobID)
 	if view.Failed != len(values) || upstreamCalls.Load() != int32(len(values)) {
 		t.Fatalf("completed import=%#v upstream=%d", view, upstreamCalls.Load())
@@ -1699,7 +1749,7 @@ func TestXAISSOImportReportsErrorsWithBoundedConcurrencyAndRedactsSecrets(t *tes
 	})}
 	server := &Server{store: store, client: client}
 	values := []string{"sso-secret-1", "sso-secret-2", "sso-secret-3", "sso-secret-4"}
-	started, startBody := startXAICredentialImportTestJob(t, server, "sso", values, 0, nil)
+	started, startBody := startXAICredentialImportTestJob(t, server, "sso", values, 0)
 	view, statusBody := waitXAICredentialImportTestJob(t, server, started.JobID)
 	if view.Failed != len(values) || maximum.Load() < 2 || maximum.Load() > 3 {
 		t.Fatalf("completed import=%#v maximum concurrency=%d", view, maximum.Load())
@@ -2308,8 +2358,7 @@ func TestHandleImportAntigravityCredentialCreatesSkipsAndDoesNotLeakTokens(t *te
 
 	request := httptest.NewRequest(http.MethodPost, "/admin/antigravity/credentials/import", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, response := newTestContext(t, request)
-	server.HandleImportAntigravityCredential(requestContext)
+	response := importOAuthCredentialsViaJob(t, server, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -2376,8 +2425,7 @@ func TestHandleImportAnthropicClaudeCredentialUsesEmailIdentity(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, response := newTestContext(t, request)
-	server.HandleImportOAuthCredentials(requestContext)
+	response := importOAuthCredentialsViaJob(t, server, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -2539,8 +2587,7 @@ func TestHandleImportCodexCredentialUsesAcceptedAccessTokenAndFailsUnusableCrede
 
 	request := httptest.NewRequest(http.MethodPost, "/admin/codex/credentials/import", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, response := newTestContext(t, request)
-	server.HandleImportCodexCredential(requestContext)
+	response := importOAuthCredentialsViaJob(t, server, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -2671,8 +2718,7 @@ func TestHandleImportOAuthCredentialsImportsTextAndAggregateFormats(t *testing.T
 
 	request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, response := newTestContext(t, request)
-	server.HandleImportOAuthCredentials(requestContext)
+	response := importOAuthCredentialsViaJob(t, server, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -2813,8 +2859,7 @@ func TestHandleImportOAuthCredentialsRejectsAggregateExpansionOverEntryLimit(t *
 	}
 	request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, response := newTestContext(t, request)
-	server.HandleImportOAuthCredentials(requestContext)
+	response := importOAuthCredentialsViaJob(t, server, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "exceeds 10000 entries") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -2916,8 +2961,7 @@ func TestHandleImportOAuthCredentialsSortsPriorityByCredentialFileName(t *testin
 
 	request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, response := newTestContext(t, request)
-	server.HandleImportOAuthCredentials(requestContext)
+	response := importOAuthCredentialsViaJob(t, server, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -3036,8 +3080,7 @@ func TestHandleImportOAuthCredentialsValidatesConcurrentlyAndContinuesAfterNetwo
 	defer cancelRequest()
 	request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import", &body).WithContext(requestCtx)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, response := newTestContext(t, request)
-	server.HandleImportOAuthCredentials(requestContext)
+	response := importOAuthCredentialsViaJob(t, server, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -3137,8 +3180,7 @@ func TestHandleImportOAuthCredentialsImportsArchivesByCredentialPriorityThenFile
 
 	request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, response := newTestContext(t, request)
-	server.HandleImportOAuthCredentials(requestContext)
+	response := importOAuthCredentialsViaJob(t, server, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -3181,100 +3223,6 @@ func TestHandleImportOAuthCredentialsImportsArchivesByCredentialPriorityThenFile
 		if want, ok := wantPriorityByName[channel.Name]; !ok || channel.Priority != want {
 			t.Fatalf("channel %q priority=%d, want %d", channel.Name, channel.Priority, want)
 		}
-	}
-}
-
-func TestHandleImportOAuthCredentialsStreamReportsEachCredential(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	store := newCodexAuthTestStore(t)
-	server := &Server{store: store, client: newAcceptedCodexImportClient()}
-	expiresAt := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	for _, file := range []archiveCredentialTestEntry{
-		{
-			name: "b.json",
-			body: fmt.Sprintf(
-				`{"type":"codex","access_token":"at-b","refresh_token":"rt-b","account_id":"account-b","email":"b@example.com","expired":%q}`,
-				expiresAt,
-			),
-		},
-		{
-			name: "a.json",
-			body: fmt.Sprintf(
-				`{"type":"codex","access_token":"at-a","refresh_token":"rt-a","account_id":"account-a","email":"a@example.com","expired":%q}`,
-				expiresAt,
-			),
-		},
-	} {
-		part, err := writer.CreateFormFile("files", file.name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := io.WriteString(part, file.body); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import/stream", &body)
-	request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, response := newTestContext(t, request)
-	server.HandleImportOAuthCredentialsStream(requestContext)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/event-stream") {
-		t.Fatalf("Content-Type=%q", contentType)
-	}
-	if !response.Flushed {
-		t.Fatal("stream events were not flushed")
-	}
-	if strings.Contains(response.Body.String(), "at-a") || strings.Contains(response.Body.String(), "rt-b") {
-		t.Fatal("stream leaked credential material")
-	}
-
-	type streamEvent struct {
-		Event     string                       `json:"event"`
-		JobID     string                       `json:"job_id"`
-		Processed int                          `json:"processed"`
-		Total     int                          `json:"total"`
-		Created   int                          `json:"created"`
-		Skipped   int                          `json:"skipped"`
-		Failed    int                          `json:"failed"`
-		FileName  string                       `json:"file_name"`
-		Result    *oauthCredentialImportResult `json:"result"`
-	}
-	events := make([]streamEvent, 0)
-	for block := range strings.SplitSeq(strings.TrimSpace(response.Body.String()), "\n\n") {
-		for line := range strings.SplitSeq(block, "\n") {
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			var event streamEvent
-			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
-				t.Fatalf("decode SSE event: %v", err)
-			}
-			events = append(events, event)
-		}
-	}
-	wantTypes := []string{"start", "processing", "progress", "processing", "progress", "complete"}
-	gotTypes := make([]string, 0, len(events))
-	for _, event := range events {
-		gotTypes = append(gotTypes, event.Event)
-	}
-	if !slices.Equal(gotTypes, wantTypes) {
-		t.Fatalf("event types=%v, want %v; body=%s", gotTypes, wantTypes, response.Body.String())
-	}
-	if events[0].JobID == "" || events[0].Total != 2 || events[1].FileName != "a.json" || events[2].Processed != 1 || events[2].Result == nil || events[2].Result.FileName != "a.json" {
-		t.Fatalf("first credential events=%#v", events[:3])
-	}
-	complete := events[len(events)-1]
-	if complete.Processed != 2 || complete.Total != 2 || complete.Created != 2 || complete.Skipped != 0 || complete.Failed != 0 {
-		t.Fatalf("complete event=%#v", complete)
 	}
 }
 
@@ -3376,7 +3324,7 @@ func TestOAuthCredentialImportJobSurvivesUploadRequestCancellation(t *testing.T)
 	}
 }
 
-func TestHandleImportOAuthCredentialsStreamAcceptsMoreThanDefaultMultipartLimit(t *testing.T) {
+func TestHandleImportOAuthCredentialsAcceptsMoreThanDefaultMultipartLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := newCodexAuthTestStore(t)
 	server := &Server{store: store, client: newAcceptedCodexImportClient()}
@@ -3397,31 +3345,15 @@ func TestHandleImportOAuthCredentialsStreamAcceptsMoreThanDefaultMultipartLimit(
 		t.Fatal(err)
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import/stream", &body)
+	request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import/jobs", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, response := newTestContext(t, request)
-	server.HandleImportOAuthCredentialsStream(requestContext)
+	response := importOAuthCredentialsViaJob(t, server, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-
-	var complete oauthCredentialImportEvent
-	for block := range strings.SplitSeq(strings.TrimSpace(response.Body.String()), "\n\n") {
-		for line := range strings.SplitSeq(block, "\n") {
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			var event oauthCredentialImportEvent
-			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
-				t.Fatalf("decode SSE event: %v", err)
-			}
-			if event.Event == "complete" {
-				complete = event
-			}
-		}
-	}
-	if complete.Event != "complete" || complete.Processed != fileCount || complete.Total != fileCount || complete.Skipped != fileCount {
-		t.Fatalf("complete event=%#v", complete)
+	summary := mustParseAPIResponse[oauthCredentialImportSummary](t, response.Body.Bytes()).Data
+	if summary.Skipped != fileCount || len(summary.Results) != fileCount {
+		t.Fatalf("summary skipped=%d results=%d, want %d", summary.Skipped, len(summary.Results), fileCount)
 	}
 }
 
@@ -3476,8 +3408,7 @@ func TestHandleImportOAuthCredentialsRejectsUnsafeOrOversizedArchives(t *testing
 
 			request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import", &body)
 			request.Header.Set("Content-Type", writer.FormDataContentType())
-			requestContext, response := newTestContext(t, request)
-			server.HandleImportOAuthCredentials(requestContext)
+			response := importOAuthCredentialsViaJob(t, server, request)
 			if response.Code != http.StatusOK {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
@@ -3586,8 +3517,7 @@ func TestHandleImportOAuthCredentialsRejectsInvalidOptions(t *testing.T) {
 
 			request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import", &body)
 			request.Header.Set("Content-Type", writer.FormDataContentType())
-			requestContext, response := newTestContext(t, request)
-			server.HandleImportOAuthCredentials(requestContext)
+			response := importOAuthCredentialsViaJob(t, server, request)
 			if response.Code != http.StatusBadRequest {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
@@ -4325,8 +4255,6 @@ func TestHandleImportCodexCredentialCreatesSkipsAndReportsFilesWithoutLeakingTok
 	gin.SetMode(gin.TestMode)
 	store := newCodexAuthTestStore(t)
 	server := &Server{store: store, client: newAcceptedCodexImportClient()}
-	engine := gin.New()
-	engine.POST("/codex/credentials/import", server.HandleImportCodexCredential)
 	expiresAt := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	existing, _, err := createOrUpdateCodexChannel(context.Background(), store, &codexauth.Credential{
 		Type: "codex", AccessToken: "at-existing", RefreshToken: "rt-existing", Expired: expiresAt,
@@ -4371,10 +4299,9 @@ func TestHandleImportCodexCredentialCreatesSkipsAndReportsFilesWithoutLeakingTok
 		t.Fatalf("close multipart writer: %v", err)
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/codex/credentials/import", &body)
+	request := httptest.NewRequest(http.MethodPost, "/admin/oauth/credentials/import/jobs", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	response := httptest.NewRecorder()
-	engine.ServeHTTP(response, request)
+	response := importOAuthCredentialsViaJob(t, server, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("import status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -6263,7 +6190,7 @@ func TestLatestCodexOAuthUsageIgnoresPassiveOnlyWindows(t *testing.T) {
 			{LimitName: "codex", Kind: "secondary", UsedPercent: 2, RemainingPercent: 98, LimitWindowSeconds: 604800, ResetAt: 1788532795},
 		},
 	}
-	merged := latestOAuthUsage(active, activeSampledAt, passive, passiveSampledAt.Format(time.RFC3339Nano))
+	merged := latestOAuthUsage(active, activeSampledAt, passive, passiveSampledAt.Format(time.RFC3339Nano), nil)
 	if merged == nil || len(merged.Windows) != 3 {
 		t.Fatalf("merged Codex windows = %#v, want the 3 official windows only", merged)
 	}
@@ -6315,7 +6242,7 @@ func TestLatestCodexOAuthUsageRequiresSameQuotaPeriod(t *testing.T) {
 				LimitName: "codex", Kind: "primary", LimitWindowSeconds: tc.seconds,
 				ResetAt: tc.resetAt, UsedPercent: 80, RemainingPercent: 20,
 			}}}
-			got := latestOAuthUsage(active, base, passive, base.Add(time.Minute).Format(time.RFC3339Nano))
+			got := latestOAuthUsage(active, base, passive, base.Add(time.Minute).Format(time.RFC3339Nano), nil)
 			if len(got.Windows) != 1 || got.Windows[0].UsedPercent != tc.wantUsed ||
 				got.Windows[0].RemainingPercent != 100-tc.wantUsed || got.Windows[0].ResetAt != resetAt ||
 				got.Windows[0].LimitWindowSeconds != 604800 {
@@ -6497,6 +6424,109 @@ func TestHandleChannelsCodexQuotaUsesCurrentPassivePeriod(t *testing.T) {
 			persisted, err := store.GetConfig(context.Background(), channel.ID)
 			if err != nil || persisted.OAuthCredential != raw {
 				t.Fatalf("listing changed persisted quota history: %v", err)
+			}
+		})
+	}
+}
+
+// Business accounts can restart the weekly period early together with a new
+// 5h period. A newer passive sample accepted by the cost ledger must replace
+// the official snapshot's unfinished period, or the window loses its cost.
+func TestHandleChannelsCodexQuotaFollowsEarlyWeeklyReset(t *testing.T) {
+	t.Parallel()
+	const week = 7 * 24 * time.Hour
+	for _, tc := range []struct {
+		name          string
+		ledgerFollows bool
+	}{
+		{name: "ledger restarted the week", ledgerFollows: true},
+		{name: "ledger kept the official week"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, store, cleanup := setupAdminTestServer(t)
+			defer cleanup()
+			base := time.Now().UTC().Truncate(time.Second)
+			activeAt := base.Add(-3 * 24 * time.Hour)
+			oldWeeklyReset := base.Add(3 * 24 * time.Hour)
+			newStart := base.Add(-10 * time.Minute)
+			snapshot, err := json.Marshal(persistedOAuthUsageSnapshot{
+				RequestedAt: activeAt.Format(time.RFC3339Nano), SampledAt: activeAt.Format(time.RFC3339Nano),
+				Summary: oauthUsageSummary{
+					Provider: "codex", PlanType: "team",
+					Windows: []oauthUsageWindow{
+						{LimitName: "codex", Kind: "primary", LimitWindowSeconds: 18000,
+							ResetAt: activeAt.Add(time.Hour).Unix(), UsedPercent: 66, RemainingPercent: 34},
+						{LimitName: "codex", Kind: "secondary", LimitWindowSeconds: 604800,
+							ResetAt: oldWeeklyReset.Unix(), UsedPercent: 56, RemainingPercent: 44},
+					},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			passiveWindows := []codexauth.PassiveUsageWindow{
+				{Scope: "codex", LimitName: "codex", Kind: "primary", UsedPercent: 100, LimitWindowSeconds: 18000,
+					ResetAt: newStart.Add(5 * time.Hour).Unix(), SampledAt: newStart.Format(time.RFC3339Nano)},
+				{Scope: "codex", LimitName: "codex", Kind: "secondary", UsedPercent: 16, LimitWindowSeconds: 604800,
+					ResetAt: newStart.Add(week).Unix(), SampledAt: newStart.Format(time.RFC3339Nano)},
+			}
+			oldUsed := float64(56)
+			credential := &codexauth.Credential{
+				Type: codexauth.ChannelType, AccessToken: "at", RefreshToken: "rt", AccountID: "account-early-weekly",
+				PlanType: "team", Expired: base.Add(24 * time.Hour).Format(time.RFC3339), OAuthUsage: snapshot,
+				QuotaCostUsage: &oauthcost.Usage{Windows: []*oauthcost.Window{{
+					Key: "codex|secondary", Family: oauthcost.FamilyCodex, WindowSeconds: 604800,
+					StartedAt: oldWeeklyReset.Add(-week).Unix(), ResetAt: oldWeeklyReset.Unix(),
+					SampledUpstreamUsedPercent: &oldUsed, SampledUpstreamAtUnixNano: activeAt.UnixNano(),
+				}}},
+			}
+			if !tc.ledgerFollows {
+				// The passive sample reached the display without the ledger adopting it.
+				credential.PassiveUsage = &codexauth.PassiveUsage{
+					SampledAt: newStart.Format(time.RFC3339Nano), Windows: passiveWindows,
+				}
+			}
+			raw, err := credential.JSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			channel, err := store.CreateConfig(context.Background(), &model.Config{
+				Name: "Codex early weekly reset", AuthType: model.AuthTypeCodexOAuth, OAuthCredential: raw,
+				URLs: model.ChannelURLs{{URL: "https://example.test"}}, Enabled: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			seedQuotaLedger(t, store, channel.ID, base.Add(-2*24*time.Hour), "gpt-5.5", 50_000_000)
+			seedQuotaLedger(t, store, channel.ID, newStart.Add(time.Minute), "gpt-5.5", 11_100_000)
+			if tc.ledgerFollows {
+				manager := newCodexCredentialManager(codexauth.NewService(nil), store, nil, nil)
+				if updated, err := manager.updatePassiveUsage(context.Background(), channel, codexPassiveUsageUpdate{
+					SampledAt: newStart.Format(time.RFC3339Nano), Windows: passiveWindows,
+				}); err != nil || !updated {
+					t.Fatalf("persist passive quota = (%v, %v)", updated, err)
+				}
+			}
+
+			c, w := newTestContext(t, newRequest(http.MethodGet, "/admin/channels", nil))
+			server.HandleChannels(c)
+			list := mustParseAPIResponse[[]ChannelWithCooldown](t, w.Body.Bytes())
+			if w.Code != http.StatusOK || len(list.Data) != 1 || list.Data[0].OAuthUsage == nil {
+				t.Fatalf("channel list status=%d response=%#v", w.Code, list)
+			}
+			var weekly *oauthUsageWindow
+			for i := range list.Data[0].OAuthUsage.Windows {
+				if list.Data[0].OAuthUsage.Windows[i].Kind == "secondary" {
+					weekly = &list.Data[0].OAuthUsage.Windows[i]
+				}
+			}
+			wantUsed, wantReset, wantCost := float64(56), oldWeeklyReset.Unix(), int64(61_100_000)
+			if tc.ledgerFollows {
+				wantUsed, wantReset, wantCost = 16, newStart.Add(week).Unix(), 11_100_000
+			}
+			if weekly == nil || weekly.UsedPercent != wantUsed || weekly.ResetAt != wantReset ||
+				weekly.StandardCostMicroUSD == nil || *weekly.StandardCostMicroUSD != wantCost {
+				t.Fatalf("weekly window = %#v, want used=%v reset=%d cost=%d", weekly, wantUsed, wantReset, wantCost)
 			}
 		})
 	}
@@ -7423,7 +7453,7 @@ func TestHandleOAuthUsageReturnsAnthropicQuotaAndSubscription(t *testing.T) {
 			}
 			if wantCredits {
 				passive := &oauthUsageSummary{Provider: anthropicauth.ChannelType, Windows: []oauthUsageWindow{{Kind: "five_hour", UsedPercent: 80}}}
-				merged := latestOAuthUsage(list.Data[0].OAuthUsage, time.Now(), passive, time.Now().Add(time.Minute).Format(time.RFC3339Nano))
+				merged := latestOAuthUsage(list.Data[0].OAuthUsage, time.Now(), passive, time.Now().Add(time.Minute).Format(time.RFC3339Nano), nil)
 				if merged.AnthropicResetCredits == nil || merged.AnthropicResetCredits.AvailableCount != test.wantResetCount || merged.Windows[0].UsedPercent != 80 {
 					t.Fatalf("passive merged usage = %#v", merged)
 				}
@@ -8156,162 +8186,18 @@ func TestAnthropicOAuthManagerValidatesCombinedCodeStateAndCreatesChannel(t *tes
 	}
 }
 
-func TestHandleAnthropicCookieAuthCreatesChannelWithoutReturningOrPersistingCookie(t *testing.T) {
-	t.Parallel()
-	const sessionKey = "sk-ant-sid01-handler-secret"
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/api/organizations":
-			cookie, err := request.Cookie("sessionKey")
-			if err != nil || cookie.Value != sessionKey {
-				t.Errorf("organization cookie = %v, err = %v", cookie, err)
-			}
-			_, _ = io.WriteString(w, `[{"uuid":"cookie-org"}]`)
-		case "/v1/oauth/cookie-org/authorize":
-			var payload map[string]string
-			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-				t.Errorf("decode authorization request: %v", err)
-			}
-			redirect := anthropicauth.RedirectURI + "?code=cookie-code&state=" + url.QueryEscape(payload["state"])
-			_ = json.NewEncoder(w).Encode(map[string]string{"redirect_uri": redirect})
-		case "/token":
-			_, _ = io.WriteString(w, `{"access_token":"cookie-access-secret","refresh_token":"cookie-refresh-secret","token_type":"Bearer","expires_in":3600,"scope":"user:inference","organization":{"uuid":"cookie-org"},"account":{"uuid":"cookie-account","email_address":"cookie@example.com"}}`)
-		default:
-			http.NotFound(w, request)
-		}
-	}))
-	defer upstream.Close()
-	server, store, cleanup := setupAdminTestServer(t)
-	defer cleanup()
-	service := anthropicauth.NewService(upstream.Client())
-	service.ClaudeWebURL = upstream.URL
-	service.TokenURL = upstream.URL + "/token"
-	server.anthropicService = service
+func TestAnthropicCookieAuthEndpointRemoved(t *testing.T) {
+	server := newInMemoryServer(t)
+	engine := gin.New()
+	server.SetupRoutes(engine)
 
-	c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/anthropic/oauth/cookie", map[string]string{
-		"session_key": sessionKey,
-	}))
-	server.HandleAnthropicCookieAuth(c)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("cookie auth status=%d body=%s", w.Code, w.Body.String())
-	}
-	if strings.Contains(w.Body.String(), sessionKey) || strings.Contains(w.Body.String(), "cookie-access-secret") ||
-		strings.Contains(w.Body.String(), "cookie-refresh-secret") {
-		t.Fatalf("cookie auth response leaked credentials: %s", w.Body.String())
-	}
-	var response APIResponse[struct {
-		Status    string `json:"status"`
-		ChannelID int64  `json:"channel_id"`
-		Created   bool   `json:"created"`
-	}]
-	mustUnmarshalJSON(t, w.Body.Bytes(), &response)
-	if !response.Success || response.Data.Status != "complete" || !response.Data.Created || response.Data.ChannelID == 0 {
-		t.Fatalf("cookie auth response = %+v", response)
-	}
-	channel, err := store.GetConfig(context.Background(), response.Data.ChannelID)
-	if err != nil {
-		t.Fatalf("get cookie channel: %v", err)
-	}
-	if !channel.UsesAnthropicOAuth() || strings.Contains(channel.OAuthCredential, sessionKey) {
-		t.Fatalf("cookie channel persisted sessionKey: %+v", channel)
-	}
-	credential, err := anthropicauth.ParseCredential([]byte(channel.OAuthCredential))
-	if err != nil || credential.AccessToken != "cookie-access-secret" || credential.RefreshToken != "cookie-refresh-secret" {
-		t.Fatalf("stored cookie credential = %+v, err = %v", credential, err)
-	}
-}
-
-func TestHandleAnthropicCookieAuthReturnsSanitizedUpstreamErrors(t *testing.T) {
-	t.Parallel()
-	const sessionKey = "sk-ant-sid01-a/b+c="
-	var mixedEncodedSecret strings.Builder
-	var percentEncodedSecret strings.Builder
-	for _, char := range sessionKey {
-		_, _ = fmt.Fprintf(&mixedEncodedSecret, "%%5Cu%04x", char)
-	}
-	for index := range len(sessionKey) {
-		_, _ = fmt.Fprintf(&percentEncodedSecret, "%%%02X", sessionKey[index])
-	}
-	tests := []struct {
-		name            string
-		failurePath     string
-		statusCode      int
-		message         string
-		reflectedSecret string
-		rawFailureBody  string
-		expectRedacted  bool
-	}{
-		{name: "organization", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, message: "organization authorization denied"},
-		{name: "authorization", failurePath: "/v1/oauth/cookie-org/authorize", statusCode: http.StatusForbidden, message: "organization cannot use this OAuth client"},
-		{name: "token", failurePath: "/token", statusCode: http.StatusBadRequest, message: "authorization code expired"},
-		{name: "query-encoded secret", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, message: "reflected credential", reflectedSecret: url.QueryEscape(sessionKey), expectRedacted: true},
-		{name: "path-encoded secret", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, message: "reflected credential", reflectedSecret: "sk-ant-sid01-a%2Fb+c=", expectRedacted: true},
-		{name: "HTML-encoded secret", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, message: "reflected credential", reflectedSecret: "sk-ant-sid01-a&#47;b&#43;c&#61;", expectRedacted: true},
-		{name: "duplicate JSON key", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, rawFailureBody: `{"session_key":"sk-ant-sid01-a\/b\u002bc=","session_key":"safe"}`, expectRedacted: true},
-		{name: "multiple JSON values", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, rawFailureBody: "{\"error\":\"safe\"}\n{\"session_key\":\"sk-ant-sid01-a\\/b\\u002bc=\"}", expectRedacted: true},
-		{name: "nested JSON escape", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, rawFailureBody: `{"error":"sk-ant-sid01-a\\u002fb\\u002bc="}`, expectRedacted: true},
-		{name: "mixed URL and JSON escapes", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, message: "reflected credential", reflectedSecret: mixedEncodedSecret.String(), expectRedacted: true},
-		{name: "benign nested JSON escape", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, message: "literal", rawFailureBody: `{"error":"literal \"quoted\" \\u1234"}`},
-		{name: "benign Windows path", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, message: "path C", rawFailureBody: `{"error":"path C:\\users\\name"}`},
-		{name: "invalid JSON escape before secret", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, rawFailureBody: `{"error":"path C:\\users\\name sk-ant-sid01-a\\u002fb\\u002bc="}`, expectRedacted: true},
-		{name: "invalid percent escape before secret", failurePath: "/api/organizations", statusCode: http.StatusUnauthorized, message: "reflected credential", reflectedSecret: "bad%ZZ" + percentEncodedSecret.String(), expectRedacted: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-				if request.URL.Path == test.failurePath {
-					w.WriteHeader(test.statusCode)
-					if test.rawFailureBody != "" {
-						_, _ = io.WriteString(w, test.rawFailureBody)
-						return
-					}
-					payload := map[string]string{"error": test.message}
-					if test.reflectedSecret != "" {
-						payload["session_key"] = test.reflectedSecret
-					}
-					_ = json.NewEncoder(w).Encode(payload)
-					return
-				}
-				switch request.URL.Path {
-				case "/api/organizations":
-					_, _ = io.WriteString(w, `[{"uuid":"cookie-org"}]`)
-				case "/v1/oauth/cookie-org/authorize":
-					var payload map[string]string
-					if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-						t.Fatalf("decode authorization request: %v", err)
-					}
-					redirect := anthropicauth.RedirectURI + "?code=cookie-code&state=" + url.QueryEscape(payload["state"])
-					_ = json.NewEncoder(w).Encode(map[string]string{"redirect_uri": redirect})
-				default:
-					http.NotFound(w, request)
-				}
-			}))
-			defer upstream.Close()
-
-			server, _, cleanup := setupAdminTestServer(t)
-			defer cleanup()
-			service := anthropicauth.NewService(upstream.Client())
-			service.ClaudeWebURL = upstream.URL
-			service.TokenURL = upstream.URL + "/token"
-			server.anthropicService = service
-
-			c, recorder := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/anthropic/oauth/cookie", map[string]string{
-				"session_key": sessionKey,
-			}))
-			server.HandleAnthropicCookieAuth(c)
-
-			body := recorder.Body.String()
-			if recorder.Code != http.StatusBadGateway || strings.Contains(body, sessionKey) ||
-				strings.Contains(body, url.QueryEscape(sessionKey)) ||
-				!strings.Contains(body, fmt.Sprintf("returned HTTP %d", test.statusCode)) {
-				t.Fatalf("cookie auth error status=%d body=%s", recorder.Code, body)
-			}
-			if test.expectRedacted != strings.Contains(body, "[REDACTED]") ||
-				(!test.expectRedacted && !strings.Contains(body, test.message)) {
-				t.Fatalf("cookie auth error status=%d body=%s", recorder.Code, body)
-			}
-		})
+	request := newJSONRequest(t, http.MethodPost, "/admin/anthropic/oauth/cookie", map[string]string{
+		"session_key": "removed-cookie-credential",
+	})
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("removed Cookie endpoint status=%d, want 404 body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -8533,7 +8419,7 @@ func TestMergeCodexPassiveUsageIgnoresResetJitterWithinSamePeriod(t *testing.T) 
 			SampledAt: sampledAt.UTC().Format(time.RFC3339Nano),
 		}
 	}
-	current, changed := mergeCodexPassiveUsage(nil, []codexauth.PassiveUsageWindow{window(53, resetAt, base)}, base)
+	current, changed := mergeCodexPassiveUsageWithScopes(nil, []codexauth.PassiveUsageWindow{window(53, resetAt, base)}, base, nil)
 	if !changed {
 		t.Fatal("first sample must be recorded")
 	}
@@ -8542,7 +8428,7 @@ func TestMergeCodexPassiveUsageIgnoresResetJitterWithinSamePeriod(t *testing.T) 
 	// 但指的是同一个周期——不能因此重写一遍凭证。
 	for i, jitter := range []int64{7, -3, 41} {
 		at := base.Add(time.Duration(i+1) * time.Minute)
-		next, changed := mergeCodexPassiveUsage(current, []codexauth.PassiveUsageWindow{window(53, resetAt+jitter, at)}, at)
+		next, changed := mergeCodexPassiveUsageWithScopes(current, []codexauth.PassiveUsageWindow{window(53, resetAt+jitter, at)}, at, nil)
 		if changed {
 			t.Fatalf("jitter %ds rewrote the credential", jitter)
 		}
@@ -8553,10 +8439,10 @@ func TestMergeCodexPassiveUsageIgnoresResetJitterWithinSamePeriod(t *testing.T) 
 
 	// 真实变化仍然必须落库：用量前进、周期滚动。
 	at := base.Add(time.Hour)
-	if _, changed := mergeCodexPassiveUsage(current, []codexauth.PassiveUsageWindow{window(54, resetAt+7, at)}, at); !changed {
+	if _, changed := mergeCodexPassiveUsageWithScopes(current, []codexauth.PassiveUsageWindow{window(54, resetAt+7, at)}, at, nil); !changed {
 		t.Fatal("used percent change must be recorded")
 	}
-	if _, changed := mergeCodexPassiveUsage(current, []codexauth.PassiveUsageWindow{window(53, resetAt+604800, at)}, at); !changed {
+	if _, changed := mergeCodexPassiveUsageWithScopes(current, []codexauth.PassiveUsageWindow{window(53, resetAt+604800, at)}, at, nil); !changed {
 		t.Fatal("period rollover must be recorded")
 	}
 }

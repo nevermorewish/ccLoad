@@ -4,11 +4,8 @@ const assert = require('node:assert/strict');
 const {
   normalizeInlineKeyRow,
   pruneKeyAllowedModels,
-  selectAvailableInlineKeys,
   selectModelFetchKeyEntries,
   countConfiguredInlineKeys,
-  selectFirstEnabledInlineKey,
-  selectModelsForInlineKeyTest,
   openKeyModelScopeModal,
   closeKeyModelScopeModal,
   confirmKeyModelScope,
@@ -19,7 +16,7 @@ const {
   canFetchInlineKeyRate,
   toggleKeyDisabled
 } = require('./channels-keys.js');
-const { applyURLStats, fetchURLStats } = require('./channels-urls.js');
+const { applyURLStats } = require('./channels-urls.js');
 const ModelEntryParser = require('./model-entry-parser.js');
 
 function installFetchModelsGlobals({ rows, states, onFetch, onError, onWarning, channelId = null, authType = 'api_key', proxyURL = '' }) {
@@ -38,12 +35,9 @@ function installFetchModelsGlobals({ rows, states, onFetch, onError, onWarning, 
     currentChannelKeyCooldowns: states,
     editingChannelId: channelId,
     editingChannelAuthType: authType,
-    selectAvailableInlineKeys,
     selectModelFetchKeyEntries,
     countConfiguredInlineKeys,
-    selectFirstEnabledInlineKey,
     fetchAPIWithAuth: onFetch,
-    alert: onError,
     console: { ...console, error: () => {} }
   };
   const previous = new Map();
@@ -106,26 +100,6 @@ test('inline Key rows preserve and normalize model scopes', () => {
   assert.equal(normalizeInlineKeyRow({ api_key: 'sk-free', cost_multiplier: 0 }).cost_multiplier, 0);
   assert.equal(normalizeInlineKeyRow({ api_key: 'sk-bad', cost_multiplier: -3 }).cost_multiplier, 1);
   assert.equal(normalizeInlineKeyRow({ api_key: 'sk-nan', cost_multiplier: 'abc' }).cost_multiplier, 1);
-  assert.deepEqual(selectModelsForInlineKeyTest(
-    { api_key: 'sk-disabled', allowed_models: ['gpt-5'] },
-    [{ model: 'gpt-5', disabled: true }]
-  ), ['gpt-5']);
-  const modelRows = [
-    { model: 'GPT-5(max)', disabled: true },
-    { model: 'claude-opus', disabled: false }
-  ];
-  assert.deepEqual(selectModelsForInlineKeyTest(
-    { api_key: 'sk-disabled', allowed_models: ['gpt-5'] }, modelRows
-  ), ['GPT-5']);
-  assert.deepEqual(selectModelsForInlineKeyTest(
-    { api_key: 'sk-both', allowed_models: ['gpt-5', 'claude-opus'] }, modelRows
-  ), ['claude-opus']);
-  assert.deepEqual(selectModelsForInlineKeyTest(
-    { api_key: 'sk-unrestricted', allowed_models: [] }, modelRows
-  ), ['claude-opus']);
-  assert.deepEqual(selectModelsForInlineKeyTest(
-    { api_key: 'sk-unmatched', allowed_models: ['other'] }, modelRows
-  ), []);
 });
 
 test('removing configured models prunes every restricted Key scope', () => {
@@ -373,19 +347,16 @@ test('Key model scope master checkbox reflects and changes visible models', () =
     assert.equal(toggleAll.checked, false);
     assert.equal(toggleAll.indeterminate, true);
     assert.equal(toggleAll.disabled, false);
-    assert.equal(count.textContent, '2/3');
 
     assert.equal(setVisibleKeyModelScopeChecked(false), true);
     assert.deepEqual(checkboxes.map(checkbox => checkbox.checked), [false, true, false]);
     assert.equal(toggleAll.checked, false);
     assert.equal(toggleAll.indeterminate, false);
-    assert.equal(count.textContent, '1/3');
 
     assert.equal(setVisibleKeyModelScopeChecked(true), true);
     assert.deepEqual(checkboxes.map(checkbox => checkbox.checked), [true, true, true]);
     assert.equal(toggleAll.checked, true);
     assert.equal(toggleAll.indeterminate, false);
-    assert.equal(count.textContent, '3/3');
 
     allowAll.checked = true;
     updateKeyModelScopeSelectionCount();
@@ -488,7 +459,6 @@ test('per-Key model detection handles stale sessions, model variants, redirect m
     keyModelScopeStatus: status,
     detectKeyModelScopeBtn: detectButton,
     inlineKeyTableBody: { dataset: { delegated: 'true' }, innerHTML: '', appendChild() {} },
-    inlineKeyCount: { textContent: '' },
     channelModal: { setAttribute() {}, removeAttribute() {} },
     channelProxyURL: { value: ' socks5://127.0.0.1:1080 ' }
   };
@@ -743,6 +713,7 @@ function installBatchProtocolModeGlobals(response) {
       showSuccess: message => notifications.push({ type: 'success', message }),
       showError: message => notifications.push({ type: 'error', message }),
       showWarning: message => notifications.push({ type: 'warning', message }),
+      showConfirm: async () => true,
       ModelEntryParser,
       localStorage: { getItem: () => null, setItem() {} }
     },
@@ -767,7 +738,6 @@ function installBatchProtocolModeGlobals(response) {
     saveChannelsFilters: () => { filterSaves++; },
     reloadChannelsList: async () => { reloads++; },
     setTimeout: callback => { callback(); return 1; },
-    confirm: () => true,
     console: { ...console, error: () => {} }
   };
   const previous = new Map();
@@ -834,7 +804,6 @@ function installFetchKeyRateGlobals({
       return response;
     },
     markChannelFormDirty: () => { dirty = true; },
-    alert: message => notifications.push({ type: 'alert', message }),
     console: { ...console, error: () => {} }
   };
   const previous = new Map();
@@ -883,9 +852,11 @@ function installEditChannelGlobals(channel, {
         contains: name => classes.has(name)
       },
       setAttribute() {},
+      removeAttribute() {},
       addEventListener() {},
       appendChild() {},
-      querySelector: () => null
+      querySelector: () => null,
+      querySelectorAll: () => []
     };
   };
   const getElement = id => {
@@ -899,6 +870,7 @@ function installEditChannelGlobals(channel, {
     window: {
       t: key => key,
       showError: message => errors.push(message),
+      channelAvatarContentHTML: () => '',
       addEventListener() {}
     },
     document: {
@@ -909,6 +881,7 @@ function installEditChannelGlobals(channel, {
       ].includes(selector) ? null : makeElement()
     },
     normalizeInlineKeyRow,
+    channelAuthTypeFilterLabel: value => value,
     channels: [],
     editingChannelId: null,
     editingChannelAuthType: 'api_key',
@@ -949,7 +922,6 @@ function installEditChannelGlobals(channel, {
     clearChannelDuplicateHint() {},
     setInlineURLTableData() {},
     applyURLStats,
-    fetchURLStats,
     urlStatsMap: {},
     renderInlineURLTable() {},
     setInlineKeyTableDataFromAPI(keys) { loadedKeys = keys; },
@@ -996,8 +968,7 @@ function installCommonModelsGlobals(initialRows = []) {
     },
     redirectTableData: rows,
     renderRedirectTable: () => { renders++; },
-    markChannelFormDirty: () => { dirty = true; },
-    alert: () => {}
+    markChannelFormDirty: () => { dirty = true; }
   };
   const previous = new Map();
   for (const [name, value] of Object.entries(globals)) {
@@ -1070,7 +1041,9 @@ function installWebsocketProbeGlobals({
   urlConfigs = urls.map(url => ({ url, exact: false, protocols: [] })),
   rows = [{ api_key: 'sk-probe' }],
   urlStats = {},
-  keyStates = []
+  keyStates = [],
+  authType = 'api_key',
+  channelID = null
 }) {
   const checkbox = { checked: initialChecked };
   const button = { disabled: false, innerHTML: '检测' };
@@ -1082,6 +1055,7 @@ function installWebsocketProbeGlobals({
 		window: {
 			t: key => key,
       showNotification: (message, type) => notifications.push({ message, type }),
+      showError: message => notifications.push({ message, type: 'error' }),
       collectCustomRulesForSubmit: () => ({
         headers: [{ action: 'override', name: 'X-Probe', value: '1' }]
       })
@@ -1098,13 +1072,13 @@ function installWebsocketProbeGlobals({
     getInlineKeyRows: () => rows,
     urlStatsMap: urlStats,
     currentChannelKeyCooldowns: keyStates,
-    selectFirstEnabledInlineKey,
+    editingChannelAuthType: authType,
+    editingChannelId: channelID,
     fetchDataWithAuth: async (url, options) => {
       requests.push({ url, body: JSON.parse(options.body) });
       return { supported, error: supported ? '' : '426 Upgrade Required' };
     },
-    markChannelFormDirty: () => { dirty = true; },
-    alert: () => {}
+    markChannelFormDirty: () => { dirty = true; }
   };
   const previous = new Map();
   for (const [name, value] of Object.entries(globals)) {
@@ -1367,6 +1341,46 @@ test('saving rejects invalid daily schedules and focuses the field with an inlin
   }
 });
 
+test('saving names every missing required field and focuses the first one', async () => {
+  const channel = { id: 81, name: '', auth_type: 'api_key', urls: [{ url: 'https://example.com' }], models: [] };
+  const fixture = installEditChannelGlobals(channel, { editorKeys: [] });
+  const previousValidKeyRows = Object.getOwnPropertyDescriptor(global, 'getValidInlineKeyRows');
+  const previousValidURLs = Object.getOwnPropertyDescriptor(global, 'getValidInlineURLConfigs');
+  try {
+    const { editChannel, saveChannel } = loadChannelsModals();
+    await editChannel(channel.id);
+    global.window.t = (key, params) => {
+      if (key === 'channels.channelName') return 'Name *';
+      if (key === 'channels.apiKey') return 'API Key *';
+      if (key === 'channels.modelConfig') return 'Model Configuration *';
+      if (key === 'channels.requiredFieldSeparator') return ', ';
+      return params?.fields !== undefined ? `${key}:${params.fields}` : key;
+    };
+    global.getValidInlineURLConfigs = () => channel.urls;
+    global.getValidInlineKeyRows = () => [];
+    fixture.getElement('channelScheduledCheckIntervalMinutes').value = '30';
+    fixture.getElement('channelScheduledCheckStartTime').value = '08:30';
+    const nameInput = fixture.getElement('channelName');
+    nameInput.tagName = 'INPUT';
+    nameInput.value = '  ';
+    let focused = false;
+    nameInput.focus = () => { focused = true; };
+
+    await saveChannel({ preventDefault() {} });
+
+    assert.equal(fixture.errors.at(-1), 'channels.fillAllRequired:Name, API Key, Model Configuration');
+    assert.equal(nameInput.classList.contains('is-invalid'), true);
+    assert.equal(focused, true);
+    assert.deepEqual(fixture.requests, ['/admin/channels/81/editor']);
+  } finally {
+    for (const [key, descriptor] of [['getValidInlineKeyRows', previousValidKeyRows], ['getValidInlineURLConfigs', previousValidURLs]]) {
+      if (descriptor) Object.defineProperty(global, key, descriptor);
+      else delete global[key];
+    }
+    fixture.restore();
+  }
+});
+
 test('saving an OAuth editor submits the multiplier through the synthetic key row', async () => {
   const channel = {
     id: 79,
@@ -1494,6 +1508,38 @@ test('editing a channel does not open a partial editor when bootstrap fails', as
     assert.deepEqual(fixture.requests, [`/admin/channels/${channel.id}/editor`]);
     assert.deepEqual(fixture.errors, ['channels.loadChannelsFailed']);
     assert.equal(fixture.getElement('channelModal').classList.contains('show'), false);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('WebSocket probe uses saved Codex OAuth identity without reading API keys', async () => {
+  const fixture = installWebsocketProbeGlobals({
+    supported: true, initialChecked: false, authType: 'codex_oauth', channelID: 73, rows: []
+  });
+  global.getInlineKeyRows = () => { throw new Error('OAuth must not read API keys'); };
+  try {
+    const { detectChannelWebsocketSupport } = loadChannelsModals();
+    assert.equal(await detectChannelWebsocketSupport(fixture.button), true);
+    assert.deepEqual(fixture.request.body, {
+      url: 'https://upstream.test', channel_id: 73, proxy_url: 'socks5://proxy.test:1080',
+      custom_request_rules: { headers: [{ action: 'override', name: 'X-Probe', value: '1' }] }
+    });
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('WebSocket probe requires an OAuth channel to be saved first', async () => {
+  const fixture = installWebsocketProbeGlobals({
+    supported: true, initialChecked: false, authType: 'codex_oauth', rows: []
+  });
+  try {
+    const { detectChannelWebsocketSupport } = loadChannelsModals();
+    assert.equal(await detectChannelWebsocketSupport(fixture.button), false);
+    assert.equal(fixture.requests.length, 0);
+    assert.deepEqual(fixture.notifications, [{ message: 'channels.websocketsProbeSaveOAuthFirst', type: 'error' }]);
+    assert.equal(fixture.button.disabled, false);
   } finally {
     fixture.restore();
   }
@@ -1634,7 +1680,7 @@ test('model disabled state toggles without changing the model mapping', () => {
   assert.equal(toggleModelDisabledState(rows, 9), false);
 });
 
-test('model row test opens the existing test flow for the current model and runs it', async () => {
+test('model row test opens the test dialog for the current model without running it', async () => {
   const fixture = installModelRequestTestGlobals();
 
   try {
@@ -1645,8 +1691,7 @@ test('model row test opens the existing test flow for the current model and runs
         id: 7,
         name: 'test-channel',
         models: [{ model: 'requested-model', redirect_model: 'upstream-model', disabled: false }]
-      }, 'requested-model', 'upstream-model'] },
-      { type: 'run' }
+      }, 'requested-model', 'upstream-model'] }
     ]);
     assert.equal(fixture.button.disabled, false);
     assert.equal(fixture.button.attributes.has('aria-busy'), false);
@@ -1674,7 +1719,7 @@ test('model row test can probe a saved disabled target without enabling it', asy
   try {
     const { testRedirectModel } = loadChannelsModals();
     assert.equal(await testRedirectModel(0, fixture.button), true);
-    assert.deepEqual(fixture.calls.map(call => call.type), ['open', 'run']);
+    assert.deepEqual(fixture.calls.map(call => call.type), ['open']);
     assert.equal(global.redirectTableData[0].disabled, true);
     assert.equal(fixture.button.disabled, false);
     assert.deepEqual(fixture.notifications, []);
@@ -2874,19 +2919,19 @@ test('渠道保存载荷仅在 API Key 渠道携带 management_account，且绝�
   }
 });
 
-test('multi-Key channel asks for confirmation even when a single Key changed', () => {
+test('multi-Key channel asks for confirmation even when a single Key changed', async () => {
   const previousWindow = Object.getOwnPropertyDescriptor(global, 'window');
   const prompts = [];
   Object.defineProperty(global, 'window', {
     configurable: true,
     value: {
       t: (key, params) => `${key}:${params?.count ?? ''}`,
-      confirm: message => { prompts.push(message); return true; }
+      showConfirm: async message => { prompts.push(message); return true; }
     }
   });
   try {
     const { fetchedKeyModelApplyAccepted } = loadChannelsModals();
-    assert.equal(fetchedKeyModelApplyAccepted(1), true);
+    assert.equal(await fetchedKeyModelApplyAccepted(1), true);
     assert.deepEqual(prompts, ['channels.applyFetchedKeyModelsConfirm:1']);
   } finally {
     if (previousWindow) Object.defineProperty(global, 'window', previousWindow);
@@ -2894,19 +2939,19 @@ test('multi-Key channel asks for confirmation even when a single Key changed', (
   }
 });
 
-test('multi Key model scope detection asks for confirmation with the changed count', () => {
+test('multi Key model scope detection asks for confirmation with the changed count', async () => {
   const previousWindow = Object.getOwnPropertyDescriptor(global, 'window');
   const prompts = [];
   Object.defineProperty(global, 'window', {
     configurable: true,
     value: {
       t: (key, params) => `${key}:${params?.count ?? ''}`,
-      confirm: message => { prompts.push(message); return true; }
+      showConfirm: async message => { prompts.push(message); return true; }
     }
   });
   try {
     const { fetchedKeyModelApplyAccepted } = loadChannelsModals();
-    assert.equal(fetchedKeyModelApplyAccepted(2), true);
+    assert.equal(await fetchedKeyModelApplyAccepted(2), true);
     assert.deepEqual(prompts, ['channels.applyFetchedKeyModelsConfirm:2']);
   } finally {
     if (previousWindow) Object.defineProperty(global, 'window', previousWindow);
@@ -2914,55 +2959,39 @@ test('multi Key model scope detection asks for confirmation with the changed cou
   }
 });
 
-test('multi Key model scope detection respects a declined confirm prompt', () => {
+test('multi Key model scope detection respects a declined confirm prompt', async () => {
   const previousWindow = Object.getOwnPropertyDescriptor(global, 'window');
   Object.defineProperty(global, 'window', {
     configurable: true,
     value: {
       t: key => key,
-      confirm: () => false
+      showConfirm: async () => false
     }
   });
   try {
     const { fetchedKeyModelApplyAccepted } = loadChannelsModals();
-    assert.equal(fetchedKeyModelApplyAccepted(2), false);
+    assert.equal(await fetchedKeyModelApplyAccepted(2), false);
   } finally {
     if (previousWindow) Object.defineProperty(global, 'window', previousWindow);
     else delete global.window;
   }
 });
 
-test('multi Key model scope detection never applies without a confirm function', () => {
-  const previousWindow = Object.getOwnPropertyDescriptor(global, 'window');
-  Object.defineProperty(global, 'window', {
-    configurable: true,
-    value: { t: key => key }
-  });
-  try {
-    const { fetchedKeyModelApplyAccepted } = loadChannelsModals();
-    assert.equal(fetchedKeyModelApplyAccepted(2), false);
-    assert.equal(fetchedKeyModelApplyAccepted(1), false, '多 Key 渠道无 confirm 时单个 Key 变更也不应用');
-  } finally {
-    if (previousWindow) Object.defineProperty(global, 'window', previousWindow);
-    else delete global.window;
-  }
-});
-
-test('single-Key channel never applies fetched Key model scopes', () => {
+test('single-Key channel never applies fetched Key model scopes', async () => {
   const previousWindow = Object.getOwnPropertyDescriptor(global, 'window');
   let confirmCalls = 0;
   Object.defineProperty(global, 'window', {
     configurable: true,
     value: {
       t: key => key,
-      confirm: () => { confirmCalls++; return true; }
+      showConfirm: async () => { confirmCalls++; return true; }
     }
   });
   try {
     const { fetchedKeyModelApplyAccepted } = loadChannelsModals();
     // 单 Key 渠道没有分流需求,不应把模型范围写进唯一 Key,也不弹确认框
-    assert.equal(fetchedKeyModelApplyAccepted(1, true), false);
-    assert.equal(fetchedKeyModelApplyAccepted(2, true), false);
+    assert.equal(await fetchedKeyModelApplyAccepted(1, true), false);
+    assert.equal(await fetchedKeyModelApplyAccepted(2, true), false);
     assert.equal(confirmCalls, 0);
   } finally {
     if (previousWindow) Object.defineProperty(global, 'window', previousWindow);

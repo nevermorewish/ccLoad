@@ -72,7 +72,6 @@
 
   function resetCooldownDetectionState(rules) {
     _state = cloneRules(rules);
-    if (hasWindow) window.channelCooldownDetectionState = _state;
     updateRuleCount(_state);
   }
 
@@ -256,6 +255,7 @@
     });
     renderRuleList();
     hideError();
+    markChannelFormDirty();
   }
 
   function removeCooldownDetectionRule(index) {
@@ -263,6 +263,7 @@
     _draft.rules.splice(index, 1);
     normalizeDraftPriorities();
     renderRuleList();
+    markChannelFormDirty();
   }
 
   function moveCooldownDetectionRule(index, direction) {
@@ -273,6 +274,7 @@
     _draft.rules.splice(target, 0, rule);
     normalizeDraftPriorities();
     renderRuleList();
+    markChannelFormDirty();
   }
 
   function setCooldownDetectionRulePriority(index, oneBasedPriority) {
@@ -285,6 +287,12 @@
     _draft.rules.splice(target, 0, rule);
     normalizeDraftPriorities();
     renderRuleList();
+    markChannelFormDirty();
+  }
+
+  // 渠道编辑抽屉内的规则增删排序不触发 input 事件，需要显式标记未保存。
+  function markChannelFormDirty() {
+    if (hasWindow && typeof window.markChannelFormDirty === 'function') window.markChannelFormDirty();
   }
 
   function normalizeDraftPriorities() {
@@ -604,10 +612,7 @@
     if (!validateCooldownDetectionDraft()) return false;
     if (!_draft) return true;
     _state = cloneRules(_draft);
-    if (hasWindow) {
-      window.channelCooldownDetectionState = _state;
-      if (typeof window.markChannelFormDirty === 'function') window.markChannelFormDirty();
-    }
+    if (hasWindow && typeof window.markChannelFormDirty === 'function') window.markChannelFormDirty();
     updateRuleCount(_state);
     return true;
   }

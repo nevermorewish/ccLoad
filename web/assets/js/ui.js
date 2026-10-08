@@ -123,7 +123,8 @@ window.WebAuth = window.WebAuth || {
 
   async function fetchDataWithAuth(url, options = {}) {
     const resp = await fetchAPIWithAuth(url, options);
-    if (!resp.success) throw new Error(resp.error || t('error.requestFailed'));
+    // response 标记这是服务端明确给出的失败，而非网络或解析错误
+    if (!resp.success) throw Object.assign(new Error(resp.error || t('error.requestFailed')), { response: resp });
     return resp.data;
   }
 
@@ -266,7 +267,7 @@ window.WebAuth = window.WebAuth || {
     }
     root.querySelectorAll && root.querySelectorAll('.theme-option').forEach((option) => {
       const active = option.getAttribute('data-theme-mode') === currentThemeMode;
-      option.setAttribute('aria-pressed', active ? 'true' : 'false');
+      option.setAttribute('aria-checked', active ? 'true' : 'false');
       option.classList.toggle('active', active);
     });
   }
@@ -625,16 +626,32 @@ window.WebAuth = window.WebAuth || {
     }
   }
 
-  function createBrandWordmark() {
+  // 顶栏 Logo 内联渲染：外部 SVG（img / use href）每次切页都要重新取文件解析，
+  // 顶栏先出现、Logo 后补上，表现为切页时 Logo 闪动。图形与 /web/brand-*.svg 保持一致。
+  const BRAND_MARK_SVG = '<defs><linearGradient id="topbar-brand-gradient" x1="0" y1="0" x2="0.82" y2="1">'
+    + '<stop offset="0" stop-color="#1d9bf0"/><stop offset="0.55" stop-color="#367df4"/><stop offset="1" stop-color="#7c3aed"/>'
+    + '</linearGradient><mask id="topbar-brand-c-mask"><rect width="112" height="72" fill="#000"/>'
+    + '<circle cx="49" cy="36" r="30" fill="#fff"/><circle cx="49" cy="36" r="16" fill="#000"/><path d="M52 36 90 4v64Z" fill="#000"/>'
+    + '</mask></defs>'
+    + '<rect x="19" y="6" width="60" height="60" fill="url(#topbar-brand-gradient)" mask="url(#topbar-brand-c-mask)"/>'
+    + '<path fill="url(#topbar-brand-gradient)" fill-rule="evenodd" d="M59.4 36c4-4 8-8 12-11 8-4 16 2 16 11s-8 15-16 11c-4-3-8-7-12-11Zm17-4a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/>';
+
+  const BRAND_WORDMARK_SVG = '<defs><linearGradient id="topbar-wordmark-gradient" x1="0" y1="0" x2="1" y2="1">'
+    + '<stop offset="0" stop-color="#2563eb"/><stop offset="1" stop-color="#1d4ed8"/></linearGradient></defs>'
+    + '<g font-family="Arial Black, Arial, Helvetica, sans-serif" font-size="30" font-style="italic" font-weight="900">'
+    + '<text x="4" y="24.5" fill="currentColor" textLength="34" lengthAdjust="spacingAndGlyphs">cc</text>'
+    + '<text x="40" y="24.5" fill="#2563eb" textLength="17" lengthAdjust="spacingAndGlyphs">L</text>'
+    + '<circle cx="68.5" cy="16" r="8.5" fill="url(#topbar-wordmark-gradient)"/>'
+    + '<path d="M70.7 3.2 64 15.4h3.9L66 28.8l8-14.7h-4.2Z" fill="#fbbf24" transform="rotate(34.6 68.5 16)"/>'
+    + '<text x="80" y="24.5" fill="#2563eb" textLength="46" lengthAdjust="spacingAndGlyphs">ad</text></g>'
+    + '<text x="0" y="35" fill="#2563eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9" font-weight="700" transform="translate(6.5 0) scale(.867 1)">API Load Balancer &amp; Proxy</text>';
+
+  function createInlineBrandSVG(className, viewBox, markup) {
     const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-    el.setAttribute('viewBox', '0 0 132 36');
+    el.setAttribute('viewBox', viewBox);
     el.setAttribute('aria-hidden', 'true');
-    el.classList.add('brand-wordmark');
-    use.setAttribute('href', '/web/brand-wordmark.svg#brand-wordmark');
-    use.setAttribute('width', '132');
-    use.setAttribute('height', '36');
-    el.appendChild(use);
+    el.classList.add(className);
+    el.innerHTML = markup;
     return el;
   }
 
@@ -642,8 +659,8 @@ window.WebAuth = window.WebAuth || {
     const bar = h('header', { class: 'topbar' });
 
     // 图标与字标独立复用；活动动画层只属于图标
-    const iconImg = h('img', { class: 'brand-mark', src: '/web/brand-mark.svg', alt: '' });
-    const wordmark = createBrandWordmark();
+    const iconImg = createInlineBrandSVG('brand-mark', '8 6 88 60', BRAND_MARK_SVG);
+    const wordmark = createInlineBrandSVG('brand-wordmark', '0 0 132 36', BRAND_WORDMARK_SVG);
     const speedLines = h('span', { class: 'brand-speed-lines', 'aria-hidden': 'true' }, [
       h('i'), h('i'), h('i'), h('i'), h('i')
     ]);
@@ -672,7 +689,8 @@ window.WebAuth = window.WebAuth || {
       ...NAVS.filter((item) => visibleNavKeys.has(item.key)).map(n => h('a', {
         class: `topnav-link ${n.key === active ? 'active' : ''}`,
         href: n.href,
-        'data-nav-key': n.key
+        'data-nav-key': n.key,
+        ...(n.key === active ? { 'aria-current': 'page' } : {})
       }, [n.icon(), h('span', { 'data-i18n': n.labelKey }, t(n.labelKey))]))
     ]);
     const loggedIn = isLoggedIn();
@@ -705,10 +723,15 @@ window.WebAuth = window.WebAuth || {
     const langSwitcher = window.i18n ? window.i18n.createLanguageSwitcher() : null;
     const themeSwitcher = buildThemeSwitcher();
 
+    const tools = h('div', { class: 'topbar-tools' }, [
+      themeSwitcher,
+      langSwitcher && h('span', { class: 'topbar-tools-sep', 'aria-hidden': 'true' }),
+      langSwitcher
+    ].filter(Boolean));
+
     const right = h('div', { class: 'topbar-right' }, [
       versionGroup,
-      themeSwitcher,
-      langSwitcher,
+      tools,
       h('button', {
         id: 'auth-btn',
         class: 'btn btn-secondary btn-sm',
@@ -749,7 +772,7 @@ window.WebAuth = window.WebAuth || {
       class: 'theme-option',
       role: 'menuitemradio',
       'data-theme-mode': mode,
-      'aria-pressed': mode === currentThemeMode ? 'true' : 'false',
+      'aria-checked': mode === currentThemeMode ? 'true' : 'false',
       onclick: (event) => {
         setThemeMode(mode);
         setThemeSwitcherOpen(event.currentTarget.closest('.theme-switcher'), false);
@@ -767,7 +790,7 @@ window.WebAuth = window.WebAuth || {
   }
 
   async function onLogout() {
-    if (!confirm(t('confirm.logout'))) return;
+    if (!(await showConfirm({ message: t('confirm.logout') }))) return;
 
     // 先清理本地Token，避免后续请求触发token检查
     const token = localStorage.getItem('ccload_token');
@@ -811,7 +834,6 @@ window.WebAuth = window.WebAuth || {
   }
 
   window.initTopbar = function initTopbar(activeKey) {
-    document.body.classList.add('top-layout');
     document.body.classList.toggle('web-role-api-token', window.isAPITokenRole());
     const app = document.querySelector('.app-container') || document.body;
     // 隐藏侧边栏与移动按钮
@@ -820,9 +842,29 @@ window.WebAuth = window.WebAuth || {
     const mobileBtn = document.getElementById('mobile-menu-btn');
     if (mobileBtn) mobileBtn.style.display = 'none';
 
-    // 插入顶部条
+    // 插入顶部条；放在 body 最前，键盘 Tab 先到导航。角色变化后重复调用时原位替换
     const topbar = buildTopbar(activeKey);
-    document.body.appendChild(topbar);
+    const existing = document.querySelector('body > .topbar');
+    if (existing) existing.replaceWith(topbar);
+    else document.body.prepend(topbar);
+
+    // 窄屏导航横向滚动时，让当前页可见，并用两侧渐隐提示还有更多项
+    const nav = topbar.querySelector('.topnav');
+    const activeLink = nav && nav.querySelector('.topnav-link.active');
+    if (activeLink && nav.scrollWidth > nav.clientWidth) {
+      const navRect = nav.getBoundingClientRect();
+      const linkRect = activeLink.getBoundingClientRect();
+      nav.scrollLeft += linkRect.left - navRect.left - (navRect.width - linkRect.width) / 2;
+    }
+    if (nav) {
+      const updateNavOverflow = () => {
+        nav.classList.toggle('has-more-start', nav.scrollLeft > 2);
+        nav.classList.toggle('has-more-end', nav.scrollLeft + nav.clientWidth < nav.scrollWidth - 2);
+      };
+      nav.addEventListener('scroll', updateNavOverflow, { passive: true });
+      window.addEventListener('resize', updateNavOverflow);
+      updateNavOverflow();
+    }
 
     // 背景动效
     injectBackground();
@@ -832,19 +874,19 @@ window.WebAuth = window.WebAuth || {
 
     // 启动活动请求指示器轮询
     if (isLoggedIn() && !window.isAPITokenRole()) startActiveRequestsPolling();
+    else stopActiveRequestsPolling();
   }
 
   // 供其他模块订阅活动请求数据（全站唯一轮询源，避免重复请求）
   window.onActiveRequestsData = onActiveRequestsData;
   window.getChartTheme = getChartTheme;
 
-  // 通知系统（全局复用，DRY）
+  // 通知系统（全局复用，DRY）；外观全部由 styles.css 的 .notification* 定义
   function ensureNotifyHost() {
     let host = document.getElementById('notify-host');
     if (!host) {
       host = document.createElement('div');
       host.id = 'notify-host';
-      host.style.cssText = `position: fixed; top: var(--space-6); right: var(--space-6); display: flex; flex-direction: column; gap: var(--space-2); z-index: 9999; pointer-events: none;`;
       document.body.appendChild(host);
     }
     return host;
@@ -855,58 +897,94 @@ window.WebAuth = window.WebAuth || {
   window.showNotification = function (message, type = 'info') {
     const el = document.createElement('div');
     el.className = `notification notification-${type}`;
-    el.style.cssText = `
-      background: var(--glass-bg);
-      backdrop-filter: blur(16px);
-      border: 1px solid var(--glass-border);
-      border-radius: var(--radius-lg);
-      padding: var(--space-4) var(--space-6);
-      color: var(--neutral-900);
-      font-weight: var(--font-medium);
-      opacity: 0;
-      transform: translateX(20px);
-      transition: all var(--duration-normal) var(--timing-function);
-      max-width: 360px;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.12);
-      overflow: hidden;
-      overflow-wrap: anywhere;
-      white-space: pre-wrap;
-      isolation: isolate;
-      pointer-events: auto;
-    `;
-    if (type === 'success') {
-      el.style.background = 'var(--notification-success-bg)';
-      el.style.color = 'var(--notification-success-fg)';
-      el.style.borderColor = 'var(--notification-success-border)';
-      el.style.boxShadow = '0 6px 28px rgba(16,185,129,0.18)';
-    } else if (type === 'error') {
-      el.style.background = 'var(--notification-error-bg)';
-      el.style.color = 'var(--notification-error-fg)';
-      el.style.borderColor = 'var(--notification-error-border)';
-      el.style.boxShadow = '0 6px 28px rgba(239,68,68,0.18)';
-    } else if (type === 'warning') {
-      el.style.background = 'var(--notification-warning-bg)';
-      el.style.color = 'var(--notification-warning-fg)';
-      el.style.borderColor = 'var(--notification-warning-border)';
-      el.style.boxShadow = '0 6px 28px rgba(245,158,11,0.18)';
-    } else if (type === 'info') {
-      el.style.background = 'var(--notification-info-bg)';
-      el.style.color = 'var(--notification-info-fg)';
-      el.style.borderColor = 'var(--notification-info-border)';
-    }
     el.textContent = message;
     el.setAttribute('role', type === 'error' ? 'alert' : 'status');
-    const host = ensureNotifyHost();
-    host.appendChild(el);
-    requestAnimationFrame(() => { el.style.opacity = '1'; el.style.transform = 'translateX(0)'; });
+    ensureNotifyHost().appendChild(el);
+    requestAnimationFrame(() => el.classList.add('is-visible'));
     setTimeout(() => {
-      el.style.opacity = '0'; el.style.transform = 'translateX(20px)';
-      setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 320);
+      el.classList.remove('is-visible');
+      setTimeout(() => el.remove(), 320);
     }, 3600);
-  }
+  };
   window.showSuccess = (msg) => window.showNotification(msg, 'success');
   window.showError = (msg) => window.showNotification(msg, 'error');
   window.showWarning = (msg) => window.showNotification(msg, 'warning');
+
+  /**
+   * 统一确认框（替代原生 confirm）。基于 <dialog>：顶层渲染、Esc 取消、焦点受控。
+   * @param {string|{title?: string, message: string, detail?: string, confirmText?: string, cancelText?: string, danger?: boolean}} options
+   * @returns {Promise<boolean>}
+   */
+  function showConfirm(options) {
+    const opts = typeof options === 'string' ? { message: options } : (options || {});
+    const tr = (key, fallback) => (typeof window.t === 'function' ? window.t(key) : fallback);
+    const dialog = document.createElement('dialog');
+    dialog.className = 'app-confirm-dialog';
+    dialog.setAttribute('aria-modal', 'true');
+
+    const titleId = `app-confirm-title-${Date.now()}`;
+    const title = document.createElement('h2');
+    title.className = 'modal-title';
+    title.id = titleId;
+    title.textContent = opts.title || tr('common.confirm', '确认');
+    dialog.setAttribute('aria-labelledby', titleId);
+
+    const message = document.createElement('p');
+    message.className = 'app-confirm-message';
+    message.textContent = opts.message || '';
+    dialog.append(title, message);
+
+    if (opts.detail) {
+      const detail = document.createElement('p');
+      detail.className = 'app-confirm-detail';
+      detail.textContent = opts.detail;
+      dialog.appendChild(detail);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'confirm-actions';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'btn btn-secondary';
+    cancelBtn.textContent = opts.cancelText || tr('common.cancel', '取消');
+    const okBtn = document.createElement('button');
+    okBtn.type = 'button';
+    okBtn.className = opts.danger ? 'btn btn-danger' : 'btn btn-primary';
+    okBtn.textContent = opts.confirmText || tr('common.confirm', '确认');
+    actions.append(cancelBtn, okBtn);
+    dialog.appendChild(actions);
+    document.body.appendChild(dialog);
+
+    return new Promise((resolve) => {
+      let result = false;
+      cancelBtn.addEventListener('click', () => dialog.close());
+      okBtn.addEventListener('click', () => { result = true; dialog.close(); });
+      dialog.addEventListener('click', (e) => { if (e.target === dialog) dialog.close(); });
+      dialog.addEventListener('close', () => { dialog.remove(); resolve(result); }, { once: true });
+      // 推迟到下一任务打开：若由 Esc keydown 触发，该按键的关闭请求会立即取消同步打开的对话框
+      setTimeout(() => {
+        dialog.showModal();
+        (opts.danger ? cancelBtn : okBtn).focus();
+      }, 0);
+    });
+  }
+  window.showConfirm = showConfirm;
+
+  /**
+   * 未保存改动离开保护。isDirty 返回 true 时刷新/关闭页面会触发浏览器确认。
+   * @param {() => boolean} isDirty
+   * @returns {() => void} 解除保护
+   */
+  function guardUnsavedChanges(isDirty) {
+    const handler = (e) => {
+      if (!isDirty()) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }
+  window.guardUnsavedChanges = guardUnsavedChanges;
 })();
 
 // ============================================================
@@ -1075,10 +1153,29 @@ window.WebAuth = window.WebAuth || {
     return true;
   }
 
+  // defer 脚本执行期间 readyState 已是 interactive 但 DOMContentLoaded 未触发，
+  // 只能在 ui.js 自身执行时注册监听；导航计时用于识别已触发过的情况。
+  const domContentLoaded = new Promise((resolve) => {
+    const nav = typeof performance !== 'undefined' && performance.getEntriesByType
+      ? performance.getEntriesByType('navigation')[0]
+      : null;
+    if (document.readyState === 'complete' || (nav && nav.domContentLoadedEventEnd > 0)) {
+      resolve();
+      return;
+    }
+    document.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
+  });
+
   function initPageBootstrap(options = {}) {
     const run = typeof options.run === 'function' ? options.run : () => {};
 
     const execute = async () => {
+      // 顶栏先按登录时缓存的角色立即渲染，不等 session 往返，否则每次切页顶栏都会闪现
+      const cachedRole = window.getWebRole();
+      if (options.topbarKey && typeof window.initTopbar === 'function') {
+        window.initTopbar(options.topbarKey);
+      }
+
 	  const session = await window.fetchDataWithAuth('/dashboard/session');
 	  if (session && session.role) localStorage.setItem(window.WebAuth.ROLE_KEY, session.role);
       window.webSession = session;
@@ -1092,10 +1189,12 @@ window.WebAuth = window.WebAuth || {
         window.i18n.translatePage();
       }
 
-      if (options.topbarKey && typeof window.initTopbar === 'function') {
+      if (options.topbarKey && typeof window.initTopbar === 'function' && window.getWebRole() !== cachedRole) {
         window.initTopbar(options.topbarKey);
       }
 
+      // 页面脚本之后的 defer 依赖（如 echarts）在 DOMContentLoaded 前才保证执行完
+      await domContentLoaded;
       await run();
     };
 
@@ -1299,18 +1398,24 @@ window.WebAuth = window.WebAuth || {
   /**
    * 格式化成本（美元）
    * @param {number} cost - 成本值
-   * @param {number} [decimalPlaces=3] - 小数位数
+   * @param {number} [decimalPlaces] - 小数位数；省略时默认 3 位，不足 $0.01 的小额保留两位有效数字（最多 6 位）
    * @returns {string} 格式化后的字符串
    */
   function formatCost(cost, decimalPlaces) {
     const value = Number(cost);
     if (!Number.isFinite(value)) return '';
-    const hasExplicitDecimalPlaces = Number.isInteger(decimalPlaces);
-    const places = hasExplicitDecimalPlaces
-      ? Math.max(0, Math.min(6, decimalPlaces))
-      : 3;
-    if (value === 0) return hasExplicitDecimalPlaces && places > 0 ? '$0.' + '0'.repeat(places) : '$0';
-    return '$' + value.toFixed(places);
+    if (Number.isInteger(decimalPlaces)) {
+      const places = Math.max(0, Math.min(6, decimalPlaces));
+      if (value === 0) return places > 0 ? '$0.' + '0'.repeat(places) : '$0';
+      return '$' + value.toFixed(places);
+    }
+    if (value === 0) return '$0';
+    const abs = Math.abs(value);
+    if (value > 0 && abs < 0.000001) return '<$0.000001';
+    if (abs >= 0.01) return '$' + value.toFixed(3);
+    // 小额成本按有效数字展开，避免单次请求显示成 $0.000
+    const places = Math.min(6, Math.ceil(-Math.log10(abs)) + 1);
+    return '$' + value.toFixed(places).replace(/0+$/, '');
   }
 
   /**
@@ -1441,6 +1546,17 @@ window.WebAuth = window.WebAuth || {
     return n.toString();
   }
 
+  /**
+   * 百分比统一格式：保留 1 位小数，0/100 等整数也不省略（100.0%）
+   * @param {number} ratio - 0~1 的比例
+   * @returns {string} 无效值返回 '--'
+   */
+  function formatPercent(ratio) {
+    const n = Number(ratio);
+    if (ratio === null || ratio === undefined || !Number.isFinite(n)) return '--';
+    return `${(n * 100).toFixed(1)}%`;
+  }
+
   // RPM 颜色：低流量绿色，中等橙色，高流量红色
   function getRpmColor(rpm) {
     const n = Number(rpm);
@@ -1492,6 +1608,7 @@ window.WebAuth = window.WebAuth || {
   window.getFirstByteTimingColor = getFirstByteTimingColor;
   window.getDurationTimingColor = getDurationTimingColor;
   window.formatNumber = formatNumber;
+  window.formatPercent = formatPercent;
   window.getRpmColor = getRpmColor;
   window.escapeHtml = escapeHtml;
   window.toggleResponse = toggleResponse;
@@ -1519,12 +1636,9 @@ window.WebAuth = window.WebAuth || {
     try {
       const fetcher = window.fetchDataWithAuth || window.fetchData;
       if (typeof fetcher !== 'function') return 0;
-      const data = await fetcher('/admin/settings');
-      if (Array.isArray(data)) {
-        const item = data.find(s => s && s.key === 'auto_refresh_interval_seconds');
-        const n = item ? Number(item.value) : 0;
-        if (Number.isFinite(n) && n > 0) seconds = Math.floor(n);
-      }
+      const data = await fetcher('/admin/settings/auto_refresh_interval_seconds');
+      const n = data ? Number(data.value) : 0;
+      if (Number.isFinite(n) && n > 0) seconds = Math.floor(n);
     } catch (_) { /* 拉取失败：不刷新 */ }
 
     try {
@@ -1627,6 +1741,7 @@ window.WebAuth = window.WebAuth || {
    * @param {boolean} [config.allowCustomInput] - 允许提交非下拉选项的自定义输入
    * @param {boolean} [config.commitEmptyAsFirst] - 输入为空回车/失焦时提交第一项（通常为“全部”），覆盖默认的取消/恢复行为
    * @param {boolean} [config.showAllOptionsOnOpen] - 打开时先展示完整选项，开始输入后再按关键字过滤
+   * @param {number} [config.dropdownMinWidth] - 下拉面板最小宽度；选项带 description 时用于避免说明文字过度折行
    * @returns {Object} 组件实例
    */
   function createSearchableCombobox(config) {
@@ -1644,7 +1759,8 @@ window.WebAuth = window.WebAuth || {
       attachMode = false,
       allowCustomInput = false,
       commitEmptyAsFirst = false,
-      showAllOptionsOnOpen = false
+      showAllOptionsOnOpen = false,
+      dropdownMinWidth = 0
     } = config;
 
     let input, dropdown, wrapper, dropdownHome, container = null;
@@ -1756,9 +1872,21 @@ window.WebAuth = window.WebAuth || {
         }
       }
       if (shouldClear) {
+        // 清空便于搜索，用 placeholder 保留当前选中项提示
+        input.dataset.prevPlaceholder = input.placeholder;
+        if (input.value) input.placeholder = input.value;
         input.value = '';
       }
       activeIndex = -1;
+    }
+
+    function endPick() {
+      if (input.dataset.prevPlaceholder !== undefined) input.placeholder = input.dataset.prevPlaceholder;
+      delete input.dataset.prevPlaceholder;
+      delete input.dataset.pickActive;
+      delete input.dataset.prevInputValue;
+      delete input.dataset.prevValue;
+      delete input.dataset.pickEdited;
     }
 
     function cancelPick() {
@@ -1773,10 +1901,7 @@ window.WebAuth = window.WebAuth || {
       input.value = prevInputValue;
       currentValue = prevValue;
 
-      delete input.dataset.pickActive;
-      delete input.dataset.prevInputValue;
-      delete input.dataset.prevValue;
-      delete input.dataset.pickEdited;
+      endPick();
 
       closeDropdown();
       if (onCancel) onCancel();
@@ -1786,10 +1911,7 @@ window.WebAuth = window.WebAuth || {
       currentValue = value;
       input.value = label;
 
-      delete input.dataset.pickActive;
-      delete input.dataset.prevInputValue;
-      delete input.dataset.prevValue;
-      delete input.dataset.pickEdited;
+      endPick();
 
       closeDropdown();
       if (onSelect) onSelect(value, label);
@@ -1880,7 +2002,30 @@ window.WebAuth = window.WebAuth || {
         row.id = `${dropdown.id}-option-${idx}`;
         row.dataset.value = item.value;
         row.dataset.index = String(idx);
-        row.textContent = item.label;
+        const label = document.createElement('span');
+        label.className = 'filter-dropdown-item__label';
+        label.textContent = item.label;
+        label.title = item.label;
+        let content = [label];
+        if (item.description) {
+          // 图文选项：标题 + 说明两行
+          row.classList.add('filter-dropdown-item--described');
+          const description = document.createElement('span');
+          description.className = 'filter-dropdown-item__desc';
+          description.textContent = item.description;
+          content = [label, description];
+        }
+        // icon 为返回 DOM 节点的函数：每次渲染生成新节点，避免共享节点在重绘时被移走
+        const icon = typeof item.icon === 'function' ? item.icon() : null;
+        if (icon) {
+          row.classList.add('filter-dropdown-item--with-icon');
+          const text = document.createElement('span');
+          text.className = 'filter-dropdown-item__text';
+          text.append(...content);
+          row.append(icon, text);
+        } else {
+          row.append(...content);
+        }
         if (item.className) {
           row.classList.add(...String(item.className).split(/\s+/).filter(Boolean));
         }
@@ -1923,15 +2068,40 @@ window.WebAuth = window.WebAuth || {
       const rect = input.getBoundingClientRect();
       const margin = 6;
 
-      dropdown.style.left = `${Math.round(rect.left)}px`;
-      dropdown.style.width = `${Math.round(rect.width)}px`;
+      const viewportWidth = window.innerWidth || 0;
+      const availableWidth = Math.max(0, viewportWidth - margin * 2);
+      const baseWidth = Math.min(Math.max(rect.width, dropdownMinWidth), availableWidth);
+      dropdown.style.width = `${Math.ceil(baseWidth)}px`;
+      // 只按标题扩宽，说明文字仍可折行；计入图标、内边距和滚动条。
+      const chromeWidth = dropdown.offsetWidth - dropdown.clientWidth;
+      let contentWidth = baseWidth;
+      dropdown.querySelectorAll('.filter-dropdown-item__label').forEach((label) => {
+        const row = label.closest('.filter-dropdown-item');
+        // scrollWidth 会取整，少于一个像素的缺口也会触发 ellipsis。
+        const textRange = document.createRange();
+        textRange.selectNodeContents(label);
+        contentWidth = Math.max(contentWidth, textRange.getBoundingClientRect().width +
+          row.getBoundingClientRect().width - label.getBoundingClientRect().width + chromeWidth);
+      });
+      const width = Math.min(Math.ceil(contentWidth), availableWidth);
+      const left = Math.max(margin, Math.min(rect.left, viewportWidth - margin - width));
+      dropdown.style.left = `${Math.round(left)}px`;
+      dropdown.style.width = `${Math.round(width)}px`;
       dropdown.style.top = `${Math.round(rect.bottom + margin)}px`;
 
-      const dropdownHeight = dropdown.offsetHeight || 0;
-      const viewportBottom = window.innerHeight || 0;
-      if (dropdownHeight && rect.bottom + margin + dropdownHeight > viewportBottom && rect.top - margin - dropdownHeight >= 0) {
-        dropdown.style.top = `${Math.round(rect.top - margin - dropdownHeight)}px`;
-      }
+      // 高度受视口约束：下方放不下且上方更宽裕时向上展开，超出部分由 overflow 滚动
+      const scrollTop = dropdown.scrollTop;
+      dropdown.style.maxHeight = '';
+      const naturalHeight = dropdown.offsetHeight || 0;
+      const viewportHeight = window.innerHeight || 0;
+      if (!naturalHeight || !viewportHeight) return;
+      const spaceBelow = viewportHeight - rect.bottom - margin * 2;
+      const spaceAbove = rect.top - margin * 2;
+      const openUp = naturalHeight > spaceBelow && spaceAbove > spaceBelow;
+      const height = Math.min(naturalHeight, Math.max(0, openUp ? spaceAbove : spaceBelow));
+      if (height < naturalHeight) dropdown.style.maxHeight = `${Math.floor(height)}px`;
+      if (openUp) dropdown.style.top = `${Math.round(rect.top - margin - height)}px`;
+      dropdown.scrollTop = scrollTop;
     }
 
     function openDropdown() {
@@ -1955,7 +2125,11 @@ window.WebAuth = window.WebAuth || {
       document.addEventListener('mousedown', outsideHandler, true);
 
       clearRepositionHandler();
-      repositionHandler = () => positionDropdown();
+      repositionHandler = (e) => {
+        // 列表自身滚动不影响定位；若重新测量会清空 maxHeight 并把 scrollTop 归零
+        if (e?.type === 'scroll' && dropdown.contains(e.target)) return;
+        positionDropdown();
+      };
       window.addEventListener('resize', repositionHandler, true);
       window.addEventListener('scroll', repositionHandler, true);
     }
@@ -1972,6 +2146,8 @@ window.WebAuth = window.WebAuth || {
       }
       activeIndex = nextIndex;
       renderDropdown();
+      // 列表可滚动时让键盘选中项保持可见
+      dropdown.querySelector?.('.filter-dropdown-item.active')?.scrollIntoView?.({ block: 'nearest' });
     }
 
     // 事件绑定
@@ -2040,6 +2216,9 @@ window.WebAuth = window.WebAuth || {
         }
       }
     });
+
+    // 按住列表空白或滚动条时保持输入框焦点，避免 blur 提前收起下拉
+    dropdown.addEventListener('mousedown', (e) => e.preventDefault());
 
     input.addEventListener('blur', () => {
       if (dropdown.dataset.open !== '1') return;

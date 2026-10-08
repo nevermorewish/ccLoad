@@ -506,6 +506,15 @@ func (s *Server) streamChatWithURLForProtocol(
 	s.persistDetectionCodexPassiveUsage(req.Context(), cfg, resp, gjson.GetBytes(requestPlan.requestBody, "model").String())
 	s.persistDetectionAnthropicPassiveUsage(req.Context(), cfg, resp)
 	defer func() { _ = resp.Body.Close() }()
+	if isAnthropicClaudeCodeMessagesRequest(cfg, protocol.Protocol(requestPlan.upstreamProtocol), requestPlan.endpointPath) {
+		if decodeErr := decodeAnthropicResponse(resp); decodeErr != nil {
+			return chatURLAttemptResult{result: attachTestDebugData(requestPlan, resp, map[string]any{
+				"success": false, "error": "解码 Anthropic 对话响应失败: " + decodeErr.Error(),
+				"duration_ms": time.Since(start).Milliseconds(), "status_code": resp.StatusCode,
+				"is_streaming": testReq.Stream,
+			})}
+		}
+	}
 	if requestPlan.debugCapture != nil {
 		requestPlan.debugCapture.wrapResponseBody(resp)
 	}
@@ -754,10 +763,6 @@ func writeChatNonStreamResult(c *gin.Context, result map[string]any) {
 	writeChatFrontendChunks(c, chatDoneEventChunk())
 }
 
-func streamChatNative(c *gin.Context, body io.Reader) {
-	_ = streamChatNativeWithFirstContent(c, body, nil, nil)
-}
-
 func writeChatNonStreamSummary(c *gin.Context, result map[string]any) {
 	success, _ := result["success"].(bool)
 	if !success {
@@ -864,7 +869,7 @@ func (s *Server) writeChatStreamLog(c *gin.Context, cfg *model.Config, testReq *
 	s.persistDetectionLog(c.Request.Context(), detectionLogFromResult(cfg, model.LogSourceManualChat, logModel, model.RoutingModelName(actualModel), apiKey, c.ClientIP(), logThinking, result))
 }
 
-// streamChatNative 原生协议时把上游 SSE 实时透传给前端（提取 delta 文本）。
+// streamChatNativeWithFirstContent 原生协议时把上游 SSE 实时透传给前端（提取 delta 文本）。
 func streamChatNativeWithFirstContent(c *gin.Context, body io.Reader, onFirstContent func(), sr *chatStreamResult) error {
 	frontendState := &chatFrontendStreamState{}
 	return streamTransformSSEEvents(c.Request.Context(), body, c.Writer,
@@ -892,14 +897,17 @@ func streamChatTranslated(c *gin.Context, resp *http.Response, requestPlan *chan
 	ctx := c.Request.Context()
 	requestPlan.debugCapture.captureTranslatedResponseMeta(resp.StatusCode, resp.Header)
 
-	src := readerWithCloser{Reader: resp.Body, Closer: resp.Body}
+	src := resp.Body
+	if requestPlan.antigravityOAuth {
+		src = terminateAntigravitySSE(src)
+	}
 	return streamTransformSSEEvents(ctx, src, c.Writer,
 		func(rawEvent []byte) error {
 			parserEvent := rawEvent
 			if requestPlan.antigravityOAuth {
 				var err error
 				parserEvent, err = unwrapAntigravitySSEEvent(rawEvent)
-				if err != nil {
+				if err != nil || parserEvent == nil {
 					return err
 				}
 			}
@@ -911,9 +919,13 @@ func streamChatTranslated(c *gin.Context, resp *http.Response, requestPlan *chan
 		func(rawEvent []byte) ([][]byte, error) {
 			translatedRequestBody := requestPlan.requestBody
 			if requestPlan.antigravityOAuth {
+				// 与代理链路一致：后端错误帧只交给 usage parser，不进转换器。
+				if isAntigravityErrorPayload(antigravityEventPayload(rawEvent)) {
+					return nil, nil
+				}
 				var err error
 				rawEvent, err = unwrapAntigravitySSEEvent(rawEvent)
-				if err != nil {
+				if err != nil || rawEvent == nil {
 					return nil, err
 				}
 				translatedRequestBody, err = unwrapAntigravityRequest(requestPlan.requestBody)
@@ -947,10 +959,6 @@ func streamChatTranslated(c *gin.Context, resp *http.Response, requestPlan *chan
 			return chunks, nil
 		},
 	)
-}
-
-func chatFrontendChunksFromSSEEvent(rawEvent []byte) [][]byte {
-	return chatFrontendChunksFromSSEEventWithState(rawEvent, nil)
 }
 
 type chatFrontendStreamState struct {

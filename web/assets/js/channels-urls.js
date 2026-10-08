@@ -112,7 +112,6 @@ function createURLRow(index) {
     url: entry.url,
     mobileLabelUrl: window.t('channels.tableApiUrl'),
     mobileLabelProtocols: window.t('channels.urlProtocols'),
-    mobileLabelExactURL: window.t('channels.fullUrl'),
     mobileLabelActions: window.t('common.actions')
   };
 
@@ -397,11 +396,11 @@ function deleteInlineURL(index) {
   markChannelFormDirty();
 }
 
-function batchDeleteSelectedURLs() {
+async function batchDeleteSelectedURLs() {
   const count = selectedURLIndices.size;
   if (count === 0) return;
 
-  if (!confirm(window.t('channels.confirmBatchDeleteUrls', { count }))) {
+  if (!await window.showConfirm({ message: window.t('channels.confirmBatchDeleteUrls', { count }), danger: true })) {
     return;
   }
 
@@ -424,7 +423,7 @@ function batchDeleteSelectedURLs() {
 
 async function testInlineURL(index, buttonElement) {
   if (!editingChannelId) {
-    alert(window.t('channels.cannotGetChannelId'));
+    window.showNotification(window.t('channels.cannotGetChannelId'), 'warning');
     return;
   }
 
@@ -433,20 +432,20 @@ async function testInlineURL(index, buttonElement) {
     .map(r => r.model)
     .filter(m => m && m.trim());
   if (models.length === 0) {
-    alert(window.t('channels.configModelsFirst'));
+    window.showNotification(window.t('channels.configModelsFirst'), 'warning');
     return;
   }
 
   const firstModel = models[0];
   const url = runtimeInlineURL(inlineURLTableData[index]);
   if (!url) {
-    alert(window.t('channels.fillApiUrlFirst'));
+    window.showNotification(window.t('channels.fillApiUrlFirst'), 'warning');
     return;
   }
 
   const firstKey = (getValidInlineKeyRows()[0] || {}).api_key || '';
   if (!firstKey) {
-    alert(window.t('channels.emptyKeyCannotTest'));
+    window.showNotification(window.t('channels.emptyKeyCannotTest'), 'warning');
     return;
   }
 
@@ -498,16 +497,6 @@ function applyURLStats(stats) {
   renderInlineURLTable();
 }
 
-async function fetchURLStats(channelId) {
-  if (!channelId) return;
-  try {
-    const stats = await fetchDataWithAuth(`/admin/channels/${channelId}/url-stats`);
-    applyURLStats(stats);
-  } catch (e) {
-    console.error('Failed to fetch URL stats', e);
-  }
-}
-
 function formatURLStatus(stat) {
   if (!stat) {
     return '<span class="inline-url-status-placeholder">--</span>';
@@ -545,8 +534,8 @@ function formatURLRequests(stat) {
   const s = stat.requests || 0;
   const f = stat.failures || 0;
   if (s === 0 && f === 0) return '--';
-  if (f === 0) return `<span style="color: #16A34A;">${s}</span>`;
-  return `<span style="color: #16A34A;">${s}</span><span style="color: var(--neutral-300); margin: 0 2px;">/</span><span style="color: #DC2626;">${f}</span>`;
+  if (f === 0) return `<span style="color: var(--success-600);">${s}</span>`;
+  return `<span style="color: var(--success-600);">${s}</span><span style="color: var(--neutral-300); margin: 0 2px;">/</span><span style="color: var(--error-600);">${f}</span>`;
 }
 
 function updateURLStatsHeader() {
@@ -608,7 +597,6 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     applyURLStats,
     createURLRow,
-    fetchURLStats,
     normalizeInlineURLConfig,
     normalizeInlineURLConfigs,
     runtimeInlineURL

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -145,6 +146,11 @@ func (snapshot channelCooldownSnapshot) hasActiveCooldown(channelID int64, now t
 }
 
 func (s *Server) handleListChannels(c *gin.Context) {
+	listSort, err := parseChannelListSort(c)
+	if err != nil {
+		RespondError(c, http.StatusBadRequest, err)
+		return
+	}
 	cfgs, err := s.store.ListConfigs(c.Request.Context())
 	if err != nil {
 		RespondError(c, http.StatusInternalServerError, err)
@@ -173,9 +179,14 @@ func (s *Server) handleListChannels(c *gin.Context) {
 	// 健康度模式检查
 	healthEnabled := s.healthCache != nil && s.healthCache.Config().Enabled
 
-	// 排序：健康度开启按 effective_priority 降序；关闭按 priority DESC, name ASC，
-	// 与前端 filterChannels 的排序键对齐，保证分页跨页顺序稳定。
-	priorityMap, successRateMap, healthStatsMap := s.sortChannelsByEffectivePriority(cfgs, healthEnabled)
+	// 排序在分页前完成；健康度开启时优先级键使用 effective_priority。
+	// 健康度关闭时用 SortPriority()，让手动排序覆盖同样生效。
+	priorityMap, successRateMap, healthStatsMap := s.computeChannelPriorities(cfgs, healthEnabled)
+	priority := func(cfg *model.Config) float64 { return float64(cfg.SortPriority()) }
+	if healthEnabled {
+		priority = func(cfg *model.Config) float64 { return priorityMap[cfg.ID] }
+	}
+	sortChannelList(cfgs, listSort, priority)
 
 	totalCount := len(cfgs)
 
@@ -209,11 +220,7 @@ func (s *Server) handleListChannels(c *gin.Context) {
 
 	// 填充空的重定向模型为请求模型（方便前端编辑时显示）
 	for i := range out {
-		for j := range out[i].ModelEntries {
-			if out[i].Config.ModelEntries[j].RedirectModel == "" {
-				out[i].Config.ModelEntries[j].RedirectModel = out[i].Config.ModelEntries[j].Model
-			}
-		}
+		fillChannelRedirectModels(out[i].Config)
 	}
 
 	if hasPagination {
@@ -297,48 +304,101 @@ func applyChannelListFilters(cfgs []*model.Config, c *gin.Context, cooldowns cha
 	return cfgs
 }
 
-// sortChannelsByEffectivePriority 原地排序 cfgs。
-// 健康度开启时：用 healthCache 计算 effectivePriority 与 successRate（仅 SampleCount>0），
-// 按 effective 降序；关闭时按 priority DESC, name ASC（与前端 filterChannels 排序键对齐）。
-// 返回的三个 map 供 enrichChannel 复用，避免重复计算。
-func (s *Server) sortChannelsByEffectivePriority(cfgs []*model.Config, healthEnabled bool) (priorityMap, successRateMap map[int64]float64, healthStatsMap map[int64]model.ChannelHealthStats) {
+// computeChannelPriorities 计算健康度模式下的 effectivePriority、successRate 与首字统计。
+// 健康度关闭时返回空 map。三个 map 供排序与 enrichChannel 复用，避免重复计算。
+func (s *Server) computeChannelPriorities(cfgs []*model.Config, healthEnabled bool) (priorityMap, successRateMap map[int64]float64, healthStatsMap map[int64]model.ChannelHealthStats) {
 	priorityMap = make(map[int64]float64, len(cfgs))
 	successRateMap = make(map[int64]float64, len(cfgs))
 	healthStatsMap = make(map[int64]model.ChannelHealthStats, len(cfgs))
-	if healthEnabled {
-		hcfg := s.healthCache.Config()
-		samples := make([]float64, 0, len(cfgs))
-		statsByID := make(map[int64]model.ChannelHealthStats, len(cfgs))
-		for _, cfg := range cfgs {
-			stats := s.healthCache.GetHealthStats(cfg.ID)
-			statsByID[cfg.ID] = stats
-			healthStatsMap[cfg.ID] = stats
-			if stats.FirstByteSampleCount > 0 && stats.AvgFirstByteSeconds > 0 {
-				samples = append(samples, stats.AvgFirstByteSeconds)
-			}
+	if !healthEnabled {
+		return priorityMap, successRateMap, healthStatsMap
+	}
+	hcfg := s.healthCache.Config()
+	samples := make([]float64, 0, len(cfgs))
+	statsByID := make(map[int64]model.ChannelHealthStats, len(cfgs))
+	for _, cfg := range cfgs {
+		stats := s.healthCache.GetHealthStats(cfg.ID)
+		statsByID[cfg.ID] = stats
+		healthStatsMap[cfg.ID] = stats
+		if stats.FirstByteSampleCount > 0 && stats.AvgFirstByteSeconds > 0 {
+			samples = append(samples, stats.AvgFirstByteSeconds)
 		}
-		medianTTFB := medianFloat64(samples)
-		for _, cfg := range cfgs {
-			stats := statsByID[cfg.ID]
-			priorityMap[cfg.ID] = s.calculateEffectivePriority(cfg, stats, hcfg, medianTTFB)
-			if stats.SampleCount > 0 {
-				successRateMap[cfg.ID] = stats.SuccessRate
-			}
+	}
+	medianTTFB := medianFloat64(samples)
+	for _, cfg := range cfgs {
+		stats := statsByID[cfg.ID]
+		priorityMap[cfg.ID] = s.calculateEffectivePriority(cfg, stats, hcfg, medianTTFB)
+		if stats.SampleCount > 0 {
+			successRateMap[cfg.ID] = stats.SuccessRate
 		}
-		sort.Slice(cfgs, func(i, j int) bool {
-			return priorityMap[cfgs[i].ID] > priorityMap[cfgs[j].ID]
-		})
-	} else {
-		sort.Slice(cfgs, func(i, j int) bool {
-			// 用 SortPriority()：健康度关闭时排序覆盖也必须体现在列表顺序上。
-			left, right := cfgs[i].SortPriority(), cfgs[j].SortPriority()
-			if left != right {
-				return left > right
-			}
-			return cfgs[i].Name < cfgs[j].Name
-		})
 	}
 	return priorityMap, successRateMap, healthStatsMap
+}
+
+// channelListSort 是渠道列表的排序请求；默认按优先级降序。
+type channelListSort struct {
+	key  string
+	desc bool
+}
+
+// parseChannelListSort 解析 sort=name|priority|enabled 与 order=asc|desc。
+// 省略 order 时名称升序，优先级与启用状态降序；非法取值直接报错。
+func parseChannelListSort(c *gin.Context) (channelListSort, error) {
+	key := strings.TrimSpace(c.Query("sort"))
+	if key == "" {
+		key = "priority"
+	}
+	switch key {
+	case "name", "priority", "enabled":
+	default:
+		return channelListSort{}, fmt.Errorf("invalid sort: %q", key)
+	}
+	switch order := strings.TrimSpace(c.Query("order")); order {
+	case "":
+		return channelListSort{key: key, desc: key != "name"}, nil
+	case "asc", "desc":
+		return channelListSort{key: key, desc: order == "desc"}, nil
+	default:
+		return channelListSort{}, fmt.Errorf("invalid order: %q", order)
+	}
+}
+
+// sortChannelList 原地排序 cfgs：先按请求的键，平局依次按优先级降序、名称升序、ID 升序，
+// 保证分页跨页顺序稳定。前端 compareChannelsForList 必须保持同一规则。
+func sortChannelList(cfgs []*model.Config, order channelListSort, priority func(*model.Config) float64) {
+	sort.Slice(cfgs, func(i, j int) bool {
+		a, b := cfgs[i], cfgs[j]
+		var result int
+		switch order.key {
+		case "name":
+			result = strings.Compare(a.Name, b.Name)
+		case "enabled":
+			result = cmp.Compare(boolToInt(a.Enabled), boolToInt(b.Enabled))
+		default:
+			result = cmp.Compare(priority(a), priority(b))
+		}
+		if result != 0 {
+			return (result > 0) == order.desc
+		}
+		if pa, pb := priority(a), priority(b); pa != pb {
+			return pa > pb
+		}
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		return a.ID < b.ID
+	})
+}
+
+func configPriority(cfg *model.Config) float64 {
+	return float64(cfg.Priority)
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 // paginateChannels 按 query 中的 limit/offset 截取 cfgs。
@@ -414,19 +474,9 @@ func channelCostMultiplierRange(cfg *model.Config, apiKeys []*model.APIKey) (flo
 }
 
 func (ectx *channelEnrichmentContext) enrichChannel(cfg *model.Config, metadata channelOAuthMetadata) ChannelWithCooldown {
-	oc := ChannelWithCooldown{
-		Config:                       cfg,
-		CodexPlanType:                metadata.planType,
-		CodexSubscriptionActiveUntil: metadata.subscriptionActiveUntil,
-		AnthropicPlanType:            metadata.anthropicPlanType,
-		OAuthUsage:                   metadata.oauthUsage,
-		AntigravityPaidTier:          metadata.antigravityPaidTier,
-		XAIEmail:                     metadata.xaiEmail,
-		XAISubscriptionTier:          metadata.xaiSubscriptionTier,
-		XAIEntitlementStatus:         metadata.xaiEntitlementStatus,
-		CodeBuddyEnterprise:          metadata.codeBuddyEnterprise,
-		CodeBuddyInternational:       metadata.codeBuddyInternational,
-	}
+	oc := metadata.channelView(cfg)
+	oc.CodeBuddyEnterprise = metadata.codeBuddyEnterprise
+	oc.CodeBuddyInternational = metadata.codeBuddyInternational
 
 	// 渠道级别冷却：使用批量查询结果（性能提升：N -> 1 次查询）
 	if until, cooled := ectx.channelCooldownsMap[cfg.ID]; cooled && until.After(ectx.now) {
@@ -509,6 +559,29 @@ type channelOAuthMetadata struct {
 	quotaUsage              *oauthcost.Usage
 }
 
+// channelView 投影列表与详情共有的 OAuth 字段；CodeBuddy 标志仅由列表添加。
+func (metadata channelOAuthMetadata) channelView(cfg *model.Config) ChannelWithCooldown {
+	return ChannelWithCooldown{
+		Config:                       cfg,
+		CodexPlanType:                metadata.planType,
+		CodexSubscriptionActiveUntil: metadata.subscriptionActiveUntil,
+		AnthropicPlanType:            metadata.anthropicPlanType,
+		OAuthUsage:                   metadata.oauthUsage,
+		AntigravityPaidTier:          metadata.antigravityPaidTier,
+		XAIEmail:                     metadata.xaiEmail,
+		XAISubscriptionTier:          metadata.xaiSubscriptionTier,
+		XAIEntitlementStatus:         metadata.xaiEntitlementStatus,
+	}
+}
+
+func fillChannelRedirectModels(cfg *model.Config) {
+	for i := range cfg.ModelEntries {
+		if cfg.ModelEntries[i].RedirectModel == "" {
+			cfg.ModelEntries[i].RedirectModel = cfg.ModelEntries[i].Model
+		}
+	}
+}
+
 func channelOAuthMetadataFromCredential(cfg *model.Config) channelOAuthMetadata {
 	if cfg == nil || cfg.OAuthCredential == "" {
 		return channelOAuthMetadata{}
@@ -557,14 +630,15 @@ func channelOAuthMetadataFromCredential(cfg *model.Config) channelOAuthMetadata 
 		if credential.PassiveUsage != nil {
 			passiveSampledAt = credential.PassiveUsage.SampledAt
 		}
+		quotaUsage := oauthcost.EffectiveUsage(credential.QuotaCostUsage, credential.OAuthUsage)
 		usage := latestOAuthUsage(
-			active, activeSampledAt, anthropicPassiveUsageSummary(credential), passiveSampledAt,
+			active, activeSampledAt, anthropicPassiveUsageSummary(credential), passiveSampledAt, quotaUsage,
 		)
 		return channelOAuthMetadata{
 			anthropicPlanType: strings.TrimSpace(credential.PlanType),
 			oauthUsage:        usage,
 			tracksQuotaCost:   true,
-			quotaUsage:        oauthcost.EffectiveUsage(credential.QuotaCostUsage, credential.OAuthUsage),
+			quotaUsage:        quotaUsage,
 		}
 	}
 	if cfg.UsesZAIOAuth() {
@@ -615,14 +689,15 @@ func channelOAuthMetadataFromCredential(cfg *model.Config) channelOAuthMetadata 
 	if credential.PassiveUsage != nil {
 		passiveSampledAt = credential.PassiveUsage.SampledAt
 	}
+	quotaUsage := oauthcost.EffectiveUsage(credential.QuotaCostUsage, credential.OAuthUsage)
 	usage := latestOAuthUsage(
-		active, activeSampledAt, codexPassiveUsageSummary(credential), passiveSampledAt,
+		active, activeSampledAt, codexPassiveUsageSummary(credential), passiveSampledAt, quotaUsage,
 	)
 	metadata := channelOAuthMetadata{
 		planType:        credential.PlanType,
 		oauthUsage:      usage,
 		tracksQuotaCost: true,
-		quotaUsage:      oauthcost.EffectiveUsage(credential.QuotaCostUsage, credential.OAuthUsage),
+		quotaUsage:      quotaUsage,
 	}
 	if until, ok := credential.SubscriptionActiveUntil(); ok {
 		metadata.subscriptionActiveUntil = &until
@@ -825,11 +900,7 @@ func (s *Server) handleGetChannel(c *gin.Context, id int64) {
 
 func (s *Server) buildChannelDetail(ctx context.Context, id int64, cfg *model.Config) (ChannelWithCooldown, []*model.APIKey, error) {
 	// 填充空的重定向模型为请求模型（方便前端编辑时显示）
-	for i := range cfg.ModelEntries {
-		if cfg.ModelEntries[i].RedirectModel == "" {
-			cfg.ModelEntries[i].RedirectModel = cfg.ModelEntries[i].Model
-		}
-	}
+	fillChannelRedirectModels(cfg)
 
 	apiKeys, err := s.getAPIKeys(ctx, id)
 	if err != nil {
@@ -847,20 +918,10 @@ func (s *Server) buildChannelDetail(ctx context.Context, id int64, cfg *model.Co
 	now := time.Now()
 	metadata := []channelOAuthMetadata{channelOAuthMetadataFromCredential(cfg)}
 	s.attachChannelQuotaCosts(ctx, []*model.Config{cfg}, metadata, now)
-	detail := ChannelWithCooldown{
-		Config:                       cfg,
-		CodexPlanType:                metadata[0].planType,
-		CodexSubscriptionActiveUntil: metadata[0].subscriptionActiveUntil,
-		AnthropicPlanType:            metadata[0].anthropicPlanType,
-		OAuthUsage:                   metadata[0].oauthUsage,
-		AntigravityPaidTier:          metadata[0].antigravityPaidTier,
-		XAIEmail:                     metadata[0].xaiEmail,
-		XAISubscriptionTier:          metadata[0].xaiSubscriptionTier,
-		ManagementAccount:            s.managementAccountView(cfg),
-		XAIEntitlementStatus:         metadata[0].xaiEntitlementStatus,
-		KeyStrategy:                  channelKeyStrategy(apiKeys),
-		ModelCooldowns:               activeModelCooldownInfos(allModelCooldowns[id], now),
-	}
+	detail := metadata[0].channelView(cfg)
+	detail.ManagementAccount = s.managementAccountView(cfg)
+	detail.KeyStrategy = channelKeyStrategy(apiKeys)
+	detail.ModelCooldowns = activeModelCooldownInfos(allModelCooldowns[id], now)
 	applyProtocolProbeRetrySummary(&detail, s.protocolCapabilities.unsupportedRetrySummaries(now)[id], now)
 	return detail, apiKeys, nil
 }
@@ -972,27 +1033,7 @@ func codexCredentialKeyNote(credential *codexauth.Credential) string {
 	return "Codex OAuth AT"
 }
 
-// HandleChannelModelStats 返回渠道当天的按模型轻量统计。
-// GET /admin/channels/:id/model-stats
-func (s *Server) HandleChannelModelStats(c *gin.Context) {
-	id, err := ParseInt64Param(c, "id")
-	if err != nil {
-		RespondErrorMsg(c, http.StatusBadRequest, "invalid channel id")
-		return
-	}
-	if _, err := s.store.GetConfig(c.Request.Context(), id); err != nil {
-		RespondError(c, http.StatusNotFound, fmt.Errorf("channel not found"))
-		return
-	}
-
-	result, err := s.getChannelModelStats(c.Request.Context(), id)
-	if err != nil {
-		RespondError(c, http.StatusInternalServerError, err)
-		return
-	}
-	RespondJSON(c, http.StatusOK, result)
-}
-
+// getChannelModelStats 返回渠道当天的按模型轻量统计，供渠道编辑器使用。
 func (s *Server) getChannelModelStats(ctx context.Context, id int64) ([]ChannelModelStats, error) {
 	params := &PaginationParams{Range: "today"}
 	startTime, endTime := params.GetTimeRange()
@@ -1016,31 +1057,6 @@ func (s *Server) getChannelModelStats(ctx context.Context, id int64) ([]ChannelM
 		})
 	}
 	return result, nil
-}
-
-// HandleChannelURLStats 返回渠道各URL的实时状态（延迟、冷却）
-// GET /admin/channels/:id/url-stats
-func (s *Server) HandleChannelURLStats(c *gin.Context) {
-	id, err := ParseInt64Param(c, "id")
-	if err != nil {
-		RespondErrorMsg(c, http.StatusBadRequest, "invalid channel id")
-		return
-	}
-
-	cfg, err := s.store.GetConfig(c.Request.Context(), id)
-	if err != nil {
-		RespondErrorMsg(c, http.StatusNotFound, "channel not found")
-		return
-	}
-
-	urls := cfg.GetURLs()
-	if len(urls) == 0 || s.urlSelector == nil {
-		RespondJSON(c, http.StatusOK, []URLStat{})
-		return
-	}
-
-	stats := s.urlSelector.GetURLStats(id, urls)
-	RespondJSON(c, http.StatusOK, stats)
 }
 
 // HandleURLDisable 手动禁用渠道的指定URL

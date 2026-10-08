@@ -9,7 +9,6 @@
     'keyExportModal',
     'keySortModal',
     'modelImportModal',
-    'customRulesModal',
     'testModal',
     'upstreamDetailModal'
   ];
@@ -40,6 +39,7 @@
     '/web/assets/js/channels-cooldown-detection.js',
     '/web/assets/js/model-entry-parser.js',
     '/web/assets/js/channels-model-pricing.js',
+    '/web/assets/js/channel-provider-icons.js',
     '/web/assets/js/channels-modals.js',
     '/web/assets/js/channels-management.js',
     '/web/assets/js/channels-test.js',
@@ -165,17 +165,16 @@
 
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;
+      // showConfirm 的原生 <dialog> 自行处理 Esc，不连带关闭底层抽屉
+      if (document.querySelector('dialog[open]')) return;
 
-      const customRulesModal = document.getElementById('customRulesModal');
       const modelImportModal = document.getElementById('modelImportModal');
       const keyImportModal = document.getElementById('keyImportModal');
       const keyExportModal = document.getElementById('keyExportModal');
       const testModal = document.getElementById('testModal');
       const channelModal = document.getElementById('channelModal');
 
-      if (customRulesModal && customRulesModal.classList.contains('show')) {
-        closeCustomRulesModal();
-      } else if (modelImportModal && modelImportModal.classList.contains('show')) {
+      if (modelImportModal && modelImportModal.classList.contains('show')) {
         closeModelImportModal();
       } else if (keyImportModal && keyImportModal.classList.contains('show')) {
         closeKeyImportModal();
@@ -222,6 +221,8 @@
     }
     if (typeof initChannelFormDirtyTracking === 'function') {
       initChannelFormDirtyTracking();
+      window.guardUnsavedChanges(() =>
+        Boolean(document.getElementById('channelModal')?.classList.contains('show')) && channelFormDirty);
     }
     if (typeof setupKeyImportPreview === 'function') {
       setupKeyImportPreview();

@@ -9,7 +9,7 @@ let authTokens = []; // 令牌列表
 let logsChannelNameCombobox = null; // 渠道名筛选组合框
 let logsModelCombobox = null; // 模型筛选组合框
 let logsStatusCombobox = null; // 状态码筛选组合框
-window.logsChannels = []; // 渠道列表（来自 /admin/models）
+window.logsChannels = []; // 渠道列表（来自 /dashboard/models）
 window.availableLogsModels = []; // 可用模型列表
 window.availableLogsStatusCodes = []; // 可用状态码列表
 let logsExactChannelNameValue = '';
@@ -380,9 +380,9 @@ function formatMultiplierText(multiplier) {
 
 function buildLogChannelDisplay(entry) {
   const configInfo = entry.channel_name ||
-    (entry.channel_id ? `渠道 #${entry.channel_id}` :
-      (entry.message === 'exhausted backends' ? '系统（所有渠道失败）' :
-        entry.message === 'no available upstream (all cooled or none)' ? '系统（无可用渠道）' : '系统'));
+    (entry.channel_id ? t('logs.channelFallback', { id: entry.channel_id }) :
+      (entry.message === 'exhausted backends' ? t('logs.systemAllChannelsFailed') :
+        entry.message === 'no available upstream (all cooled or none)' ? t('logs.systemNoUpstream') : t('logs.system')));
   const channelTooltip = entry.base_url ? ` title="${escapeHtml(entry.base_url)}"` : '';
 
   if (!entry.channel_id) {
@@ -394,9 +394,10 @@ function buildLogChannelDisplay(entry) {
 }
 // 生成流式标志HTML（公共函数，避免重复）
 function getStreamFlagHtml(isStreaming) {
+  const label = escapeHtml(t('logs.streamFlag'));
   return isStreaming
-    ? '<span class="stream-flag">流</span>'
-    : '<span class="stream-flag placeholder">流</span>';
+    ? `<span class="stream-flag">${label}</span>`
+    : `<span class="stream-flag placeholder">${label}</span>`;
 }
 
 function buildTimingSeparatorHtml() {
@@ -446,8 +447,8 @@ function buildThinkingEffortBadge(thinkingEffort, reasoningTokens) {
     .filter(Boolean)
     .join(' ');
   const titleParts = [];
-  if (effort) titleParts.push(`思考等级: ${escapeHtml(effort)}`);
-  if (tokens > 0) titleParts.push(`思考/推理Token: ${tokens}`);
+  if (effort) titleParts.push(escapeHtml(t('logs.titleThinkingEffort', { effort })));
+  if (tokens > 0) titleParts.push(escapeHtml(t('logs.titleReasoningTokens', { tokens })));
   const title = titleParts.join('&#10;');
   return `<sup class="thinking-effort-badge" title="${title}">${escapeHtml(text)}</sup>`;
 }
@@ -477,33 +478,32 @@ function buildLogModelDisplay(model, actualModel, thinkingEffort, reasoningToken
     return '<span style="color: var(--neutral-500);">-</span>';
   }
 
-  const redirected = actualModel && actualModel !== model && !isPrefixOrSuffixVariant(model, actualModel);
+  const redirected = !window.shouldHideChannels?.() && actualModel && actualModel !== model && !isPrefixOrSuffixVariant(model, actualModel);
   const effort = normalizeThinkingEffortDisplay(thinkingEffort);
   const tokens = normalizeReasoningTokens(reasoningTokens);
   const classes = ['model-tag'];
   const titleParts = [];
   if (redirected) {
-    classes.push('model-redirected');
-    titleParts.push(`请求模型: ${escapeHtml(model)}`);
-    titleParts.push(`实际模型: ${escapeHtml(actualModel)}`);
+    titleParts.push(escapeHtml(t('logs.titleRequestedModel', { model })));
+    titleParts.push(escapeHtml(t('logs.titleActualModel', { model: actualModel })));
   }
   if (effort) {
     classes.push('model-thinking');
-    titleParts.push(`思考等级: ${escapeHtml(effort)}`);
+    titleParts.push(escapeHtml(t('logs.titleThinkingEffort', { effort })));
   }
   if (tokens > 0) {
     classes.push('model-thinking');
-    titleParts.push(`思考/推理Token: ${tokens}`);
+    titleParts.push(escapeHtml(t('logs.titleReasoningTokens', { tokens })));
   }
   const title = titleParts.length > 0 ? ` title="${titleParts.join('&#10;')}"` : '';
-  const redirectBadge = redirected ? '<sup class="redirect-badge">↪</sup>' : '';
-  const badgeHtml = redirectBadge || effort || tokens > 0
-    ? `<span class="model-badges">${redirectBadge}${buildThinkingEffortBadge(effort, tokens)}</span>`
+  const badgeHtml = effort || tokens > 0
+    ? `<span class="model-badges">${buildThinkingEffortBadge(effort, tokens)}</span>`
     : '';
 
   return `<span class="model-display">
       <span class="${classes.join(' ')}"${title}>
         <span class="model-text">${escapeHtml(model)}</span>
+        ${redirected ? `<span class="model-actual"><span class="model-actual-arrow" aria-hidden="true">↳</span><span class="model-text">${escapeHtml(actualModel)}</span></span>` : ''}
       </span>
       ${badgeHtml}
     </span>`;
@@ -567,6 +567,8 @@ function renderLogSourceBadge(logSource) {
       return `<span class="log-source-badge log-source-badge--manual">${escapeHtml(t('logs.sourceManualChatBadge'))}</span>`;
     case 'checkin':
       return `<span class="log-source-badge log-source-badge--checkin">${escapeHtml(t('logs.sourceCheckinBadge'))}</span>`;
+    case 'count_tokens':
+      return `<span class="log-source-badge log-source-badge--scheduled">${escapeHtml(t('logs.sourceCountTokensBadge'))}</span>`;
     default:
       return '';
   }
@@ -574,8 +576,9 @@ function renderLogSourceBadge(logSource) {
 
 function canInspectDebugLog(entry) {
   const isTokenSession = typeof window.isAPITokenRole === 'function' && window.isAPITokenRole();
-  const isJevAudit = entry?.log_source === 'jev';
-  return !isTokenSession && (Number(entry?.channel_id) > 0 || (isJevAudit && Number(entry?.id) > 0));
+  // Jev 审计与 count_tokens 本地估算没有渠道，但同样可能带 debug 记录。
+  const isChannelless = entry?.log_source === 'jev' || entry?.log_source === 'count_tokens';
+  return !isTokenSession && (Number(entry?.channel_id) > 0 || (isChannelless && Number(entry?.id) > 0));
 }
 
 function buildLogMessageContent(entry) {
@@ -594,13 +597,15 @@ function buildLogMessageContent(entry) {
     return '';
   }
 
+  // 桌面端按行数截断长错误，完整文本保留在 title 与 Debug 详情中
+  const titleAttr = messageText ? ` title="${messageText}"` : '';
   let inner;
   if (!canInspectDebugLog(entry)) {
-    inner = `<span>${messageText}</span>`;
+    inner = `<span class="logs-message-text"${titleAttr}>${messageText}</span>`;
   } else {
     const logId = Number(entry?.id);
     const logIdAttr = Number.isFinite(logId) && logId > 0 ? ` data-log-id="${logId}"` : '';
-    inner = `<span class="debug-log-link has-upstream-detail"${logIdAttr}>${messageText}</span>`;
+    inner = `<span class="logs-message-text debug-log-link has-upstream-detail"${logIdAttr}${titleAttr}>${messageText}</span>`;
   }
   return `${sourceBadge}${inner}`;
 }
@@ -671,10 +676,10 @@ function buildLogCostDisplay(entry, costInfo = getLogCostInfo(entry)) {
   const openingTag = `<span class="${costClasses}">`;
 
   if (!costInfo.hasMultiplier) {
-    return `${openingTag}${badgesHtml}<span class="log-cost-effective">${formatCost(costInfo.standardCost)}</span></span>`;
+    return `${openingTag}${badgesHtml}<span class="log-cost-effective">${formatCost(costInfo.standardCost, 3)}</span></span>`;
   }
 
-  return `${openingTag}${badgesHtml}<span class="log-cost-standard">${formatCost(costInfo.standardCost)}</span><span class="log-cost-effective">${formatCost(costInfo.effectiveCost)}</span></span>`;
+  return `${openingTag}${badgesHtml}<span class="log-cost-standard">${formatCost(costInfo.standardCost, 3)}</span><span class="log-cost-effective">${formatCost(costInfo.effectiveCost, 3)}</span></span>`;
 }
 
 function formatDebugSettingValue(setting) {
@@ -745,7 +750,7 @@ async function load(skipLoading = false) {
 
     const params = buildLogsRequestParams();
     const response = await fetchAPIWithAuth('/dashboard/logs?' + params.toString());
-    if (!response.success) throw new Error(response.error || '无法加载请求日志');
+    if (!response.success) throw new Error(response.error || t('logs.loadLogsFailed'));
 
     const data = response.data || [];
 
@@ -793,7 +798,7 @@ async function load(skipLoading = false) {
 
   } catch (error) {
     console.error('加载日志失败:', error);
-    try { if (window.showError) window.showError('无法加载请求日志'); } catch (_) { }
+    try { if (window.showError) window.showError(t('logs.loadLogsFailed')); } catch (_) { }
     renderLogsError();
   } finally {
     logsLoadInFlight = false;
@@ -1035,8 +1040,12 @@ async function abortActiveRequest(button) {
   const id = button.dataset.abortRequestId;
   if (!id || abortingActiveRequests.has(id)) return;
 
-  const confirmMsg = (typeof t === 'function' ? t('logs.abortConfirm') : '') || '确定中断当前渠道的请求吗？尚未发送响应时将切换渠道，已经开始响应则立即终止。';
-  if (!confirm(confirmMsg)) return;
+  const confirmed = await window.showConfirm({
+    message: t('logs.abortConfirm'),
+    confirmText: t('logs.abort'),
+    danger: true
+  });
+  if (!confirmed) return;
 
   abortingActiveRequests.set(id, Number(button.dataset.abortStart) || 0);
   button.disabled = true;
@@ -1044,11 +1053,11 @@ async function abortActiveRequest(button) {
 
   try {
     const { payload } = await fetchAPIWithAuthRaw(`/admin/active-requests/${encodeURIComponent(id)}/abort`, { method: 'POST' });
-    if (!payload.success) throw new Error(payload.error || '中断失败');
+    if (!payload.success) throw new Error(payload.error || t('logs.abortFailed'));
   } catch (e) {
     // 中断没打出去就恢复按钮，否则这一行会永远卡在「中断中」
     abortingActiveRequests.delete(id);
-    alert(e.message || '中断失败');
+    window.showError(e.message || t('logs.abortFailed'));
   }
 }
 
@@ -1067,8 +1076,7 @@ function formatCacheUtilRate(inputTokens, cacheReadTokens, cacheCreationTokens) 
   const c = Number(cacheCreationTokens) || 0;
   const denom = i + r + c;
   if (denom <= 0 || r <= 0) return '';
-  const pct = (r / denom) * 100;
-  return `<span class="token-metric-value" style="color: var(--success-600);">${pct.toFixed(1)}%</span>`;
+  return `<span class="token-metric-value" style="color: var(--success-600);">${window.formatPercent(r / denom)}</span>`;
 }
 
 // buildCacheCreationDisplay 渲染缓存建列，分桶角标按实际数据判定。
@@ -1089,25 +1097,36 @@ function buildCacheCreationDisplay(entry) {
   } else if (cache5m > 0 && cache1h > 0) {
     badge = ' <sup style="color: var(--primary-500); font-size: 0.75em; font-weight: 600;">5m</sup><sup style="color: var(--warning-600); font-size: 0.75em; font-weight: 600;">+1h</sup>';
   }
-  return `<span class="token-metric-value" style="color: var(--primary-600);">${total.toLocaleString()}${badge}</span>`;
+  return `<span class="token-metric-value" style="color: var(--primary-600);" title="${total.toLocaleString()}">${window.formatNumber(total)}${badge}</span>`;
+}
+
+// 状态码配色唯一入口：2xx 成功；429 限流与 499 客户端取消属可预期的告警；
+// 其余 4xx 与 5xx 为错误。进行中请求由 buildActiveRequestStatusHtml 以 status-pending 展示。
+function getLogStatusClass(statusCode) {
+  const code = Number(statusCode);
+  if (code >= 200 && code < 300) return 'status-success';
+  if (code === 429 || code === 499) return 'status-warning';
+  return 'status-error';
+}
+
+// 加载/空/错误占位行：模板内的 data-i18n 不在页面初次翻译范围内，渲染后需补翻译
+function renderLogsStateRow(templateId) {
+  const tbody = document.getElementById('tbody');
+  const row = TemplateEngine.render(templateId, { colspan: getTableColspan() });
+  tbody.innerHTML = '';
+  if (!row) return;
+  tbody.appendChild(row);
+  window.i18n?.translatePage?.();
 }
 
 function renderLogsLoading() {
   displayedLogs = null;
-  const tbody = document.getElementById('tbody');
-  const colspan = getTableColspan();
-  const loadingRow = TemplateEngine.render('tpl-log-loading', { colspan });
-  tbody.innerHTML = '';
-  if (loadingRow) tbody.appendChild(loadingRow);
+  renderLogsStateRow('tpl-log-loading');
 }
 
 function renderLogsError() {
   displayedLogs = null;
-  const tbody = document.getElementById('tbody');
-  const colspan = getTableColspan();
-  const errorRow = TemplateEngine.render('tpl-log-error', { colspan });
-  tbody.innerHTML = '';
-  if (errorRow) tbody.appendChild(errorRow);
+  renderLogsStateRow('tpl-log-error');
 }
 
 let displayedLogs = null;
@@ -1115,13 +1134,10 @@ let displayedLogs = null;
 function renderLogs(data) {
   displayedLogs = data;
   const tbody = document.getElementById('tbody');
-  const colspan = getTableColspan();
   const logMobileLabels = getLogMobileLabels();
 
   if (data.length === 0) {
-    const emptyRow = TemplateEngine.render('tpl-log-empty', { colspan });
-    tbody.innerHTML = '';
-    if (emptyRow) tbody.appendChild(emptyRow);
+    renderLogsStateRow('tpl-log-empty');
     return;
   }
 
@@ -1144,8 +1160,7 @@ function renderLogs(data) {
     const configDisplay = buildLogChannelDisplay(entry);
 
     // 2. 状态码样式
-    const statusClass = (entry.status_code >= 200 && entry.status_code < 300) ?
-      'status-success' : 'status-error';
+    const statusClass = getLogStatusClass(entry.status_code);
     const statusCode = entry.status_code;
 
     // 3. 模型显示（支持重定向与思考等级角标）
@@ -1189,10 +1204,10 @@ function renderLogs(data) {
       const deleteBtnIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M3 6H21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M8 6V4H16V6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 6L18 20H6L5 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M14 11V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
       let buttons = '';
       if (showTestBtn) {
-        buttons += `<button class="test-key-btn" data-action="test" data-channel-id="${entry.channel_id}" data-channel-name="${attr(entry.channel_name)}" data-api-key="${attr(entry.api_key_used)}" data-api-key-hash="${keyHashAttr}" data-model="${attr(entry.model)}" data-client-protocol="${attr(entry.client_protocol)}" title="测试此 API Key">${testBtnIcon}</button>`;
+        buttons += `<button class="test-key-btn" data-action="test" data-channel-id="${entry.channel_id}" data-channel-name="${attr(entry.channel_name)}" data-api-key="${attr(entry.api_key_used)}" data-api-key-hash="${keyHashAttr}" data-model="${attr(entry.model)}" data-client-protocol="${attr(entry.client_protocol)}" title="${attr(t('logs.testKeyAction'))}">${testBtnIcon}</button>`;
       }
       if (showDeleteBtn) {
-        buttons += `<button class="test-key-btn" style="color: var(--error-600);" data-action="delete" data-channel-id="${entry.channel_id}" data-channel-name="${attr(entry.channel_name)}" data-api-key="${attr(entry.api_key_used)}" data-api-key-hash="${keyHashAttr}" title="删除此 API Key">${deleteBtnIcon}</button>`;
+        buttons += `<button class="test-key-btn" style="color: var(--error-600);" data-action="delete" data-channel-id="${entry.channel_id}" data-channel-name="${attr(entry.channel_name)}" data-api-key="${attr(entry.api_key_used)}" data-api-key-hash="${keyHashAttr}" title="${attr(t('logs.deleteKeyAction'))}">${deleteBtnIcon}</button>`;
       }
 
       apiKeyDisplay = `<div class="logs-api-key-group"><code class="logs-api-key-text logs-mono-text">${escapeHtml(entry.api_key_used)}</code><span class="logs-api-key-actions">${buttons}</span></div>`;
@@ -1202,10 +1217,10 @@ function renderLogs(data) {
       apiKeyDisplay = '<span style="color: var(--neutral-500);">-</span>';
     }
 
-    // 6. Token统计显示(0值为空)
+    // 6. Token统计显示(0值为空)：与其他页面一致用 K/M 缩写，精确值放 title
     const tokenValue = (value, color) => {
       if (value === undefined || value === null || value === 0) return '';
-      return `<span class="token-metric-value" style="color: ${color};">${value.toLocaleString()}</span>`;
+      return `<span class="token-metric-value" style="color: ${color};" title="${value.toLocaleString()}">${window.formatNumber(value)}</span>`;
     };
     const inputTokensDisplay = tokenValue(entry.input_tokens, 'var(--neutral-700)');
     const outputTokensDisplay = tokenValue(entry.output_tokens, 'var(--neutral-700)');
@@ -1243,7 +1258,7 @@ function renderLogs(data) {
           <td class="logs-col-cache-write${cacheCreationDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cacheWrite}" style="text-align: right; white-space: nowrap;">${cacheCreationDisplay}</td>
           <td class="logs-col-cache-util${cacheUtilDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cacheUtil}" style="text-align: right; white-space: nowrap;">${cacheUtilDisplay}</td>
           <td class="logs-col-cost${costDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cost}"${costTitleAttr} style="text-align: right; white-space: nowrap;">${costDisplay}</td>
-          <td class="logs-col-message${messageContent ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.message}" style="max-width: 300px; word-break: break-word;">${messageContent}</td>
+          <td class="logs-col-message${messageContent ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.message}">${messageContent}</td>
         </tr>`;
   }
 
@@ -1319,7 +1334,7 @@ function jumpToPage() {
     jumpPageInput.value = ''; // 清空无效输入
     if (window.showError) {
       try {
-        window.showError(`请输入有效的页码 (1-${totalLogsPages})`);
+        window.showError(t('logs.invalidPage', { max: totalLogsPages }));
       } catch (_) { }
     }
     return;
@@ -1474,7 +1489,7 @@ async function loadLogsFilterOptions(range) {
 }
 
 // 从日志/活跃请求数据中提取渠道名与请求模型，去重合并进筛选下拉。
-// 根因：/admin/models 的 distinct 查询滞后于刚落库或进行中的请求，
+// 根因：/dashboard/models 的 distinct 查询滞后于刚落库或进行中的请求，
 // 导致列表里能看到的渠道/模型在下拉里缺失，必须刷新页面才更新。
 // 此处做到“所见即可筛选”，无需刷新。
 function mergeLogsFilterOptions(entries) {
@@ -1652,6 +1667,7 @@ function initLogsPageActions() {
         'prev-logs-page': () => prevLogsPage(),
         'next-logs-page': () => nextLogsPage(),
         'last-logs-page': () => lastLogsPage(),
+        'retry-logs-load': () => load(),
         'close-test-key-modal': () => closeTestKeyModal(),
         'close-debug-log-modal': () => closeDebugLogModal(),
         'run-key-test': () => runKeyTest(),
@@ -2115,16 +2131,16 @@ async function testKey(channelId, channelName, apiKey, model, apiKeyHash = '', c
       updateTestKeyIndexInfo(
         matchedIndex !== null
           ? method === 'hash'
-            ? `匹配到 Key #${matchedIndex + 1}（哈希精确匹配），按日志所用Key测试`
-            : `匹配到 Key #${matchedIndex + 1}（掩码匹配），按日志所用Key测试`
+            ? t('logs.testKeyMatchedHash', { index: matchedIndex + 1 })
+            : t('logs.testKeyMatchedMask', { index: matchedIndex + 1 })
           : matchCount > 1
             ? method === 'hash'
-              ? `匹配到 ${matchCount} 个哈希相同 Key，已回退默认顺序测试`
-              : `匹配到 ${matchCount} 个同掩码 Key，为避免误测将按默认顺序测试`
-            : '未匹配到日志中的 Key，将按默认顺序测试'
+              ? t('logs.testKeyAmbiguousHash', { count: matchCount })
+              : t('logs.testKeyAmbiguousMask', { count: matchCount })
+            : t('logs.testKeyNotMatched')
       );
     } else {
-      updateTestKeyIndexInfo('未获取到渠道 Key，将按默认顺序测试');
+      updateTestKeyIndexInfo(t('logs.testKeyNoKeys'));
     }
 
     // 填充模型下拉列表
@@ -2166,7 +2182,7 @@ async function testKey(channelId, channelName, apiKey, model, apiKeyHash = '', c
     option.textContent = model;
     modelSelect.appendChild(option);
     modelSelect.value = model;
-    updateTestKeyIndexInfo('渠道配置加载失败，将按默认顺序测试');
+    updateTestKeyIndexInfo(t('logs.testKeyChannelLoadFailed'));
   }
 }
 
@@ -2184,7 +2200,7 @@ function resetTestKeyModal() {
   updateTestKeyIndexInfo('');
   // 重置模型选择框
   const modelSelect = document.getElementById('testKeyModel');
-  modelSelect.innerHTML = '<option value="">加载中...</option>';
+  modelSelect.innerHTML = `<option value="">${escapeHtml(t('common.loading'))}</option>`;
 }
 
 async function runKeyTest() {
@@ -2198,7 +2214,7 @@ async function runKeyTest() {
   const streamEnabled = streamCheckbox.checked;
 
   if (!selectedModel) {
-    if (window.showError) window.showError('请选择一个测试模型');
+    if (window.showError) window.showError(t('logs.selectTestModel'));
     return;
   }
 
@@ -2225,12 +2241,12 @@ async function runKeyTest() {
       body: JSON.stringify(testRequest)
     });
 
-    displayKeyTestResult(testResult || { success: false, error: '空响应' });
+    displayKeyTestResult(testResult || { success: false, error: t('error.emptyResponse') });
   } catch (e) {
     console.error('测试失败', e);
     displayKeyTestResult({
       success: false,
-      error: '测试请求失败: ' + e.message
+      error: t('channels.test.requestFailed') + e.message
     });
   } finally {
     document.getElementById('testKeyProgress').classList.remove('show');
@@ -2251,20 +2267,20 @@ function displayKeyTestResult(result) {
     contentDiv.innerHTML = `
           <div style="display: flex; align-items: center; gap: 8px;">
             <span style="font-size: 18px;">✅</span>
-            <strong>${escapeHtml(result.message || 'API测试成功')}</strong>
+            <strong>${escapeHtml(result.message || t('channels.test.apiTestSuccess'))}</strong>
           </div>
         `;
 
-    let details = `响应时间: ${result.duration_ms}ms`;
+    let details = `${escapeHtml(t('channels.test.responseTime'))}: ${result.duration_ms}ms`;
     if (result.status_code) {
-      details += ` | 状态码: ${result.status_code}`;
+      details += ` | ${escapeHtml(t('channels.test.statusCode'))}: ${result.status_code}`;
     }
 
     // 显示响应文本
     if (result.response_text) {
       details += `
             <div style="margin-top: 12px;">
-              <h4 style="margin-bottom: 8px; color: var(--neutral-700);">API 响应内容</h4>
+              <h4 style="margin-bottom: 8px; color: var(--neutral-700);">${escapeHtml(t('channels.test.apiResponseContent'))}</h4>
               <div style="padding: 12px; background: var(--neutral-50); border-radius: 4px; border: 1px solid var(--neutral-200); color: var(--neutral-700); white-space: pre-wrap; font-family: monospace; font-size: 0.9em; max-height: 300px; overflow-y: auto;">${escapeHtml(result.response_text)}</div>
             </div>
           `;
@@ -2275,8 +2291,8 @@ function displayKeyTestResult(result) {
       const responseId = 'api-response-' + Date.now();
       details += `
             <div style="margin-top: 12px;">
-              <h4 style="margin-bottom: 8px; color: var(--neutral-700);">完整 API 响应</h4>
-              <button type="button" class="btn btn-secondary btn-sm" data-action="toggle-response" data-response-target="${responseId}" style="margin-bottom: 8px;">显示/隐藏 JSON</button>
+              <h4 style="margin-bottom: 8px; color: var(--neutral-700);">${escapeHtml(t('channels.test.fullApiResponse'))}</h4>
+              <button type="button" class="btn btn-secondary btn-sm" data-action="toggle-response" data-response-target="${responseId}" style="margin-bottom: 8px;">${escapeHtml(t('channels.test.toggleResponse'))}</button>
               <div id="${responseId}" style="display: none; padding: 12px; background: var(--neutral-50); border-radius: 4px; border: 1px solid var(--neutral-200); color: var(--neutral-700); white-space: pre-wrap; font-family: monospace; font-size: 0.85em; max-height: 400px; overflow-y: auto;">${escapeHtml(JSON.stringify(result.api_response, null, 2))}</div>
             </div>
           `;
@@ -2288,22 +2304,22 @@ function displayKeyTestResult(result) {
     contentDiv.innerHTML = `
           <div style="display: flex; align-items: center; gap: 8px;">
             <span style="font-size: 18px;">❌</span>
-            <strong>测试失败</strong>
+            <strong>${escapeHtml(t('channels.msg.testFailed'))}</strong>
           </div>
         `;
 
-    let details = `<p style="color: var(--error-600); margin-top: 8px;">${escapeHtml(result.error || '未知错误')}</p>`;
+    let details = `<p style="color: var(--error-600); margin-top: 8px;">${escapeHtml(result.error || t('error.unknown'))}</p>`;
 
     if (result.status_code) {
-      details += `<p style="margin-top: 8px;">状态码: ${result.status_code}</p>`;
+      details += `<p style="margin-top: 8px;">${escapeHtml(t('channels.test.statusCode'))}: ${result.status_code}</p>`;
     }
 
     if (result.raw_response) {
       const rawId = 'raw-response-' + Date.now();
       details += `
             <div style="margin-top: 12px;">
-              <h4 style="margin-bottom: 8px; color: var(--neutral-700);">原始响应</h4>
-              <button type="button" class="btn btn-secondary btn-sm" data-action="toggle-response" data-response-target="${rawId}" style="margin-bottom: 8px;">显示/隐藏</button>
+              <h4 style="margin-bottom: 8px; color: var(--neutral-700);">${escapeHtml(t('channels.test.rawResponse'))}</h4>
+              <button type="button" class="btn btn-secondary btn-sm" data-action="toggle-response" data-response-target="${rawId}" style="margin-bottom: 8px;">${escapeHtml(t('channels.test.toggleResponse'))}</button>
               <div id="${rawId}" style="display: none; padding: 12px; background: var(--neutral-50); border-radius: 4px; border: 1px solid var(--neutral-200); color: var(--error-700); white-space: pre-wrap; font-family: monospace; font-size: 0.85em; max-height: 400px; overflow-y: auto;">${escapeHtml(result.raw_response)}</div>
             </div>
           `;
@@ -2317,7 +2333,12 @@ function displayKeyTestResult(result) {
 async function deleteKeyFromLog(channelId, channelName, maskedApiKey, apiKeyHash = '') {
   if (!channelId || !maskedApiKey) return;
 
-  const confirmDel = confirm(`确定删除渠道“${channelName || ('#' + channelId)}”中的此Key (${maskedApiKey}) 吗？`);
+  const confirmDel = await window.showConfirm({
+    title: t('logs.deleteKeyTitle'),
+    message: t('logs.deleteKeyConfirm', { channel: channelName || ('#' + channelId), key: maskedApiKey }),
+    confirmText: t('common.delete'),
+    danger: true
+  });
   if (!confirmDel) return;
 
   try {
@@ -2326,11 +2347,9 @@ async function deleteKeyFromLog(channelId, channelName, maskedApiKey, apiKeyHash
     const { keyIndex, matchCount, method } = await resolveKeyIndexForLogEntry(apiKeys, maskedApiKey, apiKeyHash);
     if (keyIndex === null) {
       if (matchCount > 1) {
-        alert(method === 'hash'
-          ? '匹配到多个同哈希 Key，为避免误删已阻止操作，请到渠道管理页手动删除。'
-          : '匹配到多个同掩码 Key，为避免误删已阻止操作，请到渠道管理页手动删除。');
+        window.showWarning(t(method === 'hash' ? 'logs.deleteKeyAmbiguousHash' : 'logs.deleteKeyAmbiguousMask'));
       } else {
-        alert('未能匹配到该Key，请检查渠道配置。');
+        window.showError(t('logs.deleteKeyNotMatched'));
       }
       return;
     }
@@ -2338,15 +2357,20 @@ async function deleteKeyFromLog(channelId, channelName, maskedApiKey, apiKeyHash
     // 删除Key
     const delResult = await fetchDataWithAuth(`/admin/channels/${channelId}/keys/${keyIndex}`, { method: 'DELETE' });
 
-    alert(`已删除 Key #${keyIndex + 1} (${maskedApiKey})`);
+    window.showSuccess(t('logs.keyDeleted', { index: keyIndex + 1, key: maskedApiKey }));
 
     // 如果没有剩余Key，询问是否删除渠道
     if (delResult && delResult.remaining_keys === 0) {
-      const delChannel = confirm('该渠道已无可用Key，是否删除整个渠道？');
+      const delChannel = await window.showConfirm({
+        title: t('logs.deleteChannelTitle'),
+        message: t('logs.deleteChannelConfirm'),
+        confirmText: t('common.delete'),
+        danger: true
+      });
       if (delChannel) {
         const chResp = await fetchAPIWithAuth(`/admin/channels/${channelId}`, { method: 'DELETE' });
-        if (!chResp.success) throw new Error(chResp.error || '删除渠道失败');
-        alert('渠道已删除');
+        if (!chResp.success) throw new Error(chResp.error || t('logs.deleteChannelFailed'));
+        window.showSuccess(t('logs.channelDeleted'));
       }
     }
 
@@ -2354,7 +2378,7 @@ async function deleteKeyFromLog(channelId, channelName, maskedApiKey, apiKeyHash
     load();
   } catch (e) {
     console.error('删除Key失败', e);
-    alert(e.message || '删除Key失败');
+    window.showError(e.message || t('logs.deleteKeyFailed'));
   }
 }
 
@@ -2540,7 +2564,7 @@ async function showDebugLogModalFromUrl(url, opts = {}) {
         error.style.display = '';
         return;
       }
-      throw new Error(payload.error || '加载失败');
+      throw new Error(payload.error || t('logs.loadFailed'));
     }
 
     const data = payload.data || {};
@@ -2562,7 +2586,7 @@ async function showDebugLogModalFromUrl(url, opts = {}) {
     }
   } catch (e) {
     loading.style.display = 'none';
-    error.textContent = e.message || '加载失败';
+    error.textContent = e.message || t('logs.loadFailed');
     error.style.display = '';
   }
 }
@@ -2806,7 +2830,7 @@ async function refreshDebugMergedResponse(data, tab) {
   } catch (e) {
     window.MarkdownRenderer.renderResponse(view.mergedId, {
       reasoning: '',
-      content: e?.message || '合并响应失败',
+      content: e?.message || t('logs.debugMergeFailed'),
     });
   } finally {
     state.loading = false;

@@ -99,11 +99,12 @@ jobs:
         with:
           ref: refs/tags/${{ needs.metadata.outputs.tag }}
 
+      # Caches saved under a tag ref are invisible to other tags, so only restore
+      # the per-target caches that test.yml cross-build saves on master.
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: ./.github/actions/setup-go
         with:
-          go-version: '1.27.x'
-          cache: false
+          cache-key: cross-${{ matrix.goos }}-${{ matrix.goarch }}
 
       - name: Build binary
         shell: bash
@@ -181,6 +182,43 @@ jobs:
             dist/ccload-*
             dist/checksums.txt
 
+  homebrew:
+    name: Update Homebrew stable formula
+    needs: [metadata, release]
+    if: needs.metadata.outputs.channel == 'stable'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: homebrew-stable
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v7
+        with:
+          ref: master
+
+      - name: Update formula from published checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern checksums.txt --dir "$RUNNER_TEMP/homebrew"
+          python3 .github/scripts/update-homebrew.py "$RELEASE_TAG" \
+            "$RUNNER_TEMP/homebrew/checksums.txt" Formula/ccload.rb
+          ruby -c Formula/ccload.rb
+          git diff --check
+          if git diff --quiet -- Formula/ccload.rb; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/ccload.rb
+          git commit -m "chore(homebrew): update ccload to $RELEASE_TAG"
+          git push origin HEAD:master
+
   docker:
     name: Publish ${{ needs.metadata.outputs.channel }} container image
     needs: [metadata, build]
@@ -235,6 +273,10 @@ jobs:
           push: true
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ steps.meta.outputs.tags }}
+          # Registry cache is shared across tag runs (GHA cache is not); it keeps the
+          # QEMU-emulated arm64 apt-get layer until the base image digest changes.
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
       - name: Promote beta alias for stable releases
         if: needs.metadata.outputs.channel == 'stable'

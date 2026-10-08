@@ -23,7 +23,7 @@
     const groupClass = config.groupClass || '';
     const checkboxGroupClass = config.checkboxGroupClass || groupClass;
     const timeRangeGroupClass = joinClasses(groupClass, config.timeRangeGroupClass);
-    const timeRangeControlClass = joinClasses('filter-control--compact', 'filter-control--time-range', config.timeRangeControlClass);
+    const timeRangeControlClass = joinClasses('filter-control--compact', 'filter-control--time-range');
     const channelIdGroupClass = joinClasses(groupClass, config.channelIdGroupClass);
     const channelIdControlClass = joinClasses('filter-control--narrow', config.channelIdControlClass);
     const authTokenGroupClass = joinClasses(groupClass, 'filter-group--auth-token', config.authTokenGroupClass);
@@ -42,7 +42,7 @@
             </div>`;
     return {
       timeRange: buildFilterGroup(
-        `${buildFilterLabel('f_hours', 'stats.timeRange', '时间范围')}
+        `${buildFilterLabel('f_hours', 'stats.timeRange', '范围')}
         <div id="f_hours_custom_range_host" class="filter-custom-range-host">
           ${buildSelect('f_hours', '\n                <!-- 动态生成选项 by date-range-selector.js -->\n              ', timeRangeControlClass)}
         </div>`,
@@ -69,11 +69,6 @@
       modelText: buildFilterGroup(
         `${buildFilterLabel('f_model', 'common.model', '模型')}
         ${buildInput('text', 'f_model', 'stats.containsTextPlaceholder', '包含文本...')}`,
-        groupClass
-      ),
-      modelSelect: buildFilterGroup(
-        `${buildFilterLabel('f_model', 'common.model', '模型')}
-        ${buildSelect('f_model', '\n                <option value="" data-i18n="trend.allModels">全部模型</option>\n                <!-- 动态加载模型列表 -->\n              ', 'filter-control--wide')}`,
         groupClass
       ),
       channelNameCombobox: buildFilterGroup(
@@ -117,11 +112,12 @@
         joinClasses(groupClass, 'filter-group--status')
       ),
       logSource: buildFilterGroup(
-        `${buildFilterLabel('f_log_source', 'logs.logSource', '日志来源')}
+        `${buildFilterLabel('f_log_source', 'logs.logSource', '来源')}
         ${buildSelect('f_log_source', `
                 <option value="proxy" data-i18n="logs.sourceProxy">请求日志</option>
                 <option value="detection" data-i18n="logs.sourceDetection">检测日志</option>
                 <option value="checkin" data-i18n="logs.sourceCheckin">签到</option>
+                <option value="count_tokens" data-i18n="logs.sourceCountTokens">Token 计数</option>
                 <option value="jev">Jev</option>
                 <option value="all" data-i18n="logs.sourceAll">全部日志</option>
               `, 'filter-control--compact')}`,
@@ -154,7 +150,6 @@
       controlsClass: 'filter-controls logs-filter-controls',
       groupClass: 'logs-filter-group',
       timeRangeGroupClass: 'logs-filter-group--range',
-      timeRangeControlClass: 'logs-filter-control--range',
       authTokenGroupClass: 'logs-filter-group--token',
       authTokenControlClass: 'logs-filter-control--token',
       actionsClass: 'logs-filter-actions',
@@ -165,7 +160,7 @@
       controlsClass: 'filter-controls trend-filter-controls',
       groupClass: '',
       actionsClass: '',
-      items: ['timeRange', 'clientProtocol', 'channelNameCombobox', 'modelSelect', 'authToken', 'filterButton']
+      items: ['timeRange', 'clientProtocol', 'channelNameCombobox', 'modelCombobox', 'authToken', 'filterButton']
     }
   };
 

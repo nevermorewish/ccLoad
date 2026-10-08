@@ -109,19 +109,29 @@
       return appendStatsTimeRangeParams(params, getStatsFilters());
     }
 
-    async function loadStats() {
+    let statsLoadSeq = 0;
+
+    // background=true 为自动刷新：不显示加载态、失败时保留现有内容，并恢复滚动位置
+    async function loadStats(options = {}) {
+      const background = options.background === true && Boolean(statsData);
+      const seq = ++statsLoadSeq;
       try {
-        renderStatsLoading();
+        if (!background) renderStatsLoading();
 
         const params = buildStatsRequestParams();
+        params.set('health_timeline', '1');
         // 后端返回格式: {"success":true,"data":{"stats":[...],"duration_seconds":...,"rpm_stats":{...},"is_today":...}}
-        statsData = (await fetchDataWithAuth('/dashboard/stats?' + params.toString())) || { stats: [] };
+        const nextStatsData = (await fetchDataWithAuth('/dashboard/stats?' + params.toString())) || { stats: [] };
+        // 筛选连续变化时丢弃过期响应
+        if (seq !== statsLoadSeq) return;
+        statsData = nextStatsData;
         durationSeconds = statsData.duration_seconds || 1; // 防止除零
         rpmStats = statsData.rpm_stats || null;
         isToday = statsData.is_today !== false;
         // 初始化时应用默认排序（优先级→渠道名称→模型名称）
         applyDefaultSorting();
 
+        const scrollState = background ? captureStatsScroll() : null;
         renderStatsTable();
         updateRpmHeader(); // 更新表头标题
 
@@ -129,26 +139,69 @@
         if (currentView === 'chart') {
           renderCharts();
         }
+        if (scrollState) restoreStatsScroll(scrollState);
 
       } catch (error) {
+        if (seq !== statsLoadSeq) return;
         console.error('Failed to load stats:', error);
-        if (window.showError) try { window.showError(t('stats.noData')); } catch(_){}
+        // 后台刷新失败保留已有数据，等待下一轮
+        if (background) return;
+        if (window.showError) try { window.showError(t('stats.loadFailed')); } catch(_){}
         renderStatsError();
       }
     }
 
-    function renderStatsLoading() {
+    // 表格容器可横向滚动，整体重渲染前后保存/恢复窗口与容器的滚动位置
+    function captureStatsScroll() {
+      const container = document.getElementById('stats-table-view');
+      return {
+        x: window.scrollX,
+        y: window.scrollY,
+        left: container ? container.scrollLeft : 0,
+        top: container ? container.scrollTop : 0
+      };
+    }
+
+    function restoreStatsScroll(state) {
+      const container = document.getElementById('stats-table-view');
+      if (container) {
+        container.scrollLeft = state.left;
+        container.scrollTop = state.top;
+      }
+      if (window.scrollX !== state.x || window.scrollY !== state.y) {
+        window.scrollTo(state.x, state.y);
+      }
+    }
+
+    function statsColspan() {
+      return STATS_TABLE_COLUMNS - (window.shouldHideChannels?.() ? 1 : 0);
+    }
+
+    // 模板不在文档树内，translatePage 覆盖不到，文本需在渲染时传入
+    function renderStatsStateRow(templateId, data) {
       const tbody = document.getElementById('stats_tbody');
       tbody.innerHTML = '';
-      const row = TemplateEngine.render('tpl-stats-loading', { colspan: STATS_TABLE_COLUMNS - (window.shouldHideChannels?.() ? 1 : 0) });
+      const row = TemplateEngine.render(templateId, { colspan: statsColspan(), ...data });
       if (row) tbody.appendChild(row);
     }
 
+    function renderStatsLoading() {
+      renderStatsStateRow('tpl-stats-loading', { loadingText: t('stats.loading') });
+    }
+
     function renderStatsError() {
-      const tbody = document.getElementById('stats_tbody');
-      tbody.innerHTML = '';
-      const row = TemplateEngine.render('tpl-stats-error', { colspan: STATS_TABLE_COLUMNS - (window.shouldHideChannels?.() ? 1 : 0) });
-      if (row) tbody.appendChild(row);
+      renderStatsStateRow('tpl-stats-error', {
+        title: t('stats.loadFailed'),
+        message: t('stats.checkNetwork'),
+        retryText: t('common.retry')
+      });
+    }
+
+    function renderStatsEmpty() {
+      renderStatsStateRow('tpl-stats-empty', {
+        title: t('stats.noData'),
+        message: t('stats.adjustFilter')
+      });
     }
 
     // 表格排序功能
@@ -312,13 +365,17 @@
       const duration = Number(durationSeconds) || 0;
       const parts = [];
 
-      if (firstByte > 0) {
-        parts.push(buildStatsTimingValue(firstByte, window.getFirstByteTimingColor(firstByte)));
-      }
-      if (duration > 0) {
-        if (parts.length > 0) parts.push('<span class="stats-timing-separator">/</span>');
-        parts.push(buildStatsTimingValue(duration, window.getDurationTimingColor(duration)));
-      }
+      if (firstByte <= 0 && duration <= 0) return '';
+
+      // 两段始终同时出现，缺失的一段用占位符，避免单个数值分不清是首字还是耗时
+      const placeholder = '<span class="stats-value-muted">—</span>';
+      parts.push(firstByte > 0
+        ? buildStatsTimingValue(firstByte, window.getFirstByteTimingColor(firstByte))
+        : placeholder);
+      parts.push('<span class="stats-timing-separator">/</span>');
+      parts.push(duration > 0
+        ? buildStatsTimingValue(duration, window.getDurationTimingColor(duration))
+        : placeholder);
 
       return parts.join('');
     }
@@ -329,8 +386,7 @@
       const c = Number(cacheCreationTokens) || 0;
       const denom = i + r + c;
       if (denom <= 0 || r <= 0) return '';
-      const pct = (r / denom) * 100;
-      return `<span class="stats-value-success">${pct.toFixed(1)}%</span>`;
+      return `<span class="stats-value-success">${window.formatPercent(r / denom)}</span>`;
     }
 
     function buildStatsModelDisplay(entry) {
@@ -350,9 +406,7 @@
       const tbody = document.getElementById('stats_tbody');
 
       if (!statsData || !statsData.stats || statsData.stats.length === 0) {
-        tbody.innerHTML = '';
-        const emptyRow = TemplateEngine.render('tpl-stats-empty', { colspan: STATS_TABLE_COLUMNS - (window.shouldHideChannels?.() ? 1 : 0) });
-        if (emptyRow) tbody.appendChild(emptyRow);
+        renderStatsEmpty();
         return;
       }
 
@@ -362,9 +416,7 @@
         : statsData.stats;
 
       if (filteredStats.length === 0) {
-        tbody.innerHTML = '';
-        const emptyRow = TemplateEngine.render('tpl-stats-empty', { colspan: STATS_TABLE_COLUMNS - (window.shouldHideChannels?.() ? 1 : 0) });
-        if (emptyRow) tbody.appendChild(emptyRow);
+        renderStatsEmpty();
         return;
       }
 
@@ -445,6 +497,7 @@
           channelId: entry.channel_id,
           channelNameAttr: entry.channel_name,
           channelName: entry.channel_name,
+          channelLogsTitle: t('stats.viewChannelLogsTitle'),
           channelIdBadge: entry.channel_id ? `<span class="channel-id">(ID: ${entry.channel_id})</span>` : '',
           healthIndicator: healthIndicator,
           modelDisplay: modelDisplay,
@@ -548,6 +601,7 @@
 
       const totalRow = TemplateEngine.render('tpl-stats-total', {
         colspan: window.shouldHideChannels?.() ? 1 : 2,
+        totalLabel: t('stats.total'),
         successDisplay: totalSuccessDisplay,
         errorCount: formatNumber(totalError),
         rpm: totalRpmHtml,
@@ -555,10 +609,15 @@
         timingCellClass: totalTimingText ? '' : 'mobile-empty-cell',
         avgSpeed: totalSpeedText,
         speedCellClass: totalSpeedText ? '' : 'mobile-empty-cell',
-        inputTokens: formatNumber(totalInputTokens),
-        outputTokens: formatNumber(totalOutputTokens),
-        cacheReadTokens: formatNumber(totalCacheRead),
-        cacheCreationTokens: formatNumber(totalCacheCreation),
+        // 与数据行一致：0 值留空，避免整列空白时合计行单独冒出 0
+        inputTokens: totalInputTokens ? formatNumber(totalInputTokens) : '',
+        outputTokens: totalOutputTokens ? formatNumber(totalOutputTokens) : '',
+        cacheReadTokens: totalCacheRead ? formatNumber(totalCacheRead) : '',
+        cacheCreationTokens: totalCacheCreation ? formatNumber(totalCacheCreation) : '',
+        inputCellClass: totalInputTokens ? '' : 'mobile-empty-cell',
+        outputCellClass: totalOutputTokens ? '' : 'mobile-empty-cell',
+        cacheReadCellClass: totalCacheRead ? '' : 'mobile-empty-cell',
+        cacheCreateCellClass: totalCacheCreation ? '' : 'mobile-empty-cell',
         cacheUtilText: buildCacheUtilRate(totalInputTokens, totalCacheRead, totalCacheCreation),
         costText: buildStatsCostDisplay(totalCost, totalEffectiveCost),
         mobileLabelSummary: t('stats.total'),
@@ -579,8 +638,7 @@
 
     function formatSuccessRateText(successRate, totalRequests) {
       if (!(totalRequests > 0)) return '';
-      const text = successRate.toFixed(1) + '%';
-      return text.endsWith('.0%') ? text.slice(0, -3) + '%' : text;
+      return window.formatPercent(successRate / 100);
     }
 
     function getSuccessRateClass(successRate) {
@@ -970,14 +1028,13 @@
         const rateLimited = point.rate_limited || 0;
         const realErrors = (point.error || 0) - rateLimited;
 
-        // 配色：所有失败都是限流 → 蓝色；有真实错误 → 按成功率分级(绿/橙/红)
+        // 配色：所有失败都是限流(429) → 警告色；有真实错误 → 按成功率分级(绿/橙/红)
         const className = (realErrors === 0 && rateLimited > 0)
           ? 'rate-limited'
           : rate >= 0.95 ? 'healthy' : rate >= 0.80 ? 'warning' : 'critical';
 
-        // 快速时间格式化（避免 toLocaleString 的性能开销）
-        const d = new Date(point.ts);
-        const timeStr = `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+        // 快速时间格式化（避免 toLocaleString 的性能开销），与趋势图统一 MM-DD HH:mm
+        const timeStr = window.formatMonthDayTime(point.ts);
 
         // 构建 tooltip - 使用条件拼接减少数组操作
         let title = `${timeStr}
@@ -996,16 +1053,16 @@ ${t('stats.tooltipCacheRead')}: ${formatNumber(point.cache_read_tokens)}`;
         if (point.cache_creation_tokens > 0) title += `
 ${t('stats.tooltipCacheWrite')}: ${formatNumber(point.cache_creation_tokens)}`;
         if (point.cost > 0) title += `
-${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
+${t('stats.tooltipCost')}: ${formatCost(point.cost)}`;
 
         blocks[i] = `<span class="health-block ${className}" title="${escapeHtml(title)}"></span>`;
       }
 
       // 构建完整 HTML - 成功率颜色：>=95%绿色, >=80%橙色, <80%红色
-      const ratePercent = (currentRate * 100).toFixed(1);
+      const ratePercent = window.formatPercent(currentRate);
       const rateColor = currentRate >= 0.95 ? 'var(--success-600)' :
                         currentRate >= 0.80 ? 'var(--warning-600)' : 'var(--error-600)';
-      return `<div class="health-indicator"><span class="health-track">${blocks.join('')}</span><span class="health-rate" style="--health-rate-color:${rateColor};">${ratePercent}%</span></div>`;
+      return `<div class="health-indicator"><span class="health-track">${blocks.join('')}</span><span class="health-rate" style="--health-rate-color:${rateColor};">${ratePercent}</span></div>`;
     }
 
     // 注销功能（已由 ui.js 的 onLogout 统一处理）
@@ -1177,6 +1234,11 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       const statsTableBody = document.getElementById('stats_tbody');
       if (statsTableBody) {
         statsTableBody.addEventListener('click', (e) => {
+          if (e.target.closest('[data-stats-retry]')) {
+            loadStats();
+            return;
+          }
+
           // 处理渠道名称点击
           const channelLink = e.target.closest('.channel-link[data-channel-name]');
           if (channelLink) {
@@ -1209,7 +1271,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
 
       // 自动刷新（system_settings.auto_refresh_interval_seconds，0=禁用）
       if (typeof window.createAutoRefresh === 'function') {
-        window.createAutoRefresh({ load: loadStats }).init();
+        window.createAutoRefresh({ load: () => loadStats({ background: true }) }).init();
       }
       }
     });
@@ -1277,9 +1339,8 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
 
     // 渲染所有饼图
     function renderCharts() {
-      if (!statsData || !statsData.stats || statsData.stats.length === 0) {
-        return;
-      }
+      // 空数据也要走 renderPieChart，否则旧图残留
+      const stats = (statsData && statsData.stats) || [];
 
       // 聚合数据（只统计成功调用）
       const channelCallsMap = {}; // 渠道 -> 成功调用次数
@@ -1289,7 +1350,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       const channelCostMap = {}; // 渠道 -> 成本（美元）
       const modelCostMap = {}; // 模型 -> 成本（美元）
 
-      for (const entry of statsData.stats) {
+      for (const entry of stats) {
         const channelName = entry.channel_name || t('stats.unknownChannel');
         const modelName = entry.model || t('stats.unknownModel');
         const successCount = entry.success || 0;
@@ -1368,7 +1429,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
               fontSize: 14
             }
           }
-        });
+        }, true);
         return;
       }
 
@@ -1383,6 +1444,8 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       const total = data.reduce((sum, item) => sum + item.value, 0);
 
       const option = {
+        // 合并刷新时隐藏可能残留的空状态标题
+        title: { show: false },
         tooltip: {
           trigger: 'item',
           backgroundColor: chartTheme.tooltipBg,
@@ -1397,14 +1460,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
               formattedValue = formatCostPair(std, value);
               return `${params.name}<br/>${formattedValue} (${params.percent}%)`;
             }
-            // 原有逻辑：大数值缩写
-            if (value >= 1000000) {
-              formattedValue = (value / 1000000).toFixed(2) + 'M';
-            } else if (value >= 1000) {
-              formattedValue = (value / 1000).toFixed(2) + 'K';
-            } else {
-              formattedValue = value.toLocaleString();
-            }
+            formattedValue = window.formatNumber(value);
             return `${params.name}<br/>${formattedValue}${unit} (${params.percent}%)`;
           }
         },
@@ -1421,8 +1477,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
           formatter: function(name) {
             const item = data.find(d => d.name === name);
             if (item && total > 0) {
-              const percent = ((item.value / total) * 100).toFixed(1);
-              return `${name} (${percent}%)`;
+              return `${name} (${window.formatPercent(item.value / total)})`;
             }
             return name;
           }
@@ -1460,7 +1515,8 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         }]
       };
 
-      chart.setOption(option, true);
+      // 合并更新：自动刷新时保留图表实例与图例状态，避免闪烁
+      chart.setOption(option);
     }
 
     // 窗口大小变化时重新调整图表

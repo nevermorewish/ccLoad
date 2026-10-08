@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"slices"
@@ -305,6 +306,77 @@ func TestHandleListChannelsExactAndFuzzyFilters(t *testing.T) {
 				t.Fatalf("names=%v, want %v", gotNames, tt.wantNames)
 			}
 		})
+	}
+}
+
+func TestHandleListChannelsSortsBeforePagination(t *testing.T) {
+	server, store, cleanup := setupAdminTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	fixtures := []struct {
+		name     string
+		priority int
+		enabled  bool
+	}{
+		{"charlie", 30, true},
+		{"alpha", 10, false},
+		{"delta", 20, true},
+		{"bravo", 20, false},
+	}
+	for _, fixture := range fixtures {
+		if _, err := store.CreateConfig(ctx, &model.Config{
+			Name:         fixture.name,
+			URLs:         model.ChannelURLs{{URL: "https://api.example.com"}},
+			Priority:     fixture.priority,
+			ModelEntries: []model.ModelEntry{{Model: "m"}},
+			Enabled:      fixture.enabled,
+		}); err != nil {
+			t.Fatalf("CreateConfig(%s) failed: %v", fixture.name, err)
+		}
+	}
+
+	listNames := func(t *testing.T, query string) []string {
+		t.Helper()
+		var names []string
+		for offset := 0; offset < len(fixtures); offset += 2 {
+			c, w := newTestContext(t, newRequest(http.MethodGet, fmt.Sprintf("/admin/channels?%s&limit=2&offset=%d", query, offset), nil))
+			server.handleListChannels(c)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			for _, item := range mustParseAPIResponse[[]ChannelWithCooldown](t, w.Body.Bytes()).Data {
+				names = append(names, item.Name)
+			}
+		}
+		return names
+	}
+
+	tests := []struct {
+		query string
+		want  []string
+	}{
+		{"", []string{"charlie", "bravo", "delta", "alpha"}},
+		{"sort=priority&order=asc", []string{"alpha", "bravo", "delta", "charlie"}},
+		{"sort=name", []string{"alpha", "bravo", "charlie", "delta"}},
+		{"sort=name&order=desc", []string{"delta", "charlie", "bravo", "alpha"}},
+		{"sort=enabled", []string{"charlie", "delta", "bravo", "alpha"}},
+		{"sort=enabled&order=asc", []string{"bravo", "alpha", "charlie", "delta"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			if got := listNames(t, tt.query); !slices.Equal(got, tt.want) {
+				t.Fatalf("names=%v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	for _, query := range []string{"sort=models", "sort=name&order=up"} {
+		c, w := newTestContext(t, newRequest(http.MethodGet, "/admin/channels?"+query, nil))
+		server.handleListChannels(c)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status=%d, want 400 body=%s", query, w.Code, w.Body.String())
+		}
 	}
 }
 
@@ -961,11 +1033,16 @@ func TestHandleGetChannelIncludesActiveModelCooldowns(t *testing.T) {
 	}
 }
 
-func TestHandleChannelModelStatsReturnsTodayStatsForRequestedChannel(t *testing.T) {
+func TestHandleChannelEditorModelStatsCoverTodayForRequestedChannel(t *testing.T) {
 	server, store, cleanup := setupAdminTestServer(t)
 	defer cleanup()
 
 	ctx := context.Background()
+	server.urlSelector = NewURLSelector()
+	server.configService = NewConfigService(store)
+	if err := server.configService.LoadDefaults(ctx); err != nil {
+		t.Fatalf("加载系统设置失败: %v", err)
+	}
 	created, err := store.CreateConfig(ctx, &model.Config{
 		Name:         "model-stats-channel",
 		URLs:         model.ChannelURLs{{URL: "https://api.example.com"}},
@@ -1036,19 +1113,24 @@ func TestHandleChannelModelStatsReturnsTodayStatsForRequestedChannel(t *testing.
 		}
 	}
 
-	path := "/admin/channels/" + strconv.FormatInt(created.ID, 10) + "/model-stats"
+	path := "/admin/channels/" + strconv.FormatInt(created.ID, 10) + "/editor"
 	c, w := newTestContext(t, newRequest(http.MethodGet, path, nil))
 	c.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(created.ID, 10)}}
-	server.HandleChannelModelStats(c)
+	server.HandleChannelEditor(c)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d, want %d body=%s", w.Code, http.StatusOK, w.Body.String())
 	}
 
-	resp := mustParseAPIResponse[[]ChannelModelStats](t, w.Body.Bytes())
-	if len(resp.Data) != 1 {
-		t.Fatalf("stats=%v, want one model", resp.Data)
+	resp := mustParseAPIResponse[struct {
+		ModelStats struct {
+			Items []ChannelModelStats `json:"items"`
+		} `json:"model_stats"`
+	}](t, w.Body.Bytes())
+	items := resp.Data.ModelStats.Items
+	if len(items) != 1 {
+		t.Fatalf("stats=%v, want one model", items)
 	}
-	got := resp.Data[0]
+	got := items[0]
 	if got.Model != "external-model" || got.Success != 2 || got.Error != 1 || got.Total != 3 {
 		t.Fatalf("stats=%+v, want model=external-model success=2 error=1 total=3", got)
 	}

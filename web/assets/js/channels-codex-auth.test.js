@@ -3,20 +3,17 @@ const assert = require('node:assert/strict');
 
 const {
   applyChannelAuthEditorMode,
-  cancelAntigravityOAuth,
-  cancelAnthropicOAuth,
-  cancelXAIOAuth,
+  cancelOAuth,
   cancelOAuthCredentialCleanup,
   cleanupOAuthCredentials,
-  pollCodexOAuthStatus,
   copyCodexOAuthLink,
   copyOAuthCredential,
-  cancelCodexOAuth,
   importOAuthCredentials,
-  pollAntigravityOAuthStatus,
-  pollAnthropicOAuthStatus,
-  pollXAIOAuthStatus,
   getOAuthUsageState,
+  getAnthropicResetCreditsState,
+  syncAnthropicResetCreditsFromChannels,
+  confirmAnthropicQuotaReset,
+  redeemAnthropicResetCredit,
   snapshotOAuthUsageStates,
   syncOAuthUsageFromChannels,
   maybeAutoRefreshActiveChannelUsage,
@@ -31,22 +28,312 @@ const {
   zedOAuthStartOptions,
   openOAuthCredentialImportDialog,
   openOAuthLoginDialog,
+  pollOAuthStatus,
   setOAuthCredentialView,
   setupOAuthActions,
   showOAuthSession,
   submitXAICredentialBatch,
-  submitAntigravityOAuthCallback,
-  submitAnthropicCookieAuth,
-  submitAnthropicOAuthCode,
-  submitCodexOAuthCallback,
   submitCodexPersonalAccessToken,
   submitCursorCredential,
   looksLikeCursorCLISessionSecret,
   CURSOR_USER_API_KEYS_URL,
   submitCodeBuddyCredentialFile,
   loadCodeBuddyCredentialFile,
-  submitXAIOAuthCallback
+  submitOAuthCallback
 } = require('./channels-codex-auth.js');
+
+async function loadAnthropicUsage(channelID, fetcher) {
+  return refreshOAuthUsage(channelID, async () => ({
+    windows: [], anthropic_reset_credits: await fetcher()
+  }), { reload: false });
+}
+
+test('Claude usage refresh includes reset credits and ignores an older response', async () => {
+  const previousChannels = global.channels;
+  const previousWindow = global.window;
+  const saved = { eligible: true, available_count: 1, credits: [{ resets_left: 1 }] };
+  global.channels = [{ id: 8101, auth_type: 'anthropic_oauth', oauth_usage: { windows: [], anthropic_reset_credits: saved } }];
+  global.window = { t: key => key };
+  let resolveFirst;
+  const first = new Promise(resolve => { resolveFirst = resolve; });
+  const latest = { eligible: true, available_count: 2, credits: [{ resets_left: 2 }], fetched_at: '2026-10-02T01:00:00Z' };
+  try {
+    assert.deepEqual(getAnthropicResetCreditsState(8101).data, saved);
+    const older = refreshOAuthUsage(8101, (url, options) => {
+      assert.equal(url, '/admin/channels/8101/oauth-usage');
+      assert.equal(options.method, 'POST');
+      return first;
+    }, { reload: false });
+    await loadAnthropicUsage(8101, async () => latest);
+    resolveFirst({ windows: [], anthropic_reset_credits: saved });
+    await older;
+    assert.deepEqual(getAnthropicResetCreditsState(8101), { status: 'ready', data: latest });
+    global.channels[0] = { ...global.channels[0], updated_at: '2026-10-02T01:00:00Z',
+      oauth_usage: { windows: [], anthropic_reset_credits: latest } };
+    syncAnthropicResetCreditsFromChannels(global.channels);
+    assert.deepEqual(getAnthropicResetCreditsState(8101), { status: 'ready', data: latest });
+    await refreshOAuthUsage(8101, async () => ({ windows: [] }), { reload: false });
+    assert.equal(getAnthropicResetCreditsState(8101).data, null);
+  } finally {
+    global.channels = previousChannels;
+    global.window = previousWindow;
+  }
+});
+
+test('Claude cached reset credits can be redeemed without refreshing or cached eligibility', async () => {
+  const previousChannels = global.channels;
+  const previousWindow = global.window;
+  const data = { eligible: false, available_count: 0, credits: [
+    { resets_left: 1, redeemable: false, clears: ['seven_day'] }
+  ] };
+  global.channels = [{ id: 8120, auth_type: 'anthropic_oauth', oauth_usage: { anthropic_reset_credits: data } }];
+  let confirmed = false;
+  let calls = 0;
+  global.window = { t: key => key, showConfirm: async () => confirmed };
+  const fetcher = async (url, options) => {
+    calls++;
+    assert.equal(url, '/admin/channels/8120/anthropic-reset-credits/redeem');
+    assert.equal(options.method, 'POST');
+    return { outcome: 'reset', credits: { eligible: true, available_count: 0, credits: [] }, usage: { windows: [] } };
+  };
+  try {
+    assert.equal(await confirmAnthropicQuotaReset(8120, fetcher), null);
+    assert.equal(calls, 0);
+    confirmed = true;
+    data.credits[0].resets_left = 0;
+    assert.equal(await confirmAnthropicQuotaReset(8120, fetcher), null);
+    data.credits[0].resets_left = 1;
+    data.credits[0].expires_at = '2000-01-01T00:00:00Z';
+    assert.equal(await confirmAnthropicQuotaReset(8120, fetcher), null);
+    delete data.credits[0].expires_at;
+    assert.equal((await confirmAnthropicQuotaReset(8120, fetcher, { reload: false })).outcome, 'reset');
+    assert.equal(calls, 1);
+    assert.equal(await confirmAnthropicQuotaReset(8120, fetcher), null);
+  } finally {
+    global.channels = previousChannels;
+    global.window = previousWindow;
+  }
+});
+
+test('Claude reset credits are updated by manual and automatic batch usage refreshes', async () => {
+  const previousChannels = global.channels;
+  global.channels = [{ id: 8103, auth_type: 'anthropic_oauth' }];
+  const credits = { eligible: true, available_count: 1, credits: [{ resets_left: 1 }] };
+  try {
+    for (const [index, refresh] of [refreshOAuthUsageBatch, maybeAutoRefreshActiveChannelUsage].entries()) {
+      const data = index === 0 ? credits : { eligible: false, available_count: 0, credits: [] };
+      const usage = { windows: [], anthropic_reset_credits: data };
+      const result = await refresh([8103], async () => oauthUsageBatchSSE([
+        { event: 'progress', result: { channel_id: 8103, status: 'succeeded', usage } },
+        { event: 'complete', processed: 1, total: 1, succeeded: 1, failed: 0 }
+      ]), { reload: false });
+      assert.equal(result.succeeded, 1);
+      assert.deepEqual(getAnthropicResetCreditsState(8103).data, data);
+    }
+  } finally {
+    global.channels = previousChannels;
+  }
+});
+
+test('Claude reset requires confirmation and sends one operation while refreshing usage', async () => {
+  const previousChannels = global.channels;
+  const previousWindow = global.window;
+  global.channels = [{ id: 8110, auth_type: 'anthropic_oauth' }];
+  let confirmed = false;
+  global.window = { t: key => key, showConfirm: async () => confirmed };
+  const credits = { eligible: true, available_count: 1, credits: [{ resets_left: 1, redeemable: true, clears: ['seven_day'] }] };
+  let resolveRequest;
+  let calls = 0;
+  const fetcher = (url, options) => {
+    calls++;
+    assert.equal(url, '/admin/channels/8110/anthropic-reset-credits/redeem');
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers, undefined);
+    assert.equal(options.body, undefined);
+    return new Promise(resolve => { resolveRequest = resolve; });
+  };
+  try {
+    assert.equal(await confirmAnthropicQuotaReset(8110, fetcher), null);
+    await loadAnthropicUsage(8110, async () => credits);
+    assert.equal(await confirmAnthropicQuotaReset(8110, fetcher), null);
+    assert.equal(calls, 0);
+    confirmed = true;
+    const pending = confirmAnthropicQuotaReset(8110, fetcher, { reload: false });
+    await new Promise(resolve => setImmediate(resolve)); // 等待确认对话框结果
+    assert.equal(getAnthropicResetCreditsState(8110).reset_status, 'loading');
+    assert.equal(await confirmAnthropicQuotaReset(8110, fetcher), null);
+    await loadAnthropicUsage(8110, () => assert.fail('must not query during redemption'));
+    assert.equal((await refreshOAuthUsageBatch([8110], () => assert.fail('must not batch query during redemption'))).total, 0);
+    assert.equal(await maybeAutoRefreshActiveChannelUsage([8110], () => assert.fail('must not auto query during redemption')), null);
+    const usage = { provider: 'anthropic', windows: [{ name: 'seven_day', used_percent: 0 }] };
+    const result = { outcome: 'reset', usage, credits: { ...credits, available_count: 0, credits: [] } };
+    resolveRequest(result);
+    assert.deepEqual(await pending, result);
+    assert.equal(calls, 1);
+    assert.deepEqual(getOAuthUsageState(8110).data, usage);
+    assert.equal(getAnthropicResetCreditsState(8110).data.available_count, 0);
+    assert.equal(await confirmAnthropicQuotaReset(8110, fetcher), null);
+  } finally {
+    global.channels = previousChannels;
+    global.window = previousWindow;
+  }
+});
+
+test('Claude reset requires a fresh query and confirmation after transport failure', async () => {
+  const previousChannels = global.channels;
+  const previousWindow = global.window;
+  global.channels = [{ id: 8111, auth_type: 'anthropic_oauth', updated_at: 'before' }];
+  let confirmations = 0;
+  global.window = { t: key => key, showConfirm: async () => { confirmations++; return true; } };
+  const credits = { eligible: true, available_count: 1, credits: [{ resets_left: 1, redeemable: true }] };
+  try {
+    await loadAnthropicUsage(8111, async () => credits);
+    await assert.rejects(() => confirmAnthropicQuotaReset(8111, async (_, options) => {
+      assert.equal(options.headers, undefined);
+      throw new Error('connection lost');
+    }), /connection lost/);
+    assert.equal(getAnthropicResetCreditsState(8111).data, null);
+    assert.equal(getAnthropicResetCreditsState(8111).reset_feedback, 'channels.oauth.anthropicResetUnknown');
+    assert.equal(await confirmAnthropicQuotaReset(8111, () => assert.fail('query required')), null);
+    await assert.rejects(() => redeemAnthropicResetCredit(8111, () => assert.fail('query required')), /anthropicResetUnavailable/);
+    assert.equal(confirmations, 1);
+    await loadAnthropicUsage(8111, async () => ({ ...credits, available_count: 0, credits: [] }));
+    assert.equal(await confirmAnthropicQuotaReset(8111, () => assert.fail('no credits')), null);
+    await loadAnthropicUsage(8111, async () => credits);
+    const result = await confirmAnthropicQuotaReset(8111, async (_, options) => {
+      assert.equal(options.headers, undefined);
+      return { outcome: 'reset' };
+    }, { reload: false });
+    assert.equal(result.outcome, 'reset');
+    assert.equal(confirmations, 2);
+    assert.equal(getAnthropicResetCreditsState(8111).reset_status, 'reset');
+    assert.equal(getOAuthUsageState(8111).status, 'error');
+  } finally {
+    global.channels = previousChannels;
+    global.window = previousWindow;
+  }
+});
+
+test('Claude reset coded rejection keeps credits while other server failures stay unconfirmed', async () => {
+  const previousChannels = global.channels;
+  const previousWindow = global.window;
+  global.channels = [{ id: 8115, auth_type: 'anthropic_oauth' }];
+  global.window = { t: key => key, showConfirm: async () => true };
+  const credits = { eligible: true, available_count: 1, credits: [{ resets_left: 1, redeemable: true }] };
+  const serverFailure = (data) => Object.assign(new Error('rejected'), { response: { success: false, error: 'rejected', data } });
+  try {
+    await loadAnthropicUsage(8115, async () => credits);
+    await assert.rejects(() => confirmAnthropicQuotaReset(8115, async () => { throw serverFailure({ code: 'reset_prepare_timeout' }); }), /rejected/);
+    let state = getAnthropicResetCreditsState(8115);
+    assert.equal(state.reset_status, 'error');
+    assert.equal(state.reset_error, 'channels.oauth.anthropicResetNotPerformed');
+    assert.deepEqual(state.data, credits);
+    await assert.rejects(() => confirmAnthropicQuotaReset(8115, async () => { throw serverFailure(null); }), /rejected/);
+    state = getAnthropicResetCreditsState(8115);
+    assert.equal(state.reset_status, 'unknown');
+    assert.equal(state.data, null);
+  } finally {
+    global.channels = previousChannels;
+    global.window = previousWindow;
+  }
+});
+
+test('Claude reset unknown outcome invalidates credits without claiming usage was reset', async () => {
+  const previousChannels = global.channels;
+  const previousWindow = global.window;
+  global.channels = [{ id: 8112, auth_type: 'anthropic_oauth' }];
+  global.window = { t: key => key, showConfirm: async () => true };
+  try {
+    await loadAnthropicUsage(8112, async () => ({ eligible: true, available_count: 1, credits: [{ resets_left: 1 }] }));
+    const result = await redeemAnthropicResetCredit(8112, async () => ({
+      outcome: 'unknown', reason: 'claim_unconfirmed',
+      credits: { eligible: true, available_count: 1, credits: [{ resets_left: 1 }] }
+    }), { reload: false });
+    assert.equal(result.outcome, 'unknown');
+    const state = getAnthropicResetCreditsState(8112);
+    assert.equal(state.status, 'idle');
+    assert.equal(state.data, null);
+    assert.equal(state.reset_feedback, 'channels.oauth.anthropicResetUnknown');
+    assert.equal(await confirmAnthropicQuotaReset(8112, () => assert.fail('query required')), null);
+    assert.equal(getOAuthUsageState(8112).data.windows.length, 0);
+    await loadAnthropicUsage(8112, async () => ({ eligible: true, available_count: 1, credits: [{ resets_left: 1 }] }));
+    assert.equal((await confirmAnthropicQuotaReset(8112, async () => ({ outcome: 'not_limited' }), { reload: false })).outcome, 'not_limited');
+  } finally {
+    global.channels = previousChannels;
+    global.window = previousWindow;
+  }
+});
+
+test('Claude reset ignores a late result after the channel authentication changes', async () => {
+  const previousChannels = global.channels;
+  const previousWindow = global.window;
+  global.channels = [{ id: 8113, auth_type: 'anthropic_oauth' }];
+  global.window = { t: key => key };
+  let resolveRequest;
+  try {
+    await loadAnthropicUsage(8113, async () => ({ eligible: true, available_count: 1, credits: [{ resets_left: 1 }] }));
+    const pending = redeemAnthropicResetCredit(8113, () => new Promise(resolve => { resolveRequest = resolve; }), { reload: false });
+    global.channels[0].auth_type = 'codex_oauth';
+    syncAnthropicResetCreditsFromChannels(global.channels);
+    resolveRequest({ outcome: 'reset', usage: { windows: [] } });
+    await pending;
+    assert.equal(getAnthropicResetCreditsState(8113), null);
+    assert.equal(getOAuthUsageState(8113).data.windows.length, 0);
+  } finally {
+    global.channels = previousChannels;
+    global.window = previousWindow;
+  }
+});
+
+test('Claude reset keeps its result when a credential refresh updates the channel mid-flight', async () => {
+  const previousChannels = global.channels;
+  const previousWindow = global.window;
+  global.channels = [{ id: 8115, auth_type: 'anthropic_oauth', created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-30T00:00:00Z' }];
+  global.window = { t: key => key };
+  let resolveRequest;
+  try {
+    await loadAnthropicUsage(8115, async () => ({ eligible: true, available_count: 1, credits: [{ resets_left: 1 }] }));
+    const pending = redeemAnthropicResetCredit(8115, () => new Promise(resolve => { resolveRequest = resolve; }), { reload: false });
+    syncAnthropicResetCreditsFromChannels([{ ...global.channels[0], updated_at: '2026-09-30T00:01:00Z' }]);
+    const usage = { provider: 'anthropic', windows: [{ name: 'seven_day', used_percent: 0 }] };
+    const credits = { eligible: true, available_count: 0, credits: [] };
+    resolveRequest({ outcome: 'reset', usage, credits });
+    await pending;
+    const state = getAnthropicResetCreditsState(8115);
+    assert.equal(state.reset_status, 'reset');
+    assert.equal(state.reset_feedback, 'channels.oauth.resetSuccess');
+    assert.deepEqual(state.data, credits);
+    assert.deepEqual(getOAuthUsageState(8115), { status: 'ready', data: usage });
+  } finally {
+    global.channels = previousChannels;
+    global.window = previousWindow;
+  }
+});
+
+test('Claude reset without refreshed usage does not orphan an in-flight quota query', async () => {
+  const previousChannels = global.channels;
+  const previousWindow = global.window;
+  global.channels = [{ id: 8114, auth_type: 'anthropic_oauth' }];
+  global.window = { t: key => key };
+  let resolveUsage;
+  try {
+    await loadAnthropicUsage(8114, async () => ({ eligible: true, available_count: 1, credits: [{ resets_left: 1 }] }));
+    const query = refreshOAuthUsage(8114, () => new Promise(resolve => { resolveUsage = resolve; }), { reload: false });
+    await redeemAnthropicResetCredit(8114, async () => ({ outcome: 'unknown' }), { reload: false });
+    const usage = { provider: 'anthropic', windows: [{ name: 'seven_day', used_percent: 80 }],
+      anthropic_reset_credits: { eligible: true, available_count: 1, credits: [{ resets_left: 1 }] } };
+
+    resolveUsage(usage);
+    await query;
+    assert.equal(getOAuthUsageState(8114).status, 'ready');
+    assert.deepEqual(getOAuthUsageState(8114).data, usage);
+    assert.equal(getAnthropicResetCreditsState(8114).data, null);
+    assert.equal(getAnthropicResetCreditsState(8114).reset_status, 'unknown');
+  } finally {
+    global.channels = previousChannels;
+    global.window = previousWindow;
+  }
+});
 
 test('manual CodeBuddy check-in uses the saved channel and publishes refreshed credits', async () => {
   const previousWindow = global.window;
@@ -530,7 +817,7 @@ test('completed OAuth credential cleanup keeps a valid model selected and can st
   });
   setGlobal('window', {
     t: key => key,
-    confirm: () => true,
+    showConfirm: async () => true,
     showSuccess() {},
     showError() {}
   });
@@ -578,7 +865,7 @@ test('completed OAuth credential cleanup keeps a valid model selected and can st
 
 test('xAI manual OAuth helpers use the shared state and callback contract', async () => {
   const requests = [];
-  const status = await pollXAIOAuthStatus('xai/state', {
+  const status = await pollOAuthStatus('xai', 'xai/state', {
     fetchStatus: async url => {
       requests.push({ url });
       return { status: 'complete', channel_id: 91 };
@@ -589,7 +876,8 @@ test('xAI manual OAuth helpers use the shared state and callback contract', asyn
   assert.equal(status.channel_id, 91);
   assert.equal(requests[0].url, '/admin/xai/oauth/status?state=xai%2Fstate');
 
-  await submitXAIOAuthCallback(
+  await submitOAuthCallback(
+    'xai',
     '  http://127.0.0.1:56121/callback?code=code-1&state=state-1  ',
     async (url, options) => {
       requests.push({ url, options });
@@ -601,7 +889,7 @@ test('xAI manual OAuth helpers use the shared state and callback contract', asyn
     callback_url: 'http://127.0.0.1:56121/callback?code=code-1&state=state-1'
   });
 
-  await cancelXAIOAuth(' state-2 ', async (url, options) => {
+  await cancelOAuth('xai', ' state-2 ', async (url, options) => {
     requests.push({ url, options });
     return { status: 'cancelled', state: 'state-2' };
   });
@@ -721,60 +1009,6 @@ test('Codex Personal Access Token submission clears the secret and uses the dedi
   }
 });
 
-test('Anthropic Cookie authorization reports each failed source line with its upstream error', async () => {
-  const previousWindow = global.window;
-  const storageWrites = [];
-  global.window = {
-    t: key => key,
-    localStorage: { setItem: (...args) => storageWrites.push(args) },
-    sessionStorage: { setItem: (...args) => storageWrites.push(args) }
-  };
-  const input = {
-    value: '  sk-ant-sid01-first  \n\n sk-ant-sid01-invalid\nsk-ant-sid01-existing  ',
-    removeAttribute() {},
-    setAttribute() {},
-    focus() {}
-  };
-  const captured = [];
-  const progress = [];
-  try {
-    const result = await submitAnthropicCookieAuth(input, async (url, options) => {
-      assert.equal(input.value, '');
-      const request = { url, body: JSON.parse(options.body) };
-      captured.push(request);
-      if (request.body.session_key === 'sk-ant-sid01-invalid') throw new Error('invalid cookie');
-      return {
-        status: 'complete',
-        channel_id: request.body.session_key === 'sk-ant-sid01-first' ? 77 : 78,
-        created: request.body.session_key === 'sk-ant-sid01-first'
-      };
-    }, undefined, value => progress.push(value));
-    assert.deepEqual(result, {
-      total: 3,
-      created: 1,
-      updated: 1,
-      failed: 1,
-      failedLines: [3],
-      failedDetails: [{ line: 3, error: 'invalid cookie' }]
-    });
-    assert.deepEqual(captured, [
-      { url: '/admin/anthropic/oauth/cookie', body: { session_key: 'sk-ant-sid01-first' } },
-      { url: '/admin/anthropic/oauth/cookie', body: { session_key: 'sk-ant-sid01-invalid' } },
-      { url: '/admin/anthropic/oauth/cookie', body: { session_key: 'sk-ant-sid01-existing' } }
-    ]);
-    assert.deepEqual(progress, [
-      { current: 1, total: 3 },
-      { current: 2, total: 3 },
-      { current: 3, total: 3 }
-    ]);
-    assert.equal(input.value, '');
-    assert.ok(captured.every(request => !request.url.includes('sk-ant')));
-    assert.deepEqual(storageWrites, []);
-  } finally {
-    global.window = previousWindow;
-  }
-});
-
 test('xAI credential import renders streamed item progress in the OAuth dialog', async () => {
   const makeTarget = properties => ({
     dataset: {}, listeners: {},
@@ -850,10 +1084,6 @@ test('xAI credential import renders streamed item progress in the OAuth dialog',
     assert.equal(progress.focused, true);
     assert.equal(elements.get('xaiCredentialImportProgressBar').max, 2);
     assert.equal(elements.get('xaiCredentialImportProgressBar').value, 2);
-    assert.match(elements.get('xaiCredentialImportProgressCounter').textContent, /"processed":2/);
-    assert.match(elements.get('xaiCredentialImportProgressCounts').textContent, /"created":1/);
-    assert.match(elements.get('xaiCredentialImportProgressCounts').textContent, /"failed":1/);
-    assert.match(elements.get('xaiCredentialImportProgressDetail').textContent, /progressComplete/);
     assert.equal(elements.get('xaiCredentialImportErrors').hidden, false);
     assert.equal(errorList.children.length, 1);
     assert.match(errorList.children[0].textContent, /#2/);
@@ -985,7 +1215,6 @@ test(`logs channel editor supports Codex auth and Key models${failFirstScript ? 
     'keyExportModal',
     'keySortModal',
     'modelImportModal',
-    'customRulesModal',
     'testModal',
     'upstreamDetailModal',
     'tpl-key-row',
@@ -1004,7 +1233,6 @@ test(`logs channel editor supports Codex auth and Key models${failFirstScript ? 
   ]);
   const elements = new Map();
   for (const id of [
-    'codexCredentialReadOnlyNotice',
     'channelAPIKeyHeader',
     'channelAPIKeyTable',
     'channelApiKey',
@@ -1032,7 +1260,6 @@ test(`logs channel editor supports Codex auth and Key models${failFirstScript ? 
   };
 
   const scripts = [{ src: 'http://localhost/web/assets/js/logs-channel-editor.js?v=test' }];
-  const loadedScriptPaths = [];
   let openedChannelID = null;
   let oauthSetupCalls = 0;
   let scriptFailed = false;
@@ -1069,7 +1296,6 @@ test(`logs channel editor supports Codex auth and Key models${failFirstScript ? 
           return;
         }
         const path = new URL(script.src, global.window.location.origin).pathname;
-        loadedScriptPaths.push(path);
         if (path === '/web/assets/js/channels-codex-auth.js') {
           global.applyChannelAuthEditorMode = applyChannelAuthEditorMode;
         }
@@ -1110,10 +1336,6 @@ test(`logs channel editor supports Codex auth and Key models${failFirstScript ? 
     }
 
     assert.equal(openedChannelID, 42);
-    const renderIndex = loadedScriptPaths.indexOf('/web/assets/js/channels-render.js');
-    const modalsIndex = loadedScriptPaths.indexOf('/web/assets/js/channels-modals.js');
-    assert.notEqual(renderIndex, -1);
-    assert.ok(renderIndex < modalsIndex);
     assert.equal(oauthSetupCalls, 1);
     assert.equal(elements.get('codexCredentialTab').hidden, false);
     assert.match(elements.get('codexCredentialContent').textContent, /at-from-log-editor/);
@@ -1143,7 +1365,7 @@ test('Codex OAuth status polling waits for completion and encodes state', async 
     { status: 'pending' },
     { status: 'complete', channel_id: 42 }
   ];
-  const result = await pollCodexOAuthStatus('state with / symbols', {
+  const result = await pollOAuthStatus('codex', 'state with / symbols', {
     fetchStatus: async url => {
       requests.push(url);
       return statuses.shift();
@@ -1161,7 +1383,7 @@ test('Codex OAuth status polling waits for completion and encodes state', async 
 test('OAuth status polling resumes the same session after a browser network failure', async () => {
   for (const failure of [new TypeError('NetworkError when attempting to fetch resource.'), new TypeError('Failed to fetch'), new TypeError('Load failed'), Object.assign(new Error('offline'), { name: 'NetworkError' })]) {
     const requests = [];
-    const result = await pollCodexOAuthStatus('existing-state', {
+    const result = await pollOAuthStatus('codex', 'existing-state', {
       fetchStatus: async url => {
         requests.push(url);
         if (requests.length === 1) throw failure;
@@ -1177,7 +1399,7 @@ test('OAuth status polling resumes the same session after a browser network fail
 test('OAuth polling bounds network retries and preserves terminal errors', async () => {
   for (const [error, expectedCalls] of [[new TypeError('Failed to fetch'), 3], [new Error('unauthorized'), 1], [Object.assign(new Error('cancelled'), { name: 'AbortError' }), 1]]) {
     let calls = 0;
-    await assert.rejects(pollCodexOAuthStatus('state', {
+    await assert.rejects(pollOAuthStatus('codex', 'state', {
       fetchStatus: async () => { calls++; throw error; },
       delay: async () => {}, maxPolls: 3, interval: 0
     }), value => value === error);
@@ -1235,6 +1457,7 @@ test('OAuth login toolbar waits for explicit authorization after provider select
     ...properties
   });
   const loginButton = makeTarget({ focus() { this.focused = true; } });
+  const addMenu = makeTarget();
   const dialog = makeTarget({
     open: false,
     showModal() { this.open = true; },
@@ -1250,13 +1473,6 @@ test('OAuth login toolbar waits for explicit authorization after provider select
     setAttribute(name, value) { this[name] = value; }
   });
   const xaiMethod = makeTarget({ value: 'manual' });
-  const anthropicMethod = makeTarget({ value: 'code', disabled: false });
-  const anthropicSessionKey = makeTarget({
-    value: '', required: false,
-    focus() { this.focused = true; },
-    removeAttribute(name) { delete this[name]; },
-    setAttribute(name, value) { this[name] = value; }
-  });
   const cursorUserAPIKey = makeTarget({
     value: '', required: false,
     focus() { this.focused = true; },
@@ -1276,7 +1492,7 @@ test('OAuth login toolbar waits for explicit authorization after provider select
   const secretField = { hidden: false };
   const xaiProgress = { hidden: false };
   const elements = new Map([
-    ['oauthLoginBtn', loginButton],
+    ['channelAddMenu', addMenu],
     ['oauthLoginDialog', dialog],
     ['oauthLoginForm', loginForm],
     ['oauthProviderSelect', providerSelect],
@@ -1289,10 +1505,6 @@ test('OAuth login toolbar waits for explicit authorization after provider select
     ['xaiCredentialSecretField', secretField],
     ['xaiCredentialImportProgress', xaiProgress],
     ['xaiCredentialValues', { value: '', removeAttribute() {}, setAttribute() {} }],
-    ['anthropicOAuthControls', { hidden: true }],
-    ['anthropicOAuthMethod', anthropicMethod],
-    ['anthropicCookieField', { hidden: true }],
-    ['anthropicSessionKey', anthropicSessionKey],
     ['cursorOAuthControls', { hidden: true }],
     ['cursorAPIKeyField', { hidden: true }],
     ['cursorUserAPIKey', cursorUserAPIKey],
@@ -1311,31 +1523,18 @@ test('OAuth login toolbar waits for explicit authorization after provider select
   const requests = [];
   global.document = {
     getElementById: id => elements.get(id) || null,
+    querySelector: selector => (selector === '#channelAddGroup .channel-page-menu__trigger' ? loginButton : null),
     querySelectorAll: () => []
   };
   const successNotices = [];
   const errorNotices = [];
   global.window = {
-    t: (key, params = {}) => {
-      if (key === 'channels.anthropic.cookieFailureDetail') return `line ${params.line}: ${params.error}`;
-      if (key === 'channels.anthropic.cookiePartial') return `partial\n${params.details}`;
-      if (key === 'channels.anthropic.cookieReloadFailedWithResult') return `${params.result}\nreload failed`;
-      return key;
-    },
+    t: key => key,
     showSuccess: message => successNotices.push(message),
     showError: message => errorNotices.push(message)
   };
-  const cookieRequests = [];
   global.fetchDataWithAuth = async (url, options) => {
     requests.push(url);
-    if (url === '/admin/anthropic/oauth/cookie') {
-      const request = { url, body: JSON.parse(options.body) };
-      cookieRequests.push(request);
-      if (request.body.session_key === 'sk-ant-sid01-ui-invalid') {
-        throw new Error('anthropic organization endpoint returned HTTP 401: account_session_invalid');
-      }
-      return { status: 'complete', channel_id: 9, created: cookieRequests.length === 1 };
-    }
     if (url.endsWith('/oauth/start')) {
       return { url: 'https://accounts.example/authorize', state: 'gravity-state' };
     }
@@ -1344,9 +1543,10 @@ test('OAuth login toolbar waits for explicit authorization after provider select
   global.reloadChannelsList = async () => {};
   try {
     setupOAuthActions();
-    loginButton.listeners.click();
+    addMenu.listeners.click({ target: { closest: () => ({ dataset: { oauthProvider: 'cursor' } }) } });
 
     assert.equal(dialog.open, true);
+    assert.equal(providerSelect.value, 'cursor');
     assert.equal(providerSelect.focused, true);
     assert.equal(sessionFields.hidden, true);
     assert.deepEqual(requests, []);
@@ -1411,129 +1611,18 @@ test('OAuth login toolbar waits for explicit authorization after provider select
       '/admin/antigravity/oauth/start',
       '/admin/antigravity/oauth/status?state=gravity-state'
     ]);
-    const noticeCountsBeforeCookie = {
-      success: successNotices.length,
-      error: errorNotices.length
-    };
-
     openOAuthLoginDialog(loginButton);
     providerSelect.value = 'anthropic';
     providerSelect.listeners.change();
-    assert.equal(elements.get('anthropicOAuthControls').hidden, false);
-    assert.equal(elements.get('anthropicCookieField').hidden, true);
-    anthropicMethod.value = 'cookie';
-    anthropicMethod.listeners.change();
-    assert.equal(elements.get('anthropicCookieField').hidden, false);
-    anthropicSessionKey.value = 'sk-ant-sid01-ui-first\nsk-ant-sid01-ui-second';
-    const cookieReloadOptions = [];
-    global.reloadChannelsList = async (options = {}) => {
-      cookieReloadOptions.push(options);
-      if (options.throwOnError) throw new Error('channel reload failed');
-      global.window.showError('channels.loadChannelsFailed');
-    };
+    assert.equal(dialogDescription.textContent, 'channels.anthropic.codeDescription');
+    assert.equal(authorizeButton.textContent, 'channels.oauth.startAuthorization');
+    assert.equal(sessionFields.hidden, true);
+    const requestsBeforeAnthropic = requests.length;
     await loginForm.listeners.submit({ preventDefault() {} });
-    assert.equal(anthropicSessionKey.value, '');
-    assert.deepEqual(cookieRequests, [
-      { url: '/admin/anthropic/oauth/cookie', body: { session_key: 'sk-ant-sid01-ui-first' } },
-      { url: '/admin/anthropic/oauth/cookie', body: { session_key: 'sk-ant-sid01-ui-second' } }
+    assert.deepEqual(requests.slice(requestsBeforeAnthropic), [
+      '/admin/anthropic/oauth/start',
+      '/admin/anthropic/oauth/status?state=gravity-state'
     ]);
-    assert.equal(dialog.open, true);
-    assert.equal(dialogStatus.textContent, 'channels.anthropic.cookieComplete\nreload failed');
-    assert.equal(dialogStatus.dataset.kind, 'error');
-    assert.equal(successNotices.length, noticeCountsBeforeCookie.success);
-    assert.equal(errorNotices.length, noticeCountsBeforeCookie.error);
-    assert.deepEqual(cookieReloadOptions, [{ throwOnError: true }]);
-    assert.equal(anthropicSessionKey['aria-invalid'], undefined);
-    assert.equal(providerSelect.disabled, false);
-
-    openOAuthLoginDialog(loginButton);
-    providerSelect.value = 'anthropic';
-    providerSelect.listeners.change();
-    anthropicMethod.value = 'cookie';
-    anthropicMethod.listeners.change();
-    anthropicSessionKey.value = 'sk-ant-sid01-ui-partial-success\nsk-ant-sid01-ui-invalid';
-    await loginForm.listeners.submit({ preventDefault() {} });
-    assert.equal(
-      dialogStatus.textContent,
-      'partial\nline 2: anthropic organization endpoint returned HTTP 401: account_session_invalid\nreload failed'
-    );
-    assert.equal(dialogStatus.dataset.kind, 'error');
-    assert.equal(successNotices.length, noticeCountsBeforeCookie.success);
-    assert.equal(errorNotices.length, noticeCountsBeforeCookie.error);
-    assert.deepEqual(cookieReloadOptions, [
-      { throwOnError: true },
-      { throwOnError: true }
-    ]);
-    assert.equal(providerSelect.disabled, false);
-
-    global.reloadChannelsList = async options => { cookieReloadOptions.push(options); };
-    openOAuthLoginDialog(loginButton);
-    providerSelect.value = 'anthropic';
-    providerSelect.listeners.change();
-    anthropicMethod.value = 'cookie';
-    anthropicMethod.listeners.change();
-    anthropicSessionKey.value = 'sk-ant-sid01-ui-invalid';
-    await loginForm.listeners.submit({ preventDefault() {} });
-    assert.equal(
-      dialogStatus.textContent,
-      'partial\nline 1: anthropic organization endpoint returned HTTP 401: account_session_invalid'
-    );
-    assert.equal(successNotices.length, noticeCountsBeforeCookie.success);
-    assert.equal(errorNotices.length, noticeCountsBeforeCookie.error);
-    assert.equal(anthropicSessionKey['aria-invalid'], 'true');
-    assert.equal(providerSelect.disabled, false);
-
-    openOAuthLoginDialog(loginButton);
-    providerSelect.value = 'anthropic';
-    providerSelect.listeners.change();
-    anthropicMethod.value = 'cookie';
-    anthropicMethod.listeners.change();
-    anthropicSessionKey.value = 'sk-ant-sid01-ui-final';
-    await loginForm.listeners.submit({ preventDefault() {} });
-    assert.equal(dialog.open, true);
-    assert.equal(dialogStatus.textContent, 'channels.anthropic.cookieComplete');
-    assert.equal(dialogStatus.dataset.kind, 'success');
-    assert.equal(successNotices.length, noticeCountsBeforeCookie.success);
-    assert.equal(errorNotices.length, noticeCountsBeforeCookie.error);
-    assert.deepEqual(cookieReloadOptions, [
-      { throwOnError: true },
-      { throwOnError: true },
-      { throwOnError: true }
-    ]);
-    assert.equal(providerSelect.disabled, false);
-
-    openOAuthLoginDialog(loginButton);
-    providerSelect.value = 'anthropic';
-    providerSelect.listeners.change();
-    anthropicMethod.value = 'cookie';
-    anthropicMethod.listeners.change();
-    anthropicSessionKey.value = 'sk-ant-sid01-ui-invalid-first\nsk-ant-sid01-ui-invalid-second';
-    global.fetchDataWithAuth = async (_url, options) => {
-      const { session_key: sessionKey } = JSON.parse(options.body);
-      throw new Error(sessionKey.endsWith('first') ? 'upstream first error' : 'upstream second error');
-    };
-    global.reloadChannelsList = async () => {};
-    await loginForm.listeners.submit({ preventDefault() {} });
-    assert.equal(anthropicSessionKey.value, '');
-    assert.equal(
-      dialogStatus.textContent,
-      'partial\nline 1: upstream first error\nline 2: upstream second error'
-    );
-    assert.equal(dialogStatus.dataset.kind, 'error');
-    assert.equal(errorNotices.length, noticeCountsBeforeCookie.error);
-    assert.equal(anthropicSessionKey['aria-invalid'], 'true');
-
-    openOAuthLoginDialog(loginButton);
-    providerSelect.value = 'anthropic';
-    providerSelect.listeners.change();
-    anthropicMethod.value = 'cookie';
-    anthropicMethod.listeners.change();
-    await loginForm.listeners.submit({ preventDefault() {} });
-    assert.equal(dialogStatus.textContent, 'channels.anthropic.cookieRequired');
-    assert.equal(successNotices.length, noticeCountsBeforeCookie.success);
-    assert.equal(errorNotices.length, noticeCountsBeforeCookie.error);
-    assert.equal(anthropicSessionKey['aria-invalid'], 'true');
-    assert.equal(providerSelect.disabled, false);
   } finally {
     global.document = previousDocument;
     global.window = previousWindow;
@@ -1654,7 +1743,8 @@ test('completed OAuth credential import keeps the dialog open for result review'
 
 test('manual Codex OAuth callback submits the complete callback URL as JSON', async () => {
   let captured;
-  const result = await submitCodexOAuthCallback(
+  const result = await submitOAuthCallback(
+    'codex',
     '  http://localhost:1455/auth/callback?code=code-1&state=state-1  ',
     async (url, options) => {
       captured = { url, options };
@@ -1672,7 +1762,7 @@ test('manual Codex OAuth callback submits the complete callback URL as JSON', as
 
 test('Codex OAuth cancellation submits the active state as JSON', async () => {
   let captured;
-  const result = await cancelCodexOAuth('  state-1  ', async (url, options) => {
+  const result = await cancelOAuth('codex', '  state-1  ', async (url, options) => {
     captured = { url, options };
     return { status: 'cancelled', state: 'state-1' };
   });
@@ -1685,7 +1775,7 @@ test('Codex OAuth cancellation submits the active state as JSON', async () => {
 
 test('Antigravity OAuth helpers use the Antigravity admin contract', async () => {
   const requests = [];
-  const status = await pollAntigravityOAuthStatus('gravity/state', {
+  const status = await pollOAuthStatus('antigravity', 'gravity/state', {
     fetchStatus: async url => {
       requests.push(url);
       return { status: 'complete', channel_id: 9 };
@@ -1696,12 +1786,12 @@ test('Antigravity OAuth helpers use the Antigravity admin contract', async () =>
   assert.equal(status.channel_id, 9);
   assert.equal(requests[0], '/admin/antigravity/oauth/status?state=gravity%2Fstate');
 
-  await submitAntigravityOAuthCallback('http://localhost:51121/oauth-callback?code=x&state=y', async (url, options) => {
+  await submitOAuthCallback('antigravity', 'http://localhost:51121/oauth-callback?code=x&state=y', async (url, options) => {
     requests.push(url);
     assert.equal(JSON.parse(options.body).callback_url, 'http://localhost:51121/oauth-callback?code=x&state=y');
     return { status: 'accepted' };
   });
-  await cancelAntigravityOAuth('y', async (url, options) => {
+  await cancelOAuth('antigravity', 'y', async (url, options) => {
     requests.push(url);
     assert.deepEqual(JSON.parse(options.body), { state: 'y' });
     return { status: 'cancelled' };
@@ -1714,7 +1804,7 @@ test('Antigravity OAuth helpers use the Antigravity admin contract', async () =>
 
 test('Anthropic OAuth helpers submit the hosted authorization code with bound state', async () => {
   const requests = [];
-  const status = await pollAnthropicOAuthStatus('state/1', {
+  const status = await pollOAuthStatus('anthropic', 'state/1', {
     fetchStatus: async url => {
       requests.push({ url });
       return { status: 'complete', channel_id: 71 };
@@ -1722,11 +1812,11 @@ test('Anthropic OAuth helpers submit the hosted authorization code with bound st
     delay: async () => {}, maxPolls: 1
   });
   assert.equal(status.channel_id, 71);
-  await submitAnthropicOAuthCode('code-1#state/1', 'state/1', async (url, options) => {
+  await submitOAuthCallback('anthropic', 'code-1#state/1', async (url, options) => {
     requests.push({ url, body: JSON.parse(options.body) });
     return { status: 'accepted' };
-  });
-  await cancelAnthropicOAuth('state/2', async (url, options) => {
+  }, 'state/1');
+  await cancelOAuth('anthropic', 'state/2', async (url, options) => {
     requests.push({ url, body: JSON.parse(options.body) });
     return { status: 'cancelled' };
   });
@@ -1820,8 +1910,6 @@ test('OAuth credential import polls a background job, recovers from network erro
     assert.equal(captured[3].url, '/admin/oauth/credentials/import/jobs/ocij-1?after=1');
     assert.equal(elements.get('oauthCredentialImportProgressBar').max, 3);
     assert.equal(elements.get('oauthCredentialImportProgressBar').value, 3);
-    assert.match(elements.get('oauthCredentialImportProgressCounter').textContent, /3/);
-    assert.match(elements.get('oauthCredentialImportProgressCounts').textContent, /1/);
     assert.equal(elements.get('oauthCredentialImportErrors').hidden, false);
     assert.equal(elements.get('oauthCredentialImportErrorList').children.length, 2);
     assert.match(elements.get('oauthCredentialImportErrorList').children[0].textContent, /credentials\.zip\/two\.json/);
@@ -2129,6 +2217,7 @@ test('channel reload updates quota percentages and costs without overwriting new
   setGlobal('filters', {});
   setGlobal('channels', []);
   setGlobal('channelsPageSize', 20);
+  setGlobal('channelsSort', { key: 'priority', order: 'desc' });
   setGlobal('channelsCurrentPage', 1);
   setGlobal('channelsTotalCount', 0);
   setGlobal('channelsTotalPages', 1);
@@ -2231,6 +2320,7 @@ test('quota operations reload the list without cascading into automatic usage re
   setGlobal('filters', {});
   setGlobal('channels', []);
   setGlobal('channelsPageSize', 20);
+  setGlobal('channelsSort', { key: 'priority', order: 'desc' });
   setGlobal('channelsCurrentPage', 1);
   setGlobal('channelsTotalCount', 0);
   setGlobal('channelsTotalPages', 1);
@@ -2747,7 +2837,6 @@ test('selected quota refresh skips non-OAuth channels and reports one batch resu
 test('OAuth editor keeps credentials read-only and applies provider-specific controls', async () => {
   const elements = new Map();
   for (const id of [
-    'codexCredentialReadOnlyNotice',
     'channelAPIKeyHeader',
     'channelAPIKeyTable',
     'channelApiKey',
@@ -2795,7 +2884,6 @@ test('OAuth editor keeps credentials read-only and applies provider-specific con
     applyChannelAuthEditorMode('codex_oauth', credential, {
       codex_subscription_active_until: '2030-02-03T04:05:06Z'
     }, credentialInfo);
-    assert.equal(elements.get('codexCredentialReadOnlyNotice').hidden, false);
     assert.equal(elements.get('channelAPIKeyHeader').hidden, false);
     assert.equal(elements.get('channelAPIKeyTable').hidden, false);
     assert.equal(elements.get('channelApiKey').required, false);
@@ -2832,7 +2920,6 @@ test('OAuth editor keeps credentials read-only and applies provider-specific con
 
     const antigravityCredential = { type: 'antigravity', access_token: 'gravity-at', refresh_token: 'gravity-rt', project_id: 'project-1' };
     applyChannelAuthEditorMode('antigravity_oauth', antigravityCredential);
-    assert.equal(elements.get('codexCredentialReadOnlyNotice').hidden, false);
     assert.equal(elements.get('channelApiKey').required, false);
     assert.equal(elements.get('codexCredentialTab').hidden, false);
     assert.equal(elements.get('codexCredentialViewDescription').hidden, true);
@@ -2871,7 +2958,6 @@ test('OAuth editor keeps credentials read-only and applies provider-specific con
     applyChannelAuthEditorMode('cursor_oauth', cursorCredential);
     assert.equal(elements.get('codexCredentialTab').hidden, false);
     assert.equal(elements.get('codexCredentialRefreshButton').hidden, false);
-    assert.equal(elements.get('codexCredentialReadOnlyNotice').hidden, false);
     assert.equal(elements.get('codexCredentialContent').textContent, JSON.stringify(cursorCredential, null, 2));
 
     const zaiCredential = { type: 'z.ai', api_key: 'zai-key', email: 'zai@example.com' };
@@ -2888,7 +2974,6 @@ test('OAuth editor keeps credentials read-only and applies provider-specific con
     assert.equal(elements.get('codexCredentialContent').textContent, JSON.stringify(zaiOAuthCredential, null, 2));
 
     applyChannelAuthEditorMode('api_key');
-    assert.equal(elements.get('codexCredentialReadOnlyNotice').hidden, true);
     assert.equal(elements.get('channelAPIKeyHeader').hidden, false);
     assert.equal(elements.get('channelAPIKeyTable').hidden, false);
     assert.equal(elements.get('channelApiKey').required, true);

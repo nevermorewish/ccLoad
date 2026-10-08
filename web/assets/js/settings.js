@@ -21,6 +21,8 @@ const customPricingTieredModels = new Set();
 const globalCooldownRulesSettingKey = 'global_cooldown_detection_rules';
 const modelMultimodalFallbackSettingKey = 'model_multimodal_fallback';
 const modelCustomPricingSettingKey = 'model_custom_pricing';
+// 与后端 settingsRequireRestart 保持一致：仅这两项单独保存时热生效，其余设置保存后进程重启。
+const hotReloadSettingKeys = new Set([modelMultimodalFallbackSettingKey, modelCustomPricingSettingKey]);
 const maxMultimodalFallbackMappings = 64;
 const maxCustomPricingBytes = 1024 * 1024;
 const maxCustomPricingModels = 512;
@@ -40,7 +42,6 @@ function projectCustomPricingDefaults(pricing) {
   return projected;
 }
 
-const containerImageManagedDisabledReason = 'container_image_managed';
 const advancedSettingKeys = new Set([
   'typesafe_enabled', 'typesafe_api_key', 'api_token_login_enabled', 'api_token_show_channels',
   'auto_update_interval_hours', 'auto_update_channel',
@@ -764,14 +765,14 @@ async function applyMultimodalFallback() {
   showMultimodalFallbackError(null);
 
   try {
-    const result = await fetchDataWithAuth('/admin/settings/batch', {
+    await fetchDataWithAuth('/admin/settings/batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ [modelMultimodalFallbackSettingKey]: value })
     });
     syncSettingState(modelMultimodalFallbackSettingKey, value);
     closeMultimodalFallbackModal();
-    showSuccess(result?.message || t('settings.msg.savedCount', { count: 1 }));
+    showSuccess(t('settings.msg.savedHot', { count: 1 }));
   } catch (err) {
     console.error('保存多模态回退映射异常:', err);
     showMultimodalFallbackError(t('settings.msg.saveFailed') + ': ' + err.message);
@@ -1153,14 +1154,14 @@ async function applyCustomPricing() {
   }
   showCustomPricingError(null);
   try {
-    const result = await fetchDataWithAuth('/admin/settings/batch', {
+    await fetchDataWithAuth('/admin/settings/batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ [modelCustomPricingSettingKey]: value })
     });
     syncSettingState(modelCustomPricingSettingKey, value);
     closeCustomPricingModal();
-    showSuccess(result?.message || t('settings.msg.savedCount', { count: 1 }));
+    showSuccess(t('settings.msg.savedHot', { count: 1 }));
   } catch (err) {
     console.error('保存自定义模型价格异常:', err);
     showCustomPricingError(t('settings.msg.saveFailed') + ': ' + err.message);
@@ -1574,7 +1575,19 @@ function getSettingOrder(key) {
 }
 
 function isModalSettingKey(key) {
-  return key === modelMultimodalFallbackSettingKey || key === modelCustomPricingSettingKey;
+  return hotReloadSettingKeys.has(key);
+}
+
+function settingEffectMode(key) {
+  return hotReloadSettingKeys.has(key) ? 'hot' : 'restart';
+}
+
+// 设置项的可读名称：优先语言包描述，其次后端描述，最后才回退到 key。
+function settingLabel(key) {
+  const descKey = `settings.desc.${key}`;
+  const translated = t(descKey);
+  if (translated !== descKey) return translated;
+  return settingDefinitions.get(key)?.description || key;
 }
 
 function groupSettings(settings) {
@@ -1648,9 +1661,8 @@ function refreshSettingsTranslations() {
     const row = document.querySelector(`.setting-data-row[data-key="${setting.key}"]`);
     if (!row) continue;
     const description = row.querySelector('.setting-col-description');
-    const key = `settings.desc.${setting.key}`;
-    const translated = t(key);
-    description.textContent = translated !== key ? translated : setting.description;
+    const descriptionText = description.querySelector('.setting-description-text');
+    if (descriptionText) descriptionText.textContent = settingLabel(setting.key);
     description.dataset.mobileLabel = t('settings.configItem');
     row.querySelector('.setting-col-value').dataset.mobileLabel = t('settings.currentValue');
     row.querySelector('.setting-col-actions').dataset.mobileLabel = t('common.actions');
@@ -1658,17 +1670,34 @@ function refreshSettingsTranslations() {
   updateGlobalCooldownRulesSummary(document.getElementById(globalCooldownRulesSettingKey)?.value || '');
   updateMultimodalFallbackSummary(document.getElementById(modelMultimodalFallbackSettingKey)?.value || '');
   updateCustomPricingSummary(document.getElementById(modelCustomPricingSettingKey)?.value || '');
+  updateDirtyStatus();
 }
 
 async function loadSettings() {
+  const tbody = document.getElementById('settings-tbody');
   try {
     const data = await fetchDataWithAuth('/admin/settings');
     if (!Array.isArray(data)) throw new Error(t('settings.msg.invalidResponse'));
     renderSettings(data);
   } catch (err) {
     console.error('Failed to load settings:', err);
-    showError(t('settings.msg.loadFailed') + ': ' + err.message);
+    if (tbody) renderSettingsLoadError(tbody, err);
+    else showError(t('settings.msg.loadFailed') + ': ' + err.message);
   }
+}
+
+// 加载失败时在表格内给出原因与重试入口，重试通过事件委托重新调用 loadSettings。
+function renderSettingsLoadError(tbody, err) {
+  initSettingsEventDelegation();
+  tbody.innerHTML = `
+    <tr class="settings-load-error-row">
+      <td colspan="3">
+        <div class="settings-load-error" role="alert">
+          <span>${escapeHtml(t('settings.msg.loadFailed') + ': ' + (err?.message || ''))}</span>
+          <button type="button" class="btn btn-secondary" data-action="retry-load-settings">${escapeHtml(t('common.retry'))}</button>
+        </div>
+      </td>
+    </tr>`;
 }
 
 function renderSettings(settings) {
@@ -1686,11 +1715,6 @@ function renderSettings(settings) {
     if (!isModalSettingKey(s.key)) continue;
     const target = document.getElementById(s.key);
     if (target) target.value = displayValue;
-    const buttonID = s.key === modelMultimodalFallbackSettingKey
-      ? 'model-multimodal-fallback-btn'
-      : 'model-custom-pricing-btn';
-    const button = document.getElementById(buttonID);
-    if (button) button.disabled = s.editable === false;
     if (s.key === modelMultimodalFallbackSettingKey) updateMultimodalFallbackSummary(displayValue);
     else updateCustomPricingSummary(displayValue);
   }
@@ -1703,22 +1727,16 @@ function renderSettings(settings) {
   for (const g of groups) {
     const groupRow = TemplateEngine.render('tpl-setting-group-row', {
       groupId: g.id,
-      groupName: g.name,
-      groupNoticeHtml: ''
+      groupName: g.name
     });
     if (groupRow) tbody.appendChild(groupRow);
 
     for (const s of g.settings) {
       const displayValue = settingValueForDisplay(s.key, s.value);
-      // 优先使用语言包中的描述，若没有则回退到后端返回的描述
-      const descKey = `settings.desc.${s.key}`;
-      const translatedDesc = t(descKey);
-      const description = (translatedDesc !== descKey) ? translatedDesc : s.description;
       const row = TemplateEngine.render('tpl-setting-row', {
         key: s.key,
-        description: description,
-        inputHtml: renderInput({ ...s, value: displayValue }) + (s.key === 'auto_update_channel' ? renderSettingGroupNotice(g) : ''),
-        resetDisabledAttributes: settingDisabledAttributes(s),
+        description: settingLabel(s.key),
+        inputHtml: renderInput({ ...s, value: displayValue }),
         mobileLabelDescription: t('settings.configItem'),
         mobileLabelValue: t('settings.currentValue'),
         mobileLabelActions: t('common.actions')
@@ -1726,28 +1744,7 @@ function renderSettings(settings) {
       if (row) tbody.appendChild(row);
     }
   }
-}
-
-function renderSettingGroupNotice(group) {
-  const containerManaged = group.settings.some((setting) => (
-    setting.editable === false && setting.disabled_reason === containerImageManagedDisabledReason
-  ));
-  if (!containerManaged) return '';
-
-  return `
-    <div class="settings-group-notice" role="note">
-      <p data-i18n="settings.update.containerManaged">${escapeHtml(t('settings.update.containerManaged'))}</p>
-      <ul>
-        <li><span data-i18n="settings.update.stableImage">${escapeHtml(t('settings.update.stableImage'))}</span>: <code>ghcr.io/caidaoli/ccload:latest</code></li>
-        <li><span data-i18n="settings.update.betaImage">${escapeHtml(t('settings.update.betaImage'))}</span>: <code>ghcr.io/caidaoli/ccload:beta</code></li>
-      </ul>
-      <p data-i18n="settings.update.applyImage">${escapeHtml(t('settings.update.applyImage'))}</p>
-      <code class="settings-group-notice-command">docker compose pull &amp;&amp; docker compose up -d</code>
-    </div>`;
-}
-
-function settingDisabledAttributes(setting) {
-  return setting.editable === false ? 'disabled' : '';
+  updateDirtyStatus();
 }
 
 // 初始化事件委托（替代 inline onclick）
@@ -1758,6 +1755,12 @@ function initSettingsEventDelegation() {
 
   // 重置按钮点击
   tbody.addEventListener('click', (e) => {
+    const retryBtn = e.target.closest('[data-action="retry-load-settings"]');
+    if (retryBtn) {
+      retryBtn.disabled = true;
+      loadSettings();
+      return;
+    }
     const editGlobalRulesBtn = e.target.closest('[data-action="edit-global-cooldown-rules"]');
     if (editGlobalRulesBtn) {
       openGlobalCooldownRulesModal(editGlobalRulesBtn);
@@ -1779,11 +1782,13 @@ function initSettingsEventDelegation() {
     }
   });
 
-  // 输入变更
-  tbody.addEventListener('change', (e) => {
+  // 输入变更：input 让脏状态与错误标记随键入即时更新，change 覆盖 radio/select
+  const onEdit = (e) => {
     const input = e.target.closest('input, select');
     if (input) markChanged(input);
-  });
+  };
+  tbody.addEventListener('input', onEdit);
+  tbody.addEventListener('change', onEdit);
 }
 
 // 手动触发完整更新流程：检查、下载、校验、替换，之后由服务端等待空闲重启。
@@ -1837,7 +1842,6 @@ function renderInput(setting) {
   const placeholder = oauthBaseURLPlaceholders.get(setting.key);
   const placeholderAttribute = placeholder ? `placeholder="${escapeHtml(placeholder)}"` : '';
   const wideTextInput = setting.key === 'channel_test_content' || oauthBaseURLPlaceholders.has(setting.key);
-  const disabledAttributes = settingDisabledAttributes(setting);
   const numericAttributes = numericInputAttributes(setting);
 
   if (setting.key === globalCooldownRulesSettingKey) {
@@ -1845,7 +1849,7 @@ function renderInput(setting) {
     return `
       <div class="global-cooldown-rules-control">
         <input type="hidden" id="${safeKey}" value="${safeValue}">
-        <button type="button" class="btn btn-secondary" data-action="edit-global-cooldown-rules" data-i18n="settings.globalCooldownRules.edit" ${disabledAttributes}>
+        <button type="button" class="btn btn-secondary" data-action="edit-global-cooldown-rules" data-i18n="settings.globalCooldownRules.edit">
           ${escapeHtml(t('settings.globalCooldownRules.edit'))}
         </button>
         <span id="global-cooldown-rules-summary" class="global-cooldown-rules-summary">
@@ -1857,8 +1861,8 @@ function renderInput(setting) {
   if (setting.key === 'TypeSafe_api_key') {
     const hint = t(setting.configured ? 'settings.secretConfigured' : 'settings.secretUnconfigured');
     return `<div class="settings-typesafe-control">
-      <input type="text" id="${safeKey}" value="" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(hint)}" aria-label="TypeSafe API Key" class="settings-input settings-input--text" ${disabledAttributes}>
-      <button type="button" class="btn btn-secondary" data-action="test-typesafe" title="${escapeHtml(t('settings.typeSafeTest.hint'))}" ${disabledAttributes}>${escapeHtml(t('settings.typeSafeTest.test'))}</button>
+      <input type="text" id="${safeKey}" value="" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(hint)}" aria-label="TypeSafe API Key" class="settings-input settings-input--text">
+      <button type="button" class="btn btn-secondary" data-action="test-typesafe" title="${escapeHtml(t('settings.typeSafeTest.hint'))}">${escapeHtml(t('settings.typeSafeTest.test'))}</button>
     </div>`;
   }
 
@@ -1868,11 +1872,11 @@ function renderInput(setting) {
       `<option value="${value}" data-i18n="${labelKey}" ${setting.value === value ? 'selected' : ''}>${escapeHtml(t(labelKey))}</option>`
     )).join('');
     const selectHtml = `
-      <select id="${safeKey}" class="settings-input settings-input--select" ${disabledAttributes}>
+      <select id="${safeKey}" class="settings-input settings-input--select">
         ${optionsHtml}
       </select>`;
-    // 更新渠道旁提供手动检测按钮；容器模式（editable=false）不渲染、后端同样拒绝。
-    if (setting.key === 'auto_update_channel' && setting.editable !== false) {
+    // 更新渠道旁提供手动检测按钮（容器版后端不返回该配置项）。
+    if (setting.key === 'auto_update_channel') {
       return `
         <div class="settings-update-channel-control">
           ${selectHtml}
@@ -1885,7 +1889,7 @@ function renderInput(setting) {
   }
 
   if (byteSettingKeys.has(setting.key)) {
-    return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
+    return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes}>`;
   }
 
   switch (setting.value_type) {
@@ -1894,42 +1898,35 @@ function renderInput(setting) {
       return `
         <div class="settings-bool-group">
           <label class="settings-bool-option">
-            <input type="radio" name="${safeKey}" value="true" ${isTrue ? 'checked' : ''} ${disabledAttributes}> <span data-i18n="common.enable">${t('common.enable')}</span>
+            <input type="radio" name="${safeKey}" value="true" ${isTrue ? 'checked' : ''}> <span data-i18n="common.enable">${t('common.enable')}</span>
           </label>
           <label class="settings-bool-option">
-            <input type="radio" name="${safeKey}" value="false" ${!isTrue ? 'checked' : ''} ${disabledAttributes}> <span data-i18n="common.disable">${t('common.disable')}</span>
+            <input type="radio" name="${safeKey}" value="false" ${!isTrue ? 'checked' : ''}> <span data-i18n="common.disable">${t('common.disable')}</span>
           </label>
         </div>`;
     case 'int':
     case 'duration':
-      return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
+      return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes}>`;
     case 'float':
-      return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
+      return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes}>`;
     default:
-      return `<input type="text" id="${safeKey}" value="${safeValue}" ${placeholderAttribute} class="settings-input settings-input--text${wideTextInput ? ' settings-input--wide' : ''}" ${disabledAttributes}>`;
+      return `<input type="text" id="${safeKey}" value="${safeValue}" ${placeholderAttribute} class="settings-input settings-input--text${wideTextInput ? ' settings-input--wide' : ''}">`;
   }
 }
 
 function markChanged(input) {
-  input.removeAttribute?.('aria-invalid');
   const row = input.closest('tr');
   if (!row) return; // 常驻控制区（如多模态回退 hidden input）没有表格行可高亮
-  let key, currentValue;
+  const key = input.type === 'radio' ? input.name : input.id;
+  setSettingInvalid(key, false);
+  const control = getSettingControl(key);
 
-  if (input.type === 'radio') {
-    key = input.name;
-    const checkedRadio = row.querySelector(`input[name="${key}"]:checked`);
-    currentValue = checkedRadio ? checkedRadio.value : '';
-  } else {
-    key = input.id;
-    currentValue = input.value;
-  }
-
-  if (currentValue !== originalSettings[key] || (key === 'TypeSafe_api_key' && input.dataset.clearSecret === 'true')) {
+  if (control && isSettingChanged(key, control)) {
     row.style.background = 'rgba(59, 130, 246, 0.08)';
   } else {
     row.style.background = '';
   }
+  updateDirtyStatus();
 }
 
 function setSettingInvalid(key, invalid) {
@@ -1939,8 +1936,41 @@ function setSettingInvalid(key, invalid) {
   for (const input of inputs) {
     if (invalid) input.setAttribute?.('aria-invalid', 'true');
     else input.removeAttribute?.('aria-invalid');
+    input.classList?.toggle('is-invalid', invalid);
   }
-  if (invalid) control.input?.focus?.();
+}
+
+function focusSettingControl(key) {
+  const control = getSettingControl(key);
+  if (!control?.input) return;
+  control.row?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+  control.input.focus?.({ preventScroll: true });
+}
+
+function isSettingChanged(key, control) {
+  return control.value !== originalSettings[key]
+    || (key === 'TypeSafe_api_key' && control.input.dataset.clearSecret === 'true');
+}
+
+function changedSettingKeys() {
+  return Object.keys(originalSettings).filter((key) => {
+    const control = getSettingControl(key);
+    return control ? isSettingChanged(key, control) : false;
+  });
+}
+
+function hasUnsavedSettings() {
+  return changedSettingKeys().length > 0;
+}
+
+function updateDirtyStatus() {
+  const status = document.getElementById('settings-dirty-status');
+  if (!status) return;
+  const count = changedSettingKeys().length;
+  status.textContent = count > 0
+    ? t('settings.savebar.dirty', { count })
+    : t('settings.savebar.clean');
+  status.dataset.dirty = count > 0 ? 'true' : 'false';
 }
 
 function getSettingControl(key) {
@@ -1998,51 +2028,74 @@ function syncSettingState(key, value) {
   if (control?.row) {
     control.row.style.background = '';
   }
+  updateDirtyStatus();
+}
+
+// 校验全部已改动设置，返回 { updates, invalid }；invalid 按页面顺序列出每个错误项。
+function collectSettingUpdates() {
+  const updates = {};
+  const invalid = [];
+
+  for (const key of changedSettingKeys()) {
+    const control = getSettingControl(key);
+    const setting = settingDefinitions.get(key);
+    const validationError = setting ? validateSettingInput(setting, control.value) : '';
+    if (validationError) {
+      invalid.push({ key, reason: validationError });
+      continue;
+    }
+    updates[key] = settingValueForStorage(key, control.value);
+  }
+
+  if (('cooldown_min_seconds' in updates || 'cooldown_max_seconds' in updates)
+    && !invalid.some(({ key }) => key === 'cooldown_min_seconds' || key === 'cooldown_max_seconds')) {
+    const minSeconds = Number(getSettingControl('cooldown_min_seconds')?.value);
+    const maxSeconds = Number(getSettingControl('cooldown_max_seconds')?.value);
+    if (minSeconds > maxSeconds) {
+      const reason = t('settings.msg.invalidCooldownBounds', {
+        min: settingLabel('cooldown_min_seconds'),
+        max: settingLabel('cooldown_max_seconds')
+      });
+      invalid.push({ key: 'cooldown_min_seconds', reason }, { key: 'cooldown_max_seconds', reason });
+    }
+  }
+  return { updates, invalid };
+}
+
+function reportInvalidSettings(invalid) {
+  for (const { key } of invalid) setSettingInvalid(key, true);
+  const details = invalid.map(({ key, reason }) => t('settings.msg.invalidValue', { name: settingLabel(key), reason }));
+  showError(details.length === 1
+    ? details[0]
+    : t('settings.msg.invalidValues', { count: details.length, details: details.join(t('settings.msg.detailSeparator')) }));
+  focusSettingControl(invalid[0].key);
 }
 
 async function saveAllSettings() {
-  // 收集所有变更
-  const updates = {};
-
-  for (const key of Object.keys(originalSettings)) {
-    const control = getSettingControl(key);
-    if (!control) continue;
-
-    const currentValue = control.value;
-    if (currentValue !== originalSettings[key] || (key === 'TypeSafe_api_key' && control.input.dataset.clearSecret === 'true')) {
-      const setting = settingDefinitions.get(key);
-      const validationError = setting ? validateSettingInput(setting, currentValue) : '';
-      if (validationError) {
-        setSettingInvalid(key, true);
-        showError(t('settings.msg.invalidValue', { key, reason: validationError }));
-        return;
-      }
-      setSettingInvalid(key, false);
-      updates[key] = settingValueForStorage(key, currentValue);
-    }
+  for (const key of Object.keys(originalSettings)) setSettingInvalid(key, false);
+  const { updates, invalid } = collectSettingUpdates();
+  if (invalid.length > 0) {
+    reportInvalidSettings(invalid);
+    return;
   }
 
-  if (Object.keys(updates).length === 0) {
+  const savedKeys = Object.keys(updates);
+  if (savedKeys.length === 0) {
     window.showNotification(t('settings.msg.noChanges'), 'info');
     return;
   }
 
-  if ('cooldown_min_seconds' in updates || 'cooldown_max_seconds' in updates) {
-    const minSeconds = Number(getSettingControl('cooldown_min_seconds')?.value);
-    const maxSeconds = Number(getSettingControl('cooldown_max_seconds')?.value);
-    if (minSeconds > maxSeconds) {
-      setSettingInvalid('cooldown_min_seconds', true);
-      setSettingInvalid('cooldown_max_seconds', true);
-      showError(t('settings.msg.invalidCooldownBounds'));
-      return;
-    }
-  }
-
-  if (!confirm(t('settings.msg.confirmSave'))) return;
+  const restartLabels = savedKeys.filter((key) => settingEffectMode(key) === 'restart').map(settingLabel);
+  const confirmed = await window.showConfirm({
+    title: t('settings.saveAll'),
+    message: t('settings.msg.confirmSave'),
+    confirmText: t('settings.saveAll')
+  });
+  if (!confirmed) return;
 
   // 使用批量更新接口（单次请求，事务保护）
   try {
-    const result = await fetchDataWithAuth('/admin/settings/batch', {
+    await fetchDataWithAuth('/admin/settings/batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates)
@@ -2052,7 +2105,9 @@ async function saveAllSettings() {
       syncSettingState(key, value);
     }
 
-    showSuccess(result?.message || t('settings.msg.savedCount', { count: Object.keys(updates).length }));
+    showSuccess(restartLabels.length > 0
+      ? t('settings.msg.savedRestart', { count: savedKeys.length, names: restartLabels.join(t('settings.msg.listSeparator')) })
+      : t('settings.msg.savedHot', { count: savedKeys.length }));
   } catch (err) {
     console.error('保存异常:', err);
     showError(t('settings.msg.saveFailed') + ': ' + err.message);
@@ -2081,6 +2136,7 @@ window.initPageBootstrap({
   topbarKey: 'settings',
   run: () => {
     bindSettingsPageActions();
+    window.guardUnsavedChanges?.(hasUnsavedSettings);
     loadSettings();
   }
 });

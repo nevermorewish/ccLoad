@@ -26,14 +26,52 @@ function normalizeChannelsPageSize(value) {
 }
 
 let channelsPageSize = normalizeChannelsPageSize(localStorage.getItem('channels.pageSize'));
+
+// 表头排序：取值与服务端 parseChannelListSort 一致，省略方向时名称升序、其余降序。
+const CHANNEL_SORT_KEYS = ['name', 'priority', 'enabled'];
+
+function defaultChannelSortOrder(key) {
+  return key === 'name' ? 'asc' : 'desc';
+}
+
+function normalizeChannelsSort(value) {
+  const key = CHANNEL_SORT_KEYS.includes(value?.key) ? value.key : 'priority';
+  const order = value?.order === 'asc' || value?.order === 'desc' ? value.order : defaultChannelSortOrder(key);
+  return { key, order };
+}
+
+let channelsSort = normalizeChannelsSort(null);
 let channelsTotalPages = 1;
 let channelsTotalCount = 0;
+let channelsLoadFailed = false; // 最近一次列表加载失败：空列表时渲染就地错误与重试
 let allAvailableModels = [];
 let allAvailableChannelNames = [];
 let batchRefreshResultsByChannelId = new Map();
 
+// 认证类型选项：渠道筛选与编辑抽屉头部共用（日志页复用抽屉时不加载 channels-filters.js）
+function getChannelAuthTypeOptions() {
+  return [
+    { value: 'all', label: window.t('channels.authTypeAll') },
+    { value: 'api_key', label: window.t('channels.authTypeAPI') },
+    { value: 'codex_oauth', label: window.t('channels.authTypeCodex') },
+    { value: 'anthropic_oauth', label: window.t('channels.authTypeAnthropic') },
+    { value: 'antigravity_oauth', label: window.t('channels.authTypeAntigravity') },
+    { value: 'codebuddy_oauth', label: window.t('channels.authTypeCodeBuddy') },
+    { value: 'xai_oauth', label: window.t('channels.authTypeXAI') },
+    { value: 'cursor_oauth', label: window.t('channels.authTypeCursor') },
+    { value: 'zed_oauth', label: window.t('channels.authTypeZed') },
+    { value: 'zai_oauth', label: window.t('channels.authTypeZAI') }
+  ];
+}
+
+function channelAuthTypeFilterLabel(value) {
+  const options = getChannelAuthTypeOptions();
+  const option = options.find(item => item.value === value);
+  return option ? option.label : options[0].label;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { normalizeChannelsPageSize, markChannelFormDirty, resetChannelFormDirty, syncChannelSaveButtonLabel };
+  module.exports = { normalizeChannelsPageSize, normalizeChannelsSort, markChannelFormDirty, resetChannelFormDirty, syncChannelSaveButtonLabel };
 }
 
 function isTokenChannelsReadOnly() {
@@ -169,7 +207,9 @@ function initChannelFormDirtyTracking() {
     'selectAllKeys',
     'keyStatusFilter',
     'selectAllModels',
-    'modelFilterInput'
+    'modelFilterInput',
+    'cooldownDetectionTestStatus',
+    'cooldownDetectionTestBody'
   ]);
 
   const uiOnlyClasses = ['url-checkbox', 'key-checkbox', 'model-checkbox'];

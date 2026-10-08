@@ -165,6 +165,7 @@ async function withLoadedLogsPage(options, assertions) {
   };
   const {
     isTokenRole = false,
+    showChannels = false,
     logSource = 'proxy',
     entries = []
   } = options;
@@ -200,7 +201,10 @@ async function withLoadedLogsPage(options, assertions) {
   };
 
   setGlobal('window', {
-    t: (key) => key === 'logs.sourceCheckinBadge' ? '签到' : key,
+    t: (key, params) => {
+      if (key === 'logs.sourceCheckinBadge') return '签到';
+      return params ? `${key} ${Object.values(params).join(' ')}` : key;
+    },
     initPageBootstrap() {},
     addEventListener: (type, handler) => {
       windowListeners[type] = handler;
@@ -222,7 +226,8 @@ async function withLoadedLogsPage(options, assertions) {
     },
     readFilterControlValues: () => ({ range: 'today', clientProtocol: '', authToken: '' }),
     getDurationTimingColor: () => '',
-    isAPITokenRole: () => isTokenRole
+    isAPITokenRole: () => isTokenRole,
+    shouldHideChannels: () => isTokenRole && !showChannels
   });
   setGlobal('document', {
     addEventListener() {},
@@ -299,7 +304,7 @@ test('model filter options contain request models but not redirected models', as
   });
 });
 
-test('Jev audit messages use the shared debug-log entry and expose the decision summary', async () => {
+test('Jev audit messages link to their upstream debug-log entry', async () => {
   await withLoadedLogsPage({
     logSource: 'jev',
     entries: [{
@@ -316,9 +321,87 @@ test('Jev audit messages use the shared debug-log entry and expose the decision 
       })
     }]
   }, ({ tbody }) => {
-    assert.match(tbody.innerHTML, /log-source-badge[^>]*>Jev<\/span>/);
     assert.match(tbody.innerHTML, /debug-log-link has-upstream-detail[^>]*data-log-id="42"/);
-    assert.match(tbody.innerHTML, /call_id=audit-42, category=quota, fallback\.reset=no_valid_reset/);
-    assert.doesNotMatch(tbody.innerHTML, /<details>|jev-log-detail/);
   });
+});
+
+test('token channel visibility also controls actual model text and hover', async () => {
+  for (const [isTokenRole, showChannels] of [[true, false], [true, true], [false, false]]) {
+    for (const modelField of ['actual_model', 'response_model']) {
+      await withLoadedLogsPage({
+        isTokenRole,
+        showChannels,
+        entries: [{
+          time: Date.now(), model: 'requested-model', [modelField]: 'private-upstream-model',
+          thinking_effort: 'high', reasoning_tokens: 123,
+          status_code: 200, duration: 0, log_source: 'proxy'
+        }]
+      }, ({ tbody }) => {
+        const html = tbody.innerHTML;
+        assert.match(html, /requested-model/);
+        if (isTokenRole && !showChannels) {
+          assert.doesNotMatch(html, /private-upstream-model|model-actual|logs\.titleActualModel/);
+        } else {
+          assert.match(html, /logs\.titleActualModel private-upstream-model/);
+        }
+      });
+    }
+  }
+});
+
+test('small request costs keep significant digits instead of rounding to $0.000', () => {
+  const previousGlobals = new Map();
+  const setGlobal = (key, value) => {
+    previousGlobals.set(key, Object.getOwnPropertyDescriptor(global, key));
+    Object.defineProperty(global, key, { configurable: true, writable: true, value });
+  };
+  const noop = () => {};
+  const element = () => ({
+    style: { setProperty: noop },
+    dataset: {},
+    classList: { add: noop, remove: noop, toggle: noop, contains: () => false },
+    appendChild: noop,
+    setAttribute: noop,
+    getAttribute: () => null,
+    addEventListener: noop,
+    querySelectorAll: () => [],
+    querySelector: () => null
+  });
+  setGlobal('window', {
+    location: { pathname: '/', search: '', href: '' },
+    addEventListener: noop,
+    dispatchEvent: noop,
+    matchMedia: () => ({ matches: false, addEventListener: noop })
+  });
+  setGlobal('localStorage', { getItem: () => null, setItem: noop, removeItem: noop });
+  setGlobal('document', {
+    addEventListener: noop,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    getElementById: () => null,
+    createElement: element,
+    body: element(),
+    documentElement: element()
+  });
+  setGlobal('CustomEvent', function CustomEvent() {});
+
+  try {
+    delete require.cache[require.resolve('./ui.js')];
+    require('./ui.js');
+    const { formatCost } = global.window;
+
+    assert.equal(formatCost(0.0002), '$0.0002');
+    assert.equal(formatCost(0.00012345), '$0.00012');
+    assert.equal(formatCost(0.005), '$0.005');
+    assert.equal(formatCost(0.0000004), '<$0.000001');
+    assert.equal(formatCost(1.23456), '$1.235');
+    assert.equal(formatCost(0), '$0');
+    assert.equal(formatCost(0.0002, 2), '$0.00');
+  } finally {
+    delete require.cache[require.resolve('./ui.js')];
+    for (const [key, descriptor] of previousGlobals) {
+      if (descriptor === undefined) delete global[key];
+      else Object.defineProperty(global, key, descriptor);
+    }
+  }
 });

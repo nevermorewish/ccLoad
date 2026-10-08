@@ -14,6 +14,8 @@ function buildChannelsListParams() {
   if (filters.model && filters.model !== 'all') {
     params.set(filters.modelExact ? 'model' : 'model_like', filters.model);
   }
+  params.set('sort', channelsSort.key);
+  params.set('order', channelsSort.order);
   params.set('limit', String(channelsPageSize));
   params.set('offset', String((channelsCurrentPage - 1) * channelsPageSize));
   return params;
@@ -34,6 +36,10 @@ async function loadChannels(options = {}) {
     }
 
     channels = Array.isArray(resp.data) ? resp.data : [];
+    channelsLoadFailed = false;
+    if (typeof syncAnthropicResetCreditsFromChannels === 'function') {
+      syncAnthropicResetCreditsFromChannels(channels);
+    }
     if (typeof syncOAuthUsageFromChannels === 'function') {
       syncOAuthUsageFromChannels(channels, usageStates);
     }
@@ -59,8 +65,11 @@ async function loadChannels(options = {}) {
   } catch (e) {
     if (loadSequence !== channelsLoadSequence) return;
     console.error('Failed to load channels', e);
+    channelsLoadFailed = true;
     if (options.throwOnError) throw e;
-    if (window.showError) window.showError(window.t('channels.loadChannelsFailed'));
+    // 已有列表时保留旧数据仅提示；空列表由 renderChannels 渲染就地错误与重试按钮
+    if (channels.length === 0) renderChannels();
+    else window.showError(window.t('channels.loadChannelsFailed'));
   }
 }
 
@@ -113,16 +122,15 @@ async function loadChannelStatsRange() {
 async function loadChannelStats(range = channelStatsRange) {
   try {
     const params = new URLSearchParams({ range, limit: '500', offset: '0' });
-    const statsBase = channelsReadURL('/admin/stats', '/dashboard/stats');
-    const data = await fetchDataWithAuth(`${statsBase}?${params.toString()}`);
-    channelStatsById = aggregateChannelStats((data && data.stats) || [], data && data.channel_health);
+    const data = await fetchDataWithAuth(`/dashboard/stats?${params.toString()}`);
+    channelStatsById = aggregateChannelStats((data && data.stats) || []);
     filterChannels();
   } catch (err) {
     console.error('Failed to load channel stats', err);
   }
 }
 
-function aggregateChannelStats(statsEntries = [], channelHealth = null) {
+function aggregateChannelStats(statsEntries = []) {
   const result = {};
 
   for (const entry of statsEntries) {
@@ -219,12 +227,6 @@ function aggregateChannelStats(statsEntries = [], channelHealth = null) {
     }
     if (stats.speedOutputTokens > 0 && stats.speedDurationSeconds > 0) {
       stats.outputTokensPerSecond = stats.speedOutputTokens / stats.speedDurationSeconds;
-    }
-
-    // 使用后端按渠道聚合的健康时间线（无需前端 merge）
-    // 保留 rate=-1 的空桶，buildChannelHealthIndicator 会渲染为灰色
-    if (channelHealth && channelHealth[id]) {
-      stats.healthTimeline = channelHealth[id];
     }
 
     delete stats._firstByteWeightedSum;
