@@ -548,7 +548,7 @@ func TestRegistry_TranslateResponseNonStream_AnthropicReasoningAndUsageDetails(t
 			t.Fatalf("TranslateResponseNonStream failed: %v", err)
 		}
 		body := string(got)
-		if !strings.Contains(body, `"reasoning_content":"step by step"`) || !strings.Contains(body, `"type":"thinking"`) || !strings.Contains(body, `"signature":"sig_1"`) || !strings.Contains(body, `"type":"redacted_thinking"`) || !strings.Contains(body, `"data":"redacted_blob"`) {
+		if !strings.Contains(body, `"reasoning_content":"step by step"`) || strings.Contains(body, `"reasoning":`) || strings.Contains(body, "sig_1") || strings.Contains(body, "redacted_blob") {
 			t.Fatalf("unexpected OpenAI reasoning payload: %s", got)
 		}
 		if !strings.Contains(body, `"prompt_tokens":21`) || !strings.Contains(body, `"cached_tokens":7`) || !strings.Contains(body, `"cache_creation_input_tokens":11`) || !strings.Contains(body, `"reasoning_tokens":13`) {
@@ -600,7 +600,7 @@ func TestRegistry_TranslateResponseStream_AnthropicReasoningAndUsageDetails(t *t
 		if err != nil {
 			t.Fatalf("content_block_stop failed: %v", err)
 		}
-		if len(meta) != 1 || !strings.Contains(string(meta[0]), `"reasoning"`) || !strings.Contains(string(meta[0]), `"type":"thinking"`) || !strings.Contains(string(meta[0]), `"signature":"sig_1"`) {
+		if len(meta) != 0 {
 			t.Fatalf("unexpected OpenAI reasoning meta chunk: %#v", meta)
 		}
 		finish, err := reg.TranslateResponseStream(context.Background(), protocol.Anthropic, protocol.OpenAI, "gpt-4o", nil, nil, []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5,\"cache_read_input_tokens\":7,\"cache_creation_input_tokens\":11,\"reasoning_tokens\":13}}\n\n"), &state)

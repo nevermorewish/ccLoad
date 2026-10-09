@@ -29,7 +29,6 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
 	NextToolCallIndex    int
-	ReasoningAccumulator map[int]*ReasoningAccumulator
 	Done                 bool
 	TrailingUsageSent    bool
 	IncludeUsage         bool
@@ -50,14 +49,6 @@ type ToolCallAccumulator struct {
 	Name      string
 	Index     int
 	Arguments strings.Builder
-}
-
-// ReasoningAccumulator collects one streamed Anthropic reasoning block.
-type ReasoningAccumulator struct {
-	Type      string
-	Text      strings.Builder
-	Signature strings.Builder
-	Data      string
 }
 
 func (u *claudeUsageTokens) Merge(usage gjson.Result) {
@@ -188,15 +179,13 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 				// Don't output anything yet - wait for complete tool call
 				return [][]byte{}
-			case "thinking", "redacted_thinking":
-				if (*param).(*ConvertAnthropicResponseToOpenAIParams).ReasoningAccumulator == nil {
-					(*param).(*ConvertAnthropicResponseToOpenAIParams).ReasoningAccumulator = make(map[int]*ReasoningAccumulator)
+			case "thinking":
+				if thinking := contentBlock.Get("thinking").String(); thinking != "" {
+					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", thinking)
+					return [][]byte{template}
 				}
-				index := int(root.Get("index").Int())
-				accumulator := &ReasoningAccumulator{Type: blockType, Data: contentBlock.Get("data").String()}
-				accumulator.Text.WriteString(contentBlock.Get("thinking").String())
-				accumulator.Signature.WriteString(contentBlock.Get("signature").String())
-				(*param).(*ConvertAnthropicResponseToOpenAIParams).ReasoningAccumulator[index] = accumulator
+				return [][]byte{}
+			case "redacted_thinking":
 				return [][]byte{}
 			}
 		}
@@ -216,22 +205,13 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 					hasContent = true
 				}
 			case "thinking_delta":
-				// Accumulate reasoning/thinking content
+				// Forward visible thinking as text, without structured reasoning metadata.
 				if thinking := delta.Get("thinking"); thinking.Exists() {
-					index := int(root.Get("index").Int())
-					if accumulator := (*param).(*ConvertAnthropicResponseToOpenAIParams).ReasoningAccumulator[index]; accumulator != nil {
-						accumulator.Text.WriteString(thinking.String())
-					}
 					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", thinking.String())
 					hasContent = true
 				}
 			case "signature_delta":
-				if signature := delta.Get("signature"); signature.Exists() {
-					index := int(root.Get("index").Int())
-					if accumulator := (*param).(*ConvertAnthropicResponseToOpenAIParams).ReasoningAccumulator[index]; accumulator != nil {
-						accumulator.Signature.WriteString(signature.String())
-					}
-				}
+				// Chat clients may define reasoning as a string; do not emit signature arrays.
 				return [][]byte{}
 			case "input_json_delta":
 				// Tool use input delta - accumulate arguments for tool calls
@@ -256,24 +236,6 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 	case "content_block_stop":
 		// End of content block - output complete tool call if it's a tool_use block
 		index := int(root.Get("index").Int())
-		if (*param).(*ConvertAnthropicResponseToOpenAIParams).ReasoningAccumulator != nil {
-			if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ReasoningAccumulator[index]; exists {
-				if accumulator.Type == "redacted_thinking" {
-					delete((*param).(*ConvertAnthropicResponseToOpenAIParams).ReasoningAccumulator, index)
-					return [][]byte{}
-				}
-				var item []byte
-				item = []byte(`{"type":"thinking","text":""}`)
-				item, _ = sjson.SetBytes(item, "text", accumulator.Text.String())
-				if accumulator.Signature.Len() > 0 {
-					item, _ = sjson.SetBytes(item, "signature", accumulator.Signature.String())
-				}
-				template, _ = sjson.SetRawBytes(template, "choices.0.delta.reasoning", []byte(`[]`))
-				template, _ = sjson.SetRawBytes(template, "choices.0.delta.reasoning.-1", item)
-				delete((*param).(*ConvertAnthropicResponseToOpenAIParams).ReasoningAccumulator, index)
-				return [][]byte{template}
-			}
-		}
 		if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator != nil {
 			if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator[index]; exists {
 				// Build complete tool call with accumulated arguments
@@ -425,7 +387,6 @@ func convertClaudeResponseToOpenAINonStreamMessage(_ context.Context, modelName 
 
 	var content strings.Builder
 	var reasoningContent strings.Builder
-	reasoning := []byte(`{"items":[]}`)
 	toolCallCount := 0
 
 	for _, block := range root.Get("content").Array() {
@@ -433,18 +394,9 @@ func convertClaudeResponseToOpenAINonStreamMessage(_ context.Context, modelName 
 		case "text":
 			content.WriteString(block.Get("text").String())
 		case "thinking":
-			thinking := block.Get("thinking").String()
-			reasoningContent.WriteString(thinking)
-			item := []byte(`{"type":"thinking","text":""}`)
-			item, _ = sjson.SetBytes(item, "text", thinking)
-			if signature := block.Get("signature"); signature.Exists() && signature.String() != "" {
-				item, _ = sjson.SetBytes(item, "signature", signature.String())
-			}
-			reasoning, _ = sjson.SetRawBytes(reasoning, "items.-1", item)
+			reasoningContent.WriteString(block.Get("thinking").String())
 		case "redacted_thinking":
-			item := []byte(`{"type":"redacted_thinking","data":""}`)
-			item, _ = sjson.SetBytes(item, "data", block.Get("data").String())
-			reasoning, _ = sjson.SetRawBytes(reasoning, "items.-1", item)
+			// Opaque Anthropic data has no portable Chat Completions representation.
 		case "tool_use":
 			arguments := block.Get("input").Raw
 			if !gjson.Valid(arguments) || !block.Get("input").IsObject() {
@@ -464,9 +416,6 @@ func convertClaudeResponseToOpenAINonStreamMessage(_ context.Context, modelName 
 	out, _ = sjson.SetBytes(out, "choices.0.message.content", content.String())
 	if reasoningContent.Len() > 0 {
 		out, _ = sjson.SetBytes(out, "choices.0.message.reasoning_content", reasoningContent.String())
-	}
-	if items := gjson.GetBytes(reasoning, "items"); items.IsArray() && len(items.Array()) > 0 {
-		out, _ = sjson.SetRawBytes(out, "choices.0.message.reasoning", []byte(items.Raw))
 	}
 
 	stopReason := mapAnthropicStopReasonToOpenAI(root.Get("stop_reason").String())
@@ -545,7 +494,9 @@ func ConvertClaudeResponseToOpenAINonStream(ctx context.Context, modelName strin
 			if contentBlock := root.Get("content_block"); contentBlock.Exists() {
 				blockType := contentBlock.Get("type").String()
 				if blockType == "thinking" {
-					// Start of thinking/reasoning content - skip for now as it's handled in delta
+					if thinking := contentBlock.Get("thinking").String(); thinking != "" {
+						reasoningParts = append(reasoningParts, thinking)
+					}
 					continue
 				} else if blockType == "tool_use" {
 					// Initialize tool call accumulator for this index

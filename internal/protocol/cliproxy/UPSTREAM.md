@@ -22,6 +22,16 @@ fails on every unclassified or unstamped core change. The manifest deliberately
 does not carry a second commit or date; the previous commit is anchored to the
 version of this file stored in Git `HEAD` before the synchronization edits.
 
+## Local compatibility correction (2026-10-09)
+
+Anthropic-to-Chat responses expose visible thinking only as the string
+`reasoning_content`. Native JSON and streaming responses no longer emit the
+structured `message.reasoning` / `delta.reasoning` arrays, which fail decoding
+in Chat clients that define `reasoning` as a string. Signature and redacted
+thinking metadata are omitted on this path; Anthropic-to-Responses retains its
+structured reasoning support. Thinking text included in a block-start event
+is retained in both streaming and buffered event conversion.
+
 ## Synchronization adaptations (2026-10-04)
 
 The core and the allowlisted Antigravity adapter share the target above.
