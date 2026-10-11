@@ -2,6 +2,12 @@
 
 修改代理重试、冷却、取消、SSE 或 Responses WebSocket 时读取相关章节。路径相对仓库根目录；省略目录的 app 文件位于 `internal/app/`。
 
+## 动态思考等级
+
+- 等级作用于业务模型，与协议无关：OpenAI Chat、Responses（HTTP/WS）、Anthropic Messages、Gemini generateContent/streamGenerateContent 入口都参与，仅生成端点本身是业务轮；`/responses/compact`、`/responses/input_tokens`、`count_tokens`、`:countTokens` 等子资源不调用判断模型也不推进状态。等级按实际模型目录档位钳制后，像思考后缀一样写入客户端协议请求体（Chat `reasoning_effort`、Responses `reasoning.effort`、Anthropic `output_config.effort`（`thinking.type=enabled` 改为 adaptive）、Gemini `thinkingLevel`），由协议转换带到任意上游；发送边界按实际 wire 等级与判断结果逐字比较判定是否生效（`max` 与 `xhigh` 是不同档位，不视为同级）。任意协议 user 消息中以 `<system-reminder>` 开头的内容块计入指令而非任务，Claude Code 本地命令块（`<local-command-caveat>`/`<local-command-stdout>`/`<local-command-stderr>` 及无参数的 `<command-name>`）既非任务也非指令，直接从判断上下文剔除；只含提醒或本地命令块的 user 消息不算本轮输入；Anthropic 投影跳过 thinking 块，无 `thinking` 字段时与后缀一致写为 adaptive（转换器只在 adaptive 下读取 `output_config.effort`）；Claude Code 会话身份取 `X-Claude-Code-Session-Id`，缺失时取 `metadata.user_id`。客户端是否指定非 `auto` 思考后缀在历史继承和自动注入之前记录；仅该后缀豁免判断，请求体中的显式等级可由判断结果覆盖。同一轮只执行一次判断，Key/URL/协议/渠道重试与 WS 完整回放、原生增量发送共用结果；目标模型能力不明确时跳过注入。
+- 判断读取可获得的完整会话，最多 24 KiB 文本且保持 UTF-8 边界。无可靠会话 ID 时仅做独立请求判断；有身份时按认证主体、协议、会话/线程及业务模型隔离，状态不落数据库。状态最多保留 1024 个身份，按执行会话 TTL 清理；满时新身份独立判断，已有身份继续复用。升级立即生效，降级需连续两次有效低等级建议；工具续轮每三轮重评，失败或新约束提前重评（结构化错误/退出码优先，否则只看输出首行标记）；与工具结果同条消息的真实用户文本（Claude Code 合并工具执行期间的输入）按用户输入立即重评，客户端注入的提醒与本地命令不算。上下文不完整、错误与取消不会推进降级；超 24 KiB 截断（保留原始任务、最新要求、指令摘要和仅含对话的尾部，指令不在尾部重复）的建议仍计入降级确认；判断模型给出的 confidence 低于 0.3 时按 `low_confidence` fallback：记录建议与置信度但不改变已生效等级（首轮即保留客户端等级），下一轮强制重判；指令摘要覆盖顶层 instructions、system/developer 消息和 Codex AGENTS/user_instructions，多个来源共享独立预算。上下文不完整只有三种：请求结构损坏（JSON 无效、未知 role、content 形状错误）；仍带 `previous_response_id`（WS 与本进程 HTTP 续接已先用内存历史补全，剩下的说明历史只在上游）；最新一段输入（最后一个模型产出之后，含工具结果的数组或字符串化内容）带图片/文件，复用轮也须检查。历史中的媒体和未知 item/block/part 类型都投影为 `[类型]` 占位符，照常判断，以免整段会话被一张旧截图或一个新类型永久作废。Codex 的 `additional_tools`、`configuration_update` item 不是会话内容，投影与“本轮是否为用户输入”判断均跳过；多代理 v2 的 `agent_message`（派发任务、代理间消息与最终回报）是会话内容，加密的 `encrypted_content` 部分投影为 `[encrypted]`。子代理线程的 user 消息只有注入上下文，没有真实用户任务时，以父代理的 NEW_TASK 及同一发送方后续消息作为截断摘要中的原始任务与最新要求；主线程只收到发给自己的回报，不受影响。子代理与主线程共用 `Session-Id`，状态按 `Thread-Id` 隔离。Codex `generate:false` 预热请求没有可判断的输入，直接记 `skipped/prewarm`：不调用判断模型、按客户端等级发送、不改动会话状态与待确认降级。Codex guardian 审批子代理（请求头 `X-OpenAI-Subagent: guardian`）审查的是另一代理的计划动作，判断模型会按被审任务定级，同样记 `skipped/guardian` 并按客户端等级发送。投影中的 Fernet 密文（`gAAAAA…`，Codex agent 消息与 reasoning 密文，含 JSON 参数和 code-mode 源码）统一替换为 `[encrypted]`；Anthropic thinking 签名与 Gemini thoughtSignature 本就不进投影。状态在业务发送边界按实际 wire 等级提交，提交后版本递增，同轮后续重试不能撤销。判断候选等级取业务模型（请求原始模型）在 `models.json` 全部目录（含 Lookup 不读的 kimi/xai/meta/gemini-cli）中档位最全的 `Thinking.Levels` 里有 criteria 的档位（`low`…`max`），不足两档用 `low`–`xhigh`；发送钳制优先上游协议对应目录，无档位再用同一全目录兜底；只有预算没有档位的模型（gemini-2.5、Claude 4.5 及更早）仍跳过注入；判断结果不在候选内视为 `invalid_response`。criteria 必须按等级升序输出 JSON（不能用 Go map 的字母序：回放中加入 `max` 后字母序把多条中档样本推到 high）。判断 instructions 与 criteria 经真实回放 A/B 选定（更细的 criteria 会拉低中档置信度并把长审查推到 xhigh，state 加 phase/has_tools 无净收益；`max` 用“Research-grade…”措辞，普通样本与四档基线一致，含糊的“最难问题”措辞会让 xhigh/max 低置信度摇摆），修改须先用 docs 样本回放对比。
+- 整个判断过程（包括失败后的冷却写入）共用一个超时预算；预算耗尽允许冷却写入失败，不能延迟业务回退。容量满直接回退，不递归判断、不执行客户端工具、不跨渠道重试。失败保留先前有效等级，无有效等级则使用原请求默认行为；在实际业务发送前取消不提交新状态。较旧的并发 HTTP 判断不能覆盖较新的状态。
+
 ## Responses WebSocket 会话与资源
 
 - **执行身份**:同 Token 下以 `Session-Id` 标识顶层会话;存在 `Thread-Id` 时组合两者,隔离 Codex 主/子代理的 transcript、Response ID、turn lock;无 `Thread-Id` 回退原 `Session-Id` 契约。禁止改用请求体 `session_id`、`prompt_cache_key` 或每回合变化的 request/turn/window ID
@@ -9,6 +15,7 @@
 - **生命周期**:上游每 45s 发 Ping,连续 5 min 无帧/Pong 判失活;下游全断满 5 min 后由每分钟清理器关上游物理连接(实际约 5–6 min);稳定逻辑会话与已提交 transcript 在 `responses_ws_session_ttl_minutes`(默认 15,小内存机器可设 10)到期前不因容量/预算压力被逐出
 - **超限语义**:达 `responses_ws_max_sessions` 只拒绝新会话身份;已提交 payload 超 `responses_ws_max_transcript_bytes` 后,所有新回合在触达上游前以 `429/rate_limit_error/rate_limit` 拒绝,已准入回合仍可提交,有限最坏超量 `max_sessions × max_body_bytes`
 - **连接轮换**:达到 `upstream_connection_reuse_limit_seconds` 的空闲连接立即关闭,在途 turn 完成后再关;下一轮优先原渠道/Key/URL,按需重连并重放完整 transcript——Response ID 只在原物理 WebSocket 上有效
+- **`response.interrupt`**:读协程在回合进行中直接拦截(不排队到回合后)。原生上游 WS 正在推流时原样透传,以上游 `response.incomplete`(`reason=interrupted`)收尾;HTTP/转换回合或上游不可写时取消本地回合,按客户端取消记 499、不冷却不换渠道,下发带 `response_id` 与已收集 output 的合成 `response.incomplete`,同连接可用该 ID 续接。`reason=interrupted` 的空 incomplete 不按 599 空流处理。缺 `response_id` 返回 `invalid_request`;无在途回合的合法中断静默忽略(上游返回 400,刻意不同:错误会被归到客户端下一轮)
 - **指标**:`/admin/runtime-metrics` 的 `transcript_bytes` 只统计有效 payload,不是 Go 堆占用;另有 `ttl_expired`/`capacity_rejected`/`budget_rejected`/`previous_response_misses` 进程累计计数
 
 ## 故障切换(`util/classifier.go` + `cooldown/detection.go`)
@@ -19,7 +26,7 @@
 - **Anyrouter Responses 元数据兼容**:上游协议为 Codex、请求属于 Responses 且渠道名称包含 `anyrouter`（忽略大小写）时，转发前仅删除 `input[*].internal_chat_message_metadata_passthrough.content_item_kinds`，保留正文及其他元数据；仅 URL 包含 anyrouter 不触发此规则。
 
 - Key 级(401/403;400 且错误信息含组织已禁用 `organization has been disabled`、余额耗尽 `credit balance`、需身份验证 `identity verification is required`)→ 冷却当前 Key,重试同渠道其他 Key;所有启用 Key 均冷却时自动升级渠道冷却。OAuth 渠道没有独立 Key(`KeyIndex == NoKeyIndex`,凭证就是渠道),Key 级故障直接改为渠道冷却并切渠道;401 例外,先由 OAuth 凭证层强制刷新重试
-- **Anthropic 429 分流**(`util/classifier.go`):响应头明确拒绝共享 5h/7d 订阅窗口 → `CredentialScoped` Key 级冷却(OAuth 即渠道冷却),reset 取自响应头,禁止同渠道 Key 回退;fast 模式缺少 usage credits → 客户端错误,不冷却;其余 429 按模型级
+- **Anthropic 429 分流**(`util/classifier.go`):响应头明确拒绝共享 5h/7d 订阅窗口 → `CredentialScoped` Key 级冷却(OAuth 即渠道冷却),reset 取自响应头,禁止同渠道 Key 回退;fast 模式缺少 usage credits → 客户端错误,不冷却;其余 429 按模型级。仅 overage 被拒(含 overage claim 且 5h/7d 状态都缺失、利用率缺失或未满)不算共享窗口被拒。reset 超过 7d+1h,或 overage claim 下统一 reset 等于 `Overage-Reset`,都是计费周期边界,不作冷却截止时间,退回指数退避
 - **xAI 免费额度耗尽**：`subscription:free-usage-exhausted` / included free usage 错误只有明确提供模型字段或 `for model <name>` 时才冷却该模型；未指向模型的共享额度按 `CredentialScoped` 冷却凭证（OAuth 即渠道）。HTTP 与 SSE 错误采用同一规则，优先保留结构化 reset，缺失时沿用 24 小时滚动窗口上限。
 - 模型级(`model_cooldown`,上游 HTTP 400/413/499/5xx/520/524/429,597 服务类 SSE 错误及模型不可用 SSE 错误,598/599 流故障,连接重置/HTTP2 流关闭/空响应/网络超时,404 模型不可用,410 明确模型退役)→ 写入 `(channel_id, 实际上游模型)` 冷却;直接切渠道,不再尝试同渠道其他 Key/URL,不影响其他模型;所有配置模型均冷却时自动升级渠道冷却
 - 渠道级(DNS/连接拒绝/网络或路由不可达)→ 切渠道
@@ -27,6 +34,7 @@
 - 客户端错误(406,404 非模型 `does not exist`,400/413/597 上下文超限,413 `message_too_big` WebSocket close 1009)→ 直接返回,不重试;普通 HTTP 413 请求体超限仍按模型级换渠
 - 成本限额达到 → 跳过该渠道
 - Key/模型/渠道共用指数退避:按错误类型取初始值(默认认证 5 min、服务端 2 min、超时/限流 1 min),翻倍并 30 min 封顶;上游或自定义规则给出精确 reset 截止时间时优先使用
+- **同渠道重试**(`same_channel_retries`,0–10,默认 0;`proxy_handler.go:tryChannelWithSameChannelRetries` + `proxy_error.go:applyCooldownDecision`):未提交响应的模型/渠道级故障中,仅网络错误与 5xx(596 除外)在本渠道原地再试 N 次,无间隔、每次照常写尝试日志。期间冷却只登记不落库:重试成功即丢弃,用尽或放弃时只提交最后一次尝试的冷却,不因中间失败翻倍退避。是否提交按渠道+模型的跨请求连续失败计数(`sameChannelFailureCounter`,内存态,任一成功清零)判定:超过 N 才冷却。已提交响应的中途断流(599)无法原地重试,靠客户端重发;连续不超过 N 次时不冷却,重发仍可回到本渠道。适用 `retry_other_keys_on_failure` 换 Key 回退时当前 Key 照常冷却。CSV 列 `same_channel_retries`,缺列导入保留原值
 - **冷却探测规则**(`cooldown/detection.go`):渠道 `cooldown_detection_rules` 为空时继承系统设置 `global_cooldown_detection_rules`;按 rules 数组顺序(提交后重编号 0..N-1)匹配 status+正则,命名捕获组可解析精确 reset 时间。网络故障故意不进匹配器(没有可信上游错误体);规则命中但不可执行时回退内置分类器,不猜冷却时长。`EvaluateCooldownDetectionRules` 无副作用,代理链路与 admin 规则测试端点共用
 - **全冷却兜底**(`selector_cooldown.go`,`cooldown_fallback_enabled` 默认 true):所有渠道都冷却时不直接拒绝,挑「最早恢复」渠道打 `CooldownFallback` 标记继续正常流程,Key 也改选最早恢复的(`SelectCooldownFallbackKey`)。排查「明明全冷却了为什么还在发请求」先看这里;设 false 才直接拒绝
 - **日志模型字段**(`model/log.go`+`logs` 表):`actual_model` 记实际发给上游的模型(空=未重定向),`response_model`(`LogEntry.ResponseModel`)记**上游成功响应声明的模型**,三库增量迁移齐全、前端日志页展示;它只用于记录与排查,成本归集、冷却与维度聚合仍以 `ActualModel` 为准
@@ -52,10 +60,8 @@
 - **流终态有两套判据,判完整就必须给下游完整终止序列**(`proxy_sse_parser.go:parseEvent`+`proxy_forward.go`):除 `[DONE]`/`message_stop`/`response.completed` 外,OpenAI Chat 的非空 `finish_reason` 与 Gemini 的非空 `finishReason` 同样是终态——不少 OpenAI 兼容上游给完 `finish_reason` 就断流,只认 `[DONE]` 会把完整响应误记成 499/599。判据只有 `openAIStreamPayloadComplete`/`geminiStreamPayloadComplete` 一份,直通与跨协议两条路径共用,别再各写一份。而 `openai→{anthropic,codex,gemini}` 转换器的终止事件只挂在 `[DONE]` 上,Gemini 线协议本无 `[DONE]`,但 `gemini→Responses` 在 `finishReason` 后等 usage 或 `[DONE]` 才发终态(上游由 executor 在 EOF 补喂),所以上游省略它时由 `needsSynthesizedStreamTerminator`(OpenAI 上游的跨协议转换、Gemini 上游仅限 Responses 客户端;`gemini→Claude` 在 `[DONE]` 上不保留 finishReason,补喂会把 MAX_TOKENS 报成 end_turn;上游已报错时不补)在流结束后补喂一份合成 `data: [DONE]` 走同一个转换闭包收尾,Zed 的 Gemini 流在 `stream_ended` 且见过 finishReason 时同样补喂——不手搓终止帧,因为 open content block/stop_reason/usage 都在转换器内部状态里;同协议直通不补,避免改动透传字节。「上游没发 [DONE] 但客户端收到 message_stop」是预期行为
 - **429** 统计页/健康时间线计入 ErrorCount 与成功率,`rate_limited` 是 ErrorCount 子集;健康度排序(`GetChannelSuccessRates`/effective priority)排除 429,真实渠道级限流交给冷却过滤。全局设置 `codex_map_429_to_503` 默认关闭;开启后只把所有候选耗尽时返回给官方 Codex 客户端的最终 429 改为 503,内部冷却/统计、其他 Responses 客户端和 ccLoad 自身限额仍保留真实状态
 
-## TypeSafe 错误分析兜底
+## OAuth 额度输出
 
-- `TypeSafe_enabled` 默认关闭，`TypeSafe_api_key` 保存后重启生效。独立客户端请求 TypeSafe 官方 `/v1/systemone`，模型使用 `jev-latest`，审计记录实际返回版本。
-- `cooldown.Manager.PrepareError` 先执行自定义规则和本地分类；本地已有明确分类（包括已登记的 500/502/503/504）时直接处理，不调用 Jev，也不单独为其补时间；只有本地默认兜底的未知错误才调用 Jev 补类别，并可同时补充缺少的精确截止时间。分类与时间各自要求 confidence >= 0.95，非法概率分布、无依据/无时区/过期或超过 366 天的时间回退原策略。精确 reset 不受指数退避上限截断。
-- 每个 HTTP 请求及每个 Responses WS turn 跨重试累计等待最多 3 秒；不重试远程分析，全局最多 8 并发、滚动一秒最多 10 次，容量不足直接回退。冷却数据库写入继续使用独立 3 秒上下文。
-- 同次失败的已准备判定供换 Key、换渠、延迟冷却复用。网络故障、WS transport tracker、取消和人工中断不分析；已提交响应只应用冷却，不重放请求。分析不触发凭据禁用、请求体修复或付费回退。
-- 每次实际调用写 `log_source=jev`，message 为有大小上限的版本化 JSON，保留脱敏输入、响应、概率、采用/回退原因、调用 ID；同时把脱敏的 TypeSafe 请求和审计结果关联到 `debug_logs`，供管理端 Debug 弹窗查看。代理日志携带同一调用 ID 及 adopted/fallback 结果；未调用则记跳过原因。Jev 日志成本按现有 `jev-latest` 模型价格目录计算，未配置价格时为 0；审计仍不计入渠道/URL/Token/OAuth 用量；API Token 网页用户仅能查询自身 proxy 来源日志。
+- 渠道高级设置 → OAuth 凭证的 `oauth_quota_passthrough`（输出额度信息）默认关闭，旧渠道迁移同样为关闭。仅 Codex、Anthropic 返回账号额度，界面只对二者展示该开关，过滤也只对二者生效；其他 OAuth 渠道隐藏开关并保持原样透传；开启后保留原有透传行为，后台额度查询不受影响；API Key 渠道不受此开关影响。
+- 关闭时，在下游输出边界过滤账号额度响应头（Anthropic/Codex/rate-limit）、额度 SSE/WS 事件和协议 JSON 中的额度字段，包括最终错误响应；保留请求 ID、Codex turn-state、正常错误和模型输出。用户自定义 metadata 与 token usage 不作为账号额度删除。
+- 原始响应仍先用于内部额度采样、计费、冷却和故障切换，过滤只作用于客户端输出。HTTP、SSE 与 Responses WebSocket 共用该边界；不能在 usage parser 前删事件。

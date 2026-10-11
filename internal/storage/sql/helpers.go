@@ -11,7 +11,7 @@ import (
 	"ccLoad/internal/model"
 )
 
-// FetchChannelInfoBatch 批量查询渠道信息（名称+优先级+倍率区间）
+// FetchChannelInfoBatch 批量查询渠道信息（名称+优先级+认证类型+倍率区间）
 // 消除 N+1：一次全表查询 + 内存过滤
 // 设计原则（KISS）：渠道总数<1000时，全表扫描比动态 IN 子查询更简单
 // 输入：渠道ID集合 map[int64]bool
@@ -31,8 +31,8 @@ func (s *SQLStore) FetchChannelInfoBatch(ctx context.Context, channelIDs map[int
 			c.priority,
 			c.auth_type,
 			COALESCE(c.cost_multiplier, 1),
-			MIN(CASE WHEN c.auth_type = 'api_key' AND k.disabled = 0 THEN COALESCE(k.cost_multiplier, 1) END),
-			MAX(CASE WHEN c.auth_type = 'api_key' AND k.disabled = 0 THEN COALESCE(k.cost_multiplier, 1) END)
+			MIN(CASE WHEN c.auth_type IN ('api_key', 'system_one') AND k.disabled = 0 THEN COALESCE(k.cost_multiplier, 1) END),
+			MAX(CASE WHEN c.auth_type IN ('api_key', 'system_one') AND k.disabled = 0 THEN COALESCE(k.cost_multiplier, 1) END)
 		FROM channels c
 		LEFT JOIN api_keys k ON k.channel_id = c.id
 		GROUP BY c.id
@@ -57,7 +57,7 @@ func (s *SQLStore) FetchChannelInfoBatch(ctx context.Context, channelIDs map[int
 		}
 		multiplierMin := normalizeCostMultiplier(channelMultiplier)
 		multiplierMax := multiplierMin
-		if authType == model.AuthTypeAPIKey && keyMin.Valid && keyMax.Valid {
+		if model.UsesAPIKeyCredentials(authType) && keyMin.Valid && keyMax.Valid {
 			multiplierMin = normalizeCostMultiplier(keyMin.Float64)
 			multiplierMax = normalizeCostMultiplier(keyMax.Float64)
 		}
@@ -66,6 +66,7 @@ func (s *SQLStore) FetchChannelInfoBatch(ctx context.Context, channelIDs map[int
 			channelInfos[id] = model.ChannelInfo{
 				Name:              name,
 				Priority:          priority,
+				AuthType:          authType,
 				CostMultiplierMin: multiplierMin,
 				CostMultiplierMax: multiplierMax,
 			}

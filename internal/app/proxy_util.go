@@ -167,8 +167,6 @@ type upstreamWireAliases struct {
 
 // fwResult 转发结果
 type fwResult struct {
-	jevNote             string
-	errorReceivedAt     time.Time
 	Status              int
 	UpstreamStatus      int // 原始上游 HTTP 状态码；Status 可被改写为 596-599 等内部分类码
 	Header              http.Header
@@ -235,11 +233,11 @@ type ForwardObserver struct {
 	OnFirstByteRead     func(time.Duration) // 客户端首字节耗时回调（可选）
 	OnUpstreamWebsocket func(bool)          // 实际上游传输变化回调（可选）
 	OnDebugCapture      func(*debugCapture)
+	OnThinkingEffort    func(sent, client string) // 动态思考确定实际发送等级（可选）
 }
 
 // proxyRequestContext 代理请求上下文（封装请求信息，遵循DIP原则）
 type proxyRequestContext struct {
-	jevWait                 time.Duration
 	abortChannel            context.CancelCauseFunc // 覆盖当前渠道所有 Key/URL 和重试等待
 	antigravityCreditsTried map[string]bool
 	antigravityRateRetried  map[string]bool
@@ -273,6 +271,10 @@ type proxyRequestContext struct {
 	debugData               *model.DebugLogEntry   // Debug日志数据（debug开启时填充）
 	skipProxyLog            bool                   // 管理测试等外层会统一持久化日志的调用路径
 	thinkingEffort          string
+	reasoning               *reasoningTurn
+	reasoningExpected       string
+	reasoningApplied        string
+	reasoningApplyReason    string
 	routingSession          *responsesExecutionSession // 当前 Responses execution session 的首选渠道
 	sessionAffinityKey      string                     // Anthropic/Codex 会话绑定键（令牌+会话 ID），空表示不绑定
 	sessionAffinity         sessionAffinityTarget      // 请求开始时的会话绑定，channelID=0 表示无
@@ -344,6 +346,10 @@ type proxyResult struct {
 // - Gemini: 路径包含 :streamGenerateContent
 // - Claude/OpenAI: 请求体中 stream=true
 func isStreamingRequest(path string, body []byte) bool {
+	// System One 只有 JSON 响应。
+	if protocol.DetectRequestFamily(path) == protocol.RequestFamilySystemOne {
+		return false
+	}
 	// Gemini流式请求特征：路径包含 :streamGenerateContent
 	if strings.Contains(path, ":streamGenerateContent") {
 		return true
@@ -507,6 +513,8 @@ func injectAPIKeyHeaders(req *http.Request, apiKey string, upstreamProtocol stri
 	case util.ProtocolGemini:
 		// Gemini API: 仅使用 x-goog-api-key
 		req.Header.Set("x-goog-api-key", apiKey)
+	case util.ProtocolSystemOne:
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	case util.ProtocolAnthropic:
 		req.Header.Set("x-api-key", apiKey)
 		if anthropicAPIKeyAuthorizationAllowed(req.URL) {
@@ -887,6 +895,7 @@ func (s *Server) prepareRequestBody(cfg *model.Config, reqCtx *proxyRequestConte
 	}
 	// 后缀来自客户端字面模型名，能力却属于重定向/模糊匹配后的实际上游模型。
 	bodyToSend = applyThinkingSuffixForModel(bodyToSend, reqCtx.clientProtocol, requestedModel, actualModel)
+	bodyToSend = applyAutomaticReasoning(bodyToSend, reqCtx, upstreamProtocol, actualModel)
 	// billing/CCH 块是真 Claude Code 请求的身份与签名载体。只有跨协议
 	// 转换时才能删除；Anthropic -> Anthropic 必须保留，供 OAuth finalizer
 	// 识别并保留原生 Claude Code prompt。
@@ -1038,14 +1047,11 @@ func extractThinkingEffortFromPayload(payload map[string]any) string {
 		return ""
 	}
 
-	if response, ok := payload["response"].(map[string]any); ok {
-		if effort := extractThinkingEffortFromPayload(response); effort != "" {
-			return effort
-		}
-	}
-	if message, ok := payload["message"].(map[string]any); ok {
-		if effort := extractThinkingEffortFromPayload(message); effort != "" {
-			return effort
+	for _, key := range []string{"response", "message", "provider_request", "request"} {
+		if nested, ok := payload[key].(map[string]any); ok {
+			if effort := extractThinkingEffortFromPayload(nested); effort != "" {
+				return effort
+			}
 		}
 	}
 

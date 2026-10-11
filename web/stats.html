@@ -220,9 +220,14 @@
   <template id="tpl-stats-row">
     <tr class="mobile-card-row stats-data-row">
       <td class="stats-col-channel" data-mobile-label="{{mobileLabelChannel}}">
-        <a href="#" class="config-name channel-link" data-channel-name="{{channelNameAttr}}" title="{{channelLogsTitle}}" data-i18n-title="stats.viewChannelLogsTitle">{{channelName}}</a>
-        {{{channelIdBadge}}}
-        {{{healthIndicator}}}
+        <div class="stats-channel-cell">
+          <span class="stats-channel-avatar channel-provider-avatar" data-auth-type="{{channelAuthType}}" aria-hidden="true">{{{channelAvatarHtml}}}</span>
+          <div class="stats-channel-text">
+            <a href="#" class="config-name channel-link" data-channel-name="{{channelNameAttr}}" title="{{channelLogsTitle}}" data-i18n-title="stats.viewChannelLogsTitle">{{channelName}}</a>
+            {{{channelIdBadge}}}
+            {{{healthIndicator}}}
+          </div>
+        </div>
       </td>
       <td class="stats-col-model" data-mobile-label="{{mobileLabelModel}}">{{{modelDisplay}}}</td>
       <td class="stats-col-success" data-mobile-label="{{mobileLabelSuccess}}">{{{successDisplay}}}</td>

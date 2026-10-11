@@ -168,7 +168,7 @@ func (u *usageAccumulator) captureResponseModel(payload map[string]any, upstream
 
 	var candidates []string
 	switch strings.ToLower(strings.TrimSpace(upstreamProtocol)) {
-	case "openai", "codex":
+	case "openai", "codex", "system_one":
 		candidates = []string{nestedResponseModel(payload, "response"), responseModelValue(payload, "model")}
 	case "anthropic":
 		candidates = []string{nestedResponseModel(payload, "message"), responseModelValue(payload, "model")}
@@ -761,7 +761,8 @@ const responsesEmptyIncompleteErrorPayload = `{"type":"error","error":{"type":"s
 // isEmptyResponsesIncomplete 识别上游静默中止：response.incomplete 没有任何
 // output 且 usage.output_tokens 明确为数字 0（对齐 CLIProxyAPI
 // IsCodexTerminalEmptyIncomplete）。调用方还须保证此前没有语义输出。
-// content_filter 是确定性结果，换渠道重放只会连带冷却，保持原样返回。
+// content_filter 是确定性结果，换渠道重放只会连带冷却，保持原样返回；
+// interrupted 是上游对客户端 response.interrupt 的确认，空输出同样是正常终结。
 func isEmptyResponsesIncomplete(eventType, payloadType, data string) bool {
 	if payloadType == "" {
 		payloadType = eventType
@@ -770,7 +771,8 @@ func isEmptyResponsesIncomplete(eventType, payloadType, data string) bool {
 		return false
 	}
 	response := gjson.Get(data, "response")
-	if response.Get("incomplete_details.reason").String() == "content_filter" {
+	switch response.Get("incomplete_details.reason").String() {
+	case "content_filter", "interrupted":
 		return false
 	}
 	if output := response.Get("output"); output.IsArray() && len(output.Array()) > 0 {
@@ -1573,8 +1575,8 @@ func (u *usageAccumulator) applyUsage(usage map[string]any, upstreamProtocol str
 			log.Printf("[WARN] OpenAI 渠道返回未知的 usage 格式，keys: %v", getUsageKeys(usage))
 		}
 
-	case "anthropic":
-		// Anthropic平台:input_tokens + output_tokens + cache字段
+	case "anthropic", "system_one":
+		// Anthropic平台:input_tokens + output_tokens + cache字段；System One 同名字段
 		u.applyAnthropicOrResponsesUsage(usage)
 
 	default:

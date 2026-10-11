@@ -3,40 +3,39 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"testing"
 	"time"
 
 	"ccLoad/internal/model"
-	"ccLoad/internal/storage"
 
 	"github.com/gin-gonic/gin"
 )
 
-func TestFillHealthTimeline_UsesSecondsForAvgTimes(t *testing.T) {
-	store, err := storage.CreateSQLiteStore(t.TempDir() + "/test.db")
+func TestStatsHealthTimeline_UsesSecondsForAvgTimes(t *testing.T) {
+	server, store, cleanup := setupAdminTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	cfg, err := store.CreateConfig(ctx, &model.Config{
+		Name:         "timeline-channel",
+		URLs:         model.ChannelURLs{{URL: "https://example.com"}},
+		ModelEntries: []model.ModelEntry{{Model: "claude-test"}},
+		Enabled:      true,
+	})
 	if err != nil {
-		t.Fatalf("创建测试数据库失败: %v", err)
+		t.Fatalf("CreateConfig: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
-
-	s := &Server{store: store}
-
-	now := time.Now().Truncate(time.Second)
-	startTime := now.Add(-24 * time.Hour)
-	endTime := now
-
-	channelID64 := int64(1)
-	channelID := int(channelID64)
-	modelName := "claude-test"
-
-	logTime := now.Add(-12 * time.Hour)
-	if err := store.AddLog(context.Background(), &model.LogEntry{
-		Time:          model.JSONTime{Time: logTime},
-		Model:         modelName,
-		ActualModel:   modelName,
-		ChannelID:     channelID64,
+	end := time.Date(2026, 1, 2, 0, 10, 0, 0, time.UTC)
+	start := end.Add(-4 * time.Hour)
+	if err := store.AddLog(ctx, &model.LogEntry{
+		Time:          model.JSONTime{Time: end.Add(-30 * time.Minute)},
+		Model:         "claude-test",
+		ActualModel:   "claude-test",
+		ChannelID:     cfg.ID,
+		LogSource:     model.LogSourceProxy,
 		StatusCode:    200,
 		Message:       "ok",
 		Duration:      2.3,
@@ -46,21 +45,15 @@ func TestFillHealthTimeline_UsesSecondsForAvgTimes(t *testing.T) {
 		t.Fatalf("写入日志失败: %v", err)
 	}
 
-	stats := []model.StatsEntry{
-		{
-			ChannelID: ptrInt(channelID),
-			Model:     modelName,
-		},
+	query := fmt.Sprintf("/admin/stats?range=custom&start_time=%d&end_time=%d&health_timeline=1", start.UnixMilli(), end.UnixMilli())
+	c, w := newTestContext(t, newRequest(http.MethodGet, query, nil))
+	server.HandleStats(c)
+	type statsResp struct {
+		Stats []model.StatsEntry `json:"stats"`
 	}
-	filter := &model.LogFilter{
-		ChannelID: ptrInt64(channelID64),
-		Model:     modelName,
-	}
-
-	s.fillHealthTimeline(context.Background(), stats, startTime, endTime, filter, false)
-
-	if len(stats) == 0 {
-		t.Fatal("stats 切片为空")
+	stats := mustParseAPIResponse[statsResp](t, w.Body.Bytes()).Data.Stats
+	if len(stats) != 1 {
+		t.Fatalf("stats=%d entries, want 1: %s", len(stats), w.Body.String())
 	}
 	if len(stats[0].HealthTimeline) != 48 {
 		t.Fatalf("期望 health timeline 长度=48，实际=%d", len(stats[0].HealthTimeline))
@@ -81,6 +74,58 @@ func TestFillHealthTimeline_UsesSecondsForAvgTimes(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("未找到包含写入日志的时间桶")
+	}
+}
+
+// 当日开始不足4小时时，窗口仍须以当前时刻结尾：最近的请求落在最后一个桶，而不是让末尾桶落在未来。
+func TestHealthTimelineToday_EndsAtNowWhenDayIsShorterThanWindow(t *testing.T) {
+	_, store, cleanup := setupAdminTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	cfg, err := store.CreateConfig(ctx, &model.Config{
+		Name:         "timeline-early-day",
+		URLs:         model.ChannelURLs{{URL: "https://example.com"}},
+		ModelEntries: []model.ModelEntry{{Model: "claude-test"}},
+		Enabled:      true,
+	})
+	if err != nil {
+		t.Fatalf("CreateConfig: %v", err)
+	}
+	now := time.Date(2026, 1, 2, 1, 0, 0, 0, time.UTC)
+	dayStart := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	if err := store.AddLog(ctx, &model.LogEntry{
+		Time:       model.JSONTime{Time: now.Add(-time.Minute)},
+		Model:      "claude-test",
+		ChannelID:  cfg.ID,
+		LogSource:  model.LogSourceProxy,
+		StatusCode: 200,
+		Message:    "ok",
+	}); err != nil {
+		t.Fatalf("写入日志失败: %v", err)
+	}
+
+	lf := model.LogFilter{LogSource: model.LogSourceProxy}
+	stats, err := store.GetStats(ctx, dayStart, now, &lf, true)
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("GetStats: %v, entries=%d", err, len(stats))
+	}
+	params := healthTimelineParams(dayStart, now, &lf, true)
+	rows, err := store.GetHealthTimeline(ctx, params)
+	if err != nil {
+		t.Fatalf("GetHealthTimeline: %v", err)
+	}
+	fillHealthTimeline(stats, params, rows)
+
+	points := stats[0].HealthTimeline
+	if len(points) != healthTimelineBuckets {
+		t.Fatalf("health points=%d, want %d", len(points), healthTimelineBuckets)
+	}
+	if want := now.Add(-4 * time.Hour); !points[0].Ts.Equal(want) {
+		t.Fatalf("first bucket ts=%v, want %v", points[0].Ts, want)
+	}
+	if last := points[len(points)-1]; last.SuccessCount != 1 {
+		t.Fatalf("最近一分钟的请求应落在最后一个桶，实际 last=%+v", last)
 	}
 }
 
@@ -115,10 +160,6 @@ func TestHealthPointJSON_EmptyBucketOnlyCarriesTimestampAndRate(t *testing.T) {
 		})
 	}
 }
-
-func ptrInt64(v int64) *int64 { return &v }
-
-func ptrInt(v int) *int { return &v }
 
 // 健康时间线、逐渠道拆分和 RPM 都是额外查询/大体积字段，只有显式需要的页面才拿到。
 func TestStatsEndpoints_HeavyFieldsAreOptIn(t *testing.T) {
@@ -167,6 +208,10 @@ func TestStatsEndpoints_HeavyFieldsAreOptIn(t *testing.T) {
 	if !statsHas("&health_timeline=1", "health_timeline") {
 		t.Fatal("health_timeline=1 时应附带 health_timeline")
 	}
+	// 统计结果有缓存，附带时间线的请求不能污染之后的默认请求
+	if statsHas("", "health_timeline") {
+		t.Fatal("health_timeline=1 之后的默认 stats 不应附带 health_timeline")
+	}
 
 	metricsHasChannels := func(query string) bool {
 		t.Helper()
@@ -210,5 +255,58 @@ func TestStatsEndpoints_HeavyFieldsAreOptIn(t *testing.T) {
 				t.Fatalf("%s summary 缺少 %s: %v", name, field, summary)
 			}
 		}
+	}
+}
+
+func TestStatsHealthTimeline_RollingRangesUseSelectedWindow(t *testing.T) {
+	for _, hours := range []int{1, 6, 24} {
+		t.Run(fmt.Sprintf("last_%dh", hours), func(t *testing.T) {
+			server, store, cleanup := setupAdminTestServer(t)
+			defer cleanup()
+			ctx := context.Background()
+			cfg, err := store.CreateConfig(ctx, &model.Config{
+				Name: "rolling-channel", URLs: model.ChannelURLs{{URL: "https://example.com"}},
+				ModelEntries: []model.ModelEntry{{Model: "test-model"}}, Enabled: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.AddLog(ctx, &model.LogEntry{
+				Time: model.JSONTime{Time: time.Now().Add(-time.Minute)}, Model: "test-model",
+				ChannelID: cfg.ID, StatusCode: 200,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			query := fmt.Sprintf("/admin/stats?range=last_%dh&health_timeline=1", hours)
+			before := time.Now()
+			c, w := newTestContext(t, newRequest(http.MethodGet, query, nil))
+			server.HandleStats(c)
+			after := time.Now()
+			if w.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			type statsResponse struct {
+				Stats    []model.StatsEntry `json:"stats"`
+				Duration float64            `json:"duration_seconds"`
+				Live     bool               `json:"is_today"`
+			}
+			resp := mustParseAPIResponse[statsResponse](t, w.Body.Bytes()).Data
+			if !resp.Live || resp.Duration != float64(hours*3600) {
+				t.Fatalf("unexpected stats response: %+v", resp)
+			}
+			if len(resp.Stats) != 1 || len(resp.Stats[0].HealthTimeline) != 48 {
+				t.Fatalf("unexpected timeline: %+v", resp.Stats)
+			}
+			points := resp.Stats[0].HealthTimeline
+			window := time.Duration(hours) * time.Hour
+			start := points[0].Ts
+			if start.Before(before.Add(-window).Truncate(time.Second)) || start.After(after.Add(-window)) {
+				t.Fatalf("start=%v, expected selected %dh window", start, hours)
+			}
+			bucket := window / 48
+			if !points[47].Ts.Equal(start.Add(47 * bucket)) {
+				t.Fatalf("last bucket=%v, start=%v, bucket=%v", points[47].Ts, start, bucket)
+			}
+		})
 	}
 }

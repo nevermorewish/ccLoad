@@ -240,6 +240,8 @@ async function withLoadedLogsPage(options, assertions) {
   setGlobal('TemplateEngine', { render: () => null });
   setGlobal('escapeHtml', (value) => String(value ?? ''));
   setGlobal('calculateTokenSpeed', () => null);
+  setGlobal('getCostDisplayInfo', (standardCost, effectiveCost) => ({standardCost, effectiveCost, hasMultiplier: false}));
+  setGlobal('formatCost', value => '$' + value);
   setGlobal('fetchDataWithAuth', async (url) => {
     if (url.startsWith('/dashboard/models?')) return { models: [], channels: [] };
     throw new Error(`unexpected fetchDataWithAuth call: ${url}`);
@@ -304,21 +306,16 @@ test('model filter options contain request models but not redirected models', as
   });
 });
 
-test('Jev audit messages link to their upstream debug-log entry', async () => {
+test('channelless count_tokens logs link to their debug-log entry', async () => {
   await withLoadedLogsPage({
-    logSource: 'jev',
+    logSource: 'count_tokens',
     entries: [{
       id: 42,
       time: Date.now(),
-      model: 'jev-latest',
+      model: 'claude-sonnet-5-5',
       status_code: 200,
       duration: 0.2,
-      log_source: 'jev',
-      message: JSON.stringify({
-        call_id: 'audit-42',
-        adopted: { category: 'quota' },
-        fallback: { reset: 'no_valid_reset' }
-      })
+      log_source: 'count_tokens'
     }]
   }, ({ tbody }) => {
     assert.match(tbody.innerHTML, /debug-log-link has-upstream-detail[^>]*data-log-id="42"/);
@@ -404,4 +401,35 @@ test('small request costs keep significant digits instead of rounding to $0.000'
       else Object.defineProperty(global, key, descriptor);
     }
   }
+});
+
+test('reasoning logs show a level change on the model badge and the judgment in the message', async () => {
+  const business = (client, sent, extra = {}) => ({time: Date.now(), model: 'business', thinking_effort: sent, status_code: 200, duration: 0, log_source: 'proxy',
+    reasoning_decision: {status: 'decided', trigger: 'user_input', client_effort: client, suggested_effort: sent, confidence: 0.6, ...extra}});
+  for (const isTokenRole of [false, true]) {
+    await withLoadedLogsPage({isTokenRole, entries: [
+      {...business('xhigh', 'low', {decision_channel_id: 1507, decision_model: 'private-judge', decision_id: 'corr-1', context_truncated: true}), reasoning_tokens: 72},
+      business('', 'high'),
+      business('max', 'xhigh'),
+      business('medium', 'medium'),
+      {time: Date.now(), model: 'judge', status_code: 200, duration: 0, log_source: 'proxy', client_protocol: 'system_one',
+        reasoning_decision: {status: 'decided', suggested_effort: 'xhigh', confidence: 0.554, duration_ms: 12, cost_unknown: true}},
+      {time: Date.now(), model: 'judge', status_code: 504, duration: 0, log_source: 'proxy', client_protocol: 'system_one',
+        reasoning_decision: {status: 'fallback', reason: 'timeout'}}]}, ({tbody}) => {
+      const badges = [...tbody.innerHTML.matchAll(/<sup[^>]*>([^<]*)<\/sup>/g)].map(match => match[1]);
+      assert.deepEqual(badges, ['xhigh→low 72', 'high', 'max→xhigh', 'medium']);
+      assert.doesNotMatch(tbody.innerHTML, /logs\.reasoning\.changed/);
+      assert.match(tbody.innerHTML, /logs.reasoning.judged xhigh(logs.reasoning.confidence 0.55)?/);
+      assert.match(tbody.innerHTML, /logs.reasoning.failed timeout/);
+      assert.match(tbody.innerHTML, /logs.costUnknown/);
+      assert.doesNotMatch(tbody.innerHTML, /private-judge|1507|corr-1|truncated|user_input/);
+    });
+  }
+});
+
+test('unknown decision cost does not replace known business request cost', async () => {
+  await withLoadedLogsPage({entries: [{time: Date.now(), model: 'business', status_code: 200, duration: 0, cost: 0.25, log_source: 'proxy', reasoning_decision: {cost_unknown: true}}]}, ({tbody}) => {
+    assert.doesNotMatch(tbody.innerHTML, /logs.costUnknown/);
+    assert.match(tbody.innerHTML, /0.25/);
+  });
 });

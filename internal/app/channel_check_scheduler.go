@@ -76,7 +76,7 @@ func (s *Server) runScheduledChannelChecks(ctx context.Context, now time.Time) e
 	// 监控间隔来自全局设置，渠道只用 ScheduledCheckEnabled 决定是否参与。
 	interval := s.configService.GetInt(config.ChannelMonitorIntervalSettingKey, config.DefaultChannelMonitorIntervalMinutes)
 	for _, cfg := range configs {
-		if cfg.ChannelMonitorDueAt(now, interval) && cfg.UpdatedAt.Before(now.Truncate(time.Minute)) {
+		if !cfg.IsSystemOne() && cfg.ChannelMonitorDueAt(now, interval) && cfg.UpdatedAt.Before(now.Truncate(time.Minute)) {
 			due = append(due, cfg)
 		}
 	}
@@ -125,7 +125,7 @@ func (s *Server) runChannelMonitorCheck(ctx context.Context, cfg *model.Config, 
 		return
 	}
 	var rowAvailable func(modelRoutingSelection) bool
-	if cfg.GetAuthType() == model.AuthTypeAPIKey {
+	if !cfg.UsesOAuth() {
 		protocols := scheduledCheckUpstreamProtocols(cfg)
 		now := time.Now()
 		rowAvailable = func(selected modelRoutingSelection) bool {
@@ -165,7 +165,7 @@ func (s *Server) runChannelMonitorCheck(ctx context.Context, cfg *model.Config, 
 	}
 	logModel, logThinking := channelTestLogIdentity(req.Model, req.ThinkingEffort)
 	result := s.executeChannelTestWithCooldown(ctx, runtimeCfg, keySelection.keyIndex, keySelection.requestCredential, req, keySelection.updatePersistedCooldown)
-	s.persistDetectionLog(ctx, detectionLogFromResult(cfg, source, logModel, channelTestActualModel(result, req.Model), keySelection.apiKey, "", logThinking, result))
+	s.persistDetectionLog(ctx, detectionLogFromResult(cfg, model.LogSourceScheduledCheck, logModel, channelTestActualModel(result, req.Model), keySelection, "", logThinking, result))
 	logScheduledChannelCheckResult(cfg, keySelection.keyIndex, req.Model, result)
 }
 
@@ -197,6 +197,7 @@ func (s *Server) prepareScheduledChannelCheckAuth(ctx context.Context, cfg *mode
 		apiKey:                  apiKey,
 		requestCredential:       apiKey,
 		updatePersistedCooldown: true,
+		costMultiplier:          apiKeyCostMultiplierAt(cfg, compatible, keyIndex),
 	}, err
 }
 

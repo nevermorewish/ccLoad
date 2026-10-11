@@ -24,6 +24,7 @@ type ChannelRequest struct {
 	APIKey                        string                        `json:"api_key"`
 	APIKeys                       []ChannelAPIKeyRequest        `json:"api_keys,omitempty"`
 	Websockets                    bool                          `json:"websockets,omitempty"`
+	OAuthQuotaPassthrough         bool                          `json:"oauth_quota_passthrough"`
 	ProtocolTransformMode         string                        `json:"protocol_transform_mode,omitempty"`
 	KeyStrategy                   string                        `json:"key_strategy,omitempty"` // Key使用策略:sequential, round_robin
 	URLs                          model.ChannelURLs             `json:"urls" binding:"required,min=1"`
@@ -44,8 +45,10 @@ type ChannelRequest struct {
 	AvailableTimeStart            string                        `json:"available_time_start,omitempty"`
 	AvailableTimeEnd              string                        `json:"available_time_end,omitempty"`
 	RetryOtherKeysOnFailure       bool                          `json:"retry_other_keys_on_failure"`
+	SameChannelRetries            int                           `json:"same_channel_retries"`
 	ManagementAccount             *channelManagementInput       `json:"management_account,omitempty"`
 
+	oauthQuotaPassthroughSet  bool
 	managementAccountSet      bool
 	forbiddenCredentialFields bool
 }
@@ -63,6 +66,7 @@ func (cr *ChannelRequest) UnmarshalJSON(data []byte) error {
 	}
 	*cr = ChannelRequest(decoded)
 	_, cr.managementAccountSet = fields["management_account"]
+	_, cr.oauthQuotaPassthroughSet = fields["oauth_quota_passthrough"]
 	for _, field := range []string{"oauth_credential", "credential", "access_token"} {
 		if _, present := fields[field]; present {
 			cr.forbiddenCredentialFields = true
@@ -270,6 +274,9 @@ func validateChannelURLConfigs(urls model.ChannelURLs, authType string) (model.C
 	if err := urls.Normalize(); err != nil {
 		return nil, err
 	}
+	if err := urls.ValidateForAuthType(authType); err != nil {
+		return nil, err
+	}
 	return urls, nil
 }
 
@@ -289,11 +296,11 @@ func (cr *ChannelRequest) Validate() error {
 		return errors.New("zed OAuth channels do not support WebSocket transport")
 	}
 	apiKeys := cr.normalizeAPIKeys()
-	if authType == model.AuthTypeAPIKey && len(apiKeys) == 0 {
+	if model.UsesAPIKeyCredentials(authType) && len(apiKeys) == 0 {
 		return fmt.Errorf("api_key cannot be empty")
 	}
 	// OAuth 渠道最多携带一条合成 Key 行（管理页现场合成），只用来回传倍率，永不落库。
-	if authType != model.AuthTypeAPIKey && len(apiKeys) > 1 {
+	if !model.UsesAPIKeyCredentials(authType) && len(apiKeys) > 1 {
 		return fmt.Errorf("OAuth channel accepts at most one synthetic API key row")
 	}
 	for i, key := range apiKeys {
@@ -310,7 +317,7 @@ func (cr *ChannelRequest) Validate() error {
 			return fmt.Errorf("api_keys[%d].model_scope_empty requires empty allowed_models", i)
 		}
 		if key.Priority != nil {
-			if authType != model.AuthTypeAPIKey {
+			if !model.UsesAPIKeyCredentials(authType) {
 				return fmt.Errorf("OAuth channel API key priority is read-only")
 			}
 			if *key.Priority < -99999 || *key.Priority > 9999999 {
@@ -428,6 +435,9 @@ func (cr *ChannelRequest) Validate() error {
 	if cr.MaxConcurrency < 0 {
 		return fmt.Errorf("max_concurrency must be >= 0 (got %d)", cr.MaxConcurrency)
 	}
+	if cr.SameChannelRetries < 0 || cr.SameChannelRetries > model.MaxSameChannelRetries {
+		return fmt.Errorf("same_channel_retries must be between 0 and %d (got %d)", model.MaxSameChannelRetries, cr.SameChannelRetries)
+	}
 
 	return nil
 }
@@ -508,7 +518,7 @@ func (cr *ChannelRequest) ToConfig() *model.Config {
 	// 倍率属于凭证：OAuth 渠道从合成 Key 行取，api_key 渠道的渠道级字段固定写 1
 	// （0 在 channels.cost_multiplier 语义是「免费」，渠道级写 0 会让 api_key 渠道整体免费）。
 	costMultiplier := 1.0
-	if model.NormalizeAuthType(cr.AuthType) != model.AuthTypeAPIKey && len(cr.APIKeys) > 0 && cr.APIKeys[0].CostMultiplier != nil {
+	if !model.UsesAPIKeyCredentials(cr.AuthType) && len(cr.APIKeys) > 0 && cr.APIKeys[0].CostMultiplier != nil {
 		costMultiplier = *cr.APIKeys[0].CostMultiplier
 	}
 
@@ -516,6 +526,7 @@ func (cr *ChannelRequest) ToConfig() *model.Config {
 		Name:                          strings.TrimSpace(cr.Name),
 		AuthType:                      cr.AuthType,
 		Websockets:                    cr.Websockets,
+		OAuthQuotaPassthrough:         cr.OAuthQuotaPassthrough,
 		ProtocolTransformMode:         cr.ProtocolTransformMode,
 		URLs:                          cr.URLs.Clone(),
 		Priority:                      cr.Priority,
@@ -536,6 +547,7 @@ func (cr *ChannelRequest) ToConfig() *model.Config {
 		AvailableTimeStart:            cr.AvailableTimeStart,
 		AvailableTimeEnd:              cr.AvailableTimeEnd,
 		RetryOtherKeysOnFailure:       cr.RetryOtherKeysOnFailure,
+		SameChannelRetries:            cr.SameChannelRetries,
 	}
 }
 

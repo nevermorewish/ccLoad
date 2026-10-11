@@ -73,7 +73,7 @@ func TestDashboardLogsForceTokenScopeAndExposeSafeChannelFields(t *testing.T) {
 
 	now := model.JSONTime{Time: time.Now()}
 	for _, entry := range []*model.LogEntry{
-		{Time: now, Model: "jev-latest", LogSource: model.LogSourceJev, StatusCode: 200, AuthTokenID: 42, Message: "private audit"},
+		{Time: now, Model: "count-model", LogSource: model.LogSourceCountTokens, StatusCode: 200, AuthTokenID: 42, Message: "private estimate"},
 		{
 			Time:                     now,
 			Model:                    "gpt-5.6",
@@ -175,8 +175,8 @@ func TestDashboardLogsForceTokenScopeAndExposeSafeChannelFields(t *testing.T) {
 		costBreakdown.CacheRead.Quantity != 250 || costBreakdown.CacheWrite.Quantity != 125 {
 		t.Fatalf("unexpected cost breakdown quantities: %+v", costBreakdown)
 	}
-	if costBreakdown.ServiceTierMultiplier != 2.5 {
-		t.Fatalf("service_tier_multiplier=%v, want 2.5", costBreakdown.ServiceTierMultiplier)
+	if costBreakdown.ServiceTierMultiplier != 2 {
+		t.Fatalf("service_tier_multiplier=%v, want 2", costBreakdown.ServiceTierMultiplier)
 	}
 	var message string
 	if err := json.Unmarshal(entry["message"], &message); err != nil {

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"ccLoad/internal/cooldown"
@@ -26,6 +27,7 @@ import (
 const (
 	responsesWebsocketRequestCreate      = "response.create"
 	responsesWebsocketRequestAppend      = "response.append"
+	responsesWebsocketRequestInterrupt   = "response.interrupt"
 	responsesWebsocketIdleTimeout        = 5 * time.Minute
 	responsesWebsocketPingInterval       = 2 * time.Minute
 	responsesWebsocketWriteTimeout       = 30 * time.Second
@@ -150,7 +152,8 @@ func (s *Server) HandleResponsesWebsocket(c *gin.Context) {
 	startResponsesWebsocketPingLoop(connectionCtx, cancelConnection, conn, pingInterval, func() bool {
 		return s.authService != nil && s.authService.IsTokenActive(tokenHashString)
 	})
-	messages := readResponsesWebsocketMessages(connectionCtx, cancelConnection, conn, idleTimeout)
+	interrupt := &responsesWebsocketInterrupt{}
+	messages := readResponsesWebsocketMessages(connectionCtx, cancelConnection, conn, idleTimeout, interrupt)
 	var executionSession *responsesExecutionSession
 	var releaseExecutionSession func()
 	defer func() {
@@ -200,10 +203,38 @@ func (s *Server) HandleResponsesWebsocket(c *gin.Context) {
 				}
 				continue
 			}
+			turnCtx, cancelTurn := context.WithCancel(connectionCtx)
+			interrupt.begin(cancelTurn, executionSession.upstream)
+			releaseSlots, errSlots := s.acquireResponsesWebsocketTurnSlots(turnCtx, tokenHashString, c.GetInt64("token_id"))
+			if errSlots != nil {
+				localInterrupt := interrupt.localPayload()
+				interrupt.end()
+				cancelTurn()
+				executionSession.releaseTurn()
+				var rpmErr *tokenRPMExceededError
+				var errWrite error
+				if localInterrupt != nil {
+					_, errWrite = writeResponsesWebsocketLocalInterrupt(conn, localInterrupt, []byte("[]"))
+				} else if errors.As(errSlots, &rpmErr) {
+					errWrite = writeResponsesWebsocketErrorPayload(conn, http.StatusTooManyRequests, responsesWebsocketErrorBody{
+						Type: "rate_limit_error", Code: "token_rpm_exceeded", Message: rpmErr.Error(),
+						RetryAfter: rpmErr.retryAfterSeconds(),
+					})
+				} else {
+					errWrite = writeResponsesWebsocketError(conn, "upstream_error", errSlots.Error())
+				}
+				if errWrite != nil {
+					return
+				}
+				continue
+			}
 			emptySession := len(executionSession.transcript.lastRequest) == 0
 			allowLocalPrewarm := emptySession
 			requestBody, nativeRequestBody, errNormalize := executionSession.transcript.normalizeRequests(message.payload)
 			if errNormalize != nil {
+				interrupt.end()
+				cancelTurn()
+				releaseSlots()
 				executionSession.releaseTurn()
 				if errors.Is(errNormalize, errResponsesWebsocketPreviousResponseNotFound) {
 					s.responsesExecutionSessions.recordPreviousResponseMiss(
@@ -225,8 +256,11 @@ func (s *Server) HandleResponsesWebsocket(c *gin.Context) {
 				continue
 			}
 			turnResult, errTurn := s.executeResponsesWebsocketTurn(
-				connectionCtx, c, conn, requestBody, nativeRequestBody, executionSession, allowLocalPrewarm,
+				turnCtx, c, conn, message.payload, requestBody, nativeRequestBody, executionSession, allowLocalPrewarm, interrupt,
 			)
+			interrupt.end()
+			cancelTurn()
+			releaseSlots()
 			if errTurn != nil {
 				if turnResult.interrupted {
 					s.responsesExecutionSessions.commit(executionSession, requestBody, turnResult)
@@ -261,6 +295,14 @@ func (s *Server) HandleResponsesWebsocket(c *gin.Context) {
 			}
 			s.responsesExecutionSessions.commit(executionSession, requestBody, turnResult)
 			executionSession.releaseTurn()
+		case responsesWebsocketRequestInterrupt:
+			// 进行中的回合已由读协程直接中断；到这里说明没有可中断的回合，
+			// 对应响应的终结事件已发出。此时回错误会被客户端算到它的下一个回合上。
+			if responsesWebsocketInterruptResponseID(message.payload) == "" {
+				if errWrite := writeResponsesWebsocketError(conn, "invalid_request", "response.interrupt requires response_id"); errWrite != nil {
+					return
+				}
+			}
 		default:
 			if errWrite := writeResponsesWebsocketError(conn, "unsupported_event", "unsupported websocket request type"); errWrite != nil {
 				return
@@ -274,11 +316,14 @@ type responsesWebsocketInboundMessage struct {
 	payload     []byte
 }
 
+// readResponsesWebsocketMessages 是下游连接唯一的读者。response.interrupt 在这里
+// 直接交给进行中的回合，否则它会排在要中断的回合之后，等回合结束才被读到。
 func readResponsesWebsocketMessages(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	conn *websocket.Conn,
 	idleTimeout time.Duration,
+	interrupt *responsesWebsocketInterrupt,
 ) <-chan responsesWebsocketInboundMessage {
 	messages := make(chan responsesWebsocketInboundMessage)
 	go func() {
@@ -289,6 +334,9 @@ func readResponsesWebsocketMessages(
 				return
 			}
 			_ = conn.SetReadDeadline(time.Now().Add(idleTimeout))
+			if messageType == websocket.TextMessage && interrupt.deliver(payload) {
+				continue
+			}
 			select {
 			case messages <- responsesWebsocketInboundMessage{messageType: messageType, payload: payload}:
 			case <-ctx.Done():
@@ -297,6 +345,94 @@ func readResponsesWebsocketMessages(
 		}
 	}()
 	return messages
+}
+
+// responsesWebsocketInterrupt 把 response.interrupt 路由到当前回合。原生上游 WS
+// 回合把原帧原样写到在用的上游 socket，由上游回 response.incomplete 结束回合；
+// 其余回合（HTTP、协议转换、上游 socket 已失效）在本地取消，再由回合层合成
+// response.incomplete。
+type responsesWebsocketInterrupt struct {
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	upstream *codexUpstreamWebsocketSession
+	local    []byte
+}
+
+func (i *responsesWebsocketInterrupt) begin(cancel context.CancelFunc, upstream *codexUpstreamWebsocketSession) {
+	i.mu.Lock()
+	i.cancel, i.upstream, i.local = cancel, upstream, nil
+	i.mu.Unlock()
+}
+
+func (i *responsesWebsocketInterrupt) end() {
+	i.mu.Lock()
+	i.cancel, i.upstream, i.local = nil, nil, nil
+	i.mu.Unlock()
+}
+
+// deliver 处理一个下游帧；返回 false 表示它不是可交给当前回合的中断帧。
+func (i *responsesWebsocketInterrupt) deliver(payload []byte) bool {
+	if i == nil || !json.Valid(payload) ||
+		strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != responsesWebsocketRequestInterrupt ||
+		responsesWebsocketInterruptResponseID(payload) == "" {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.cancel == nil {
+		return false
+	}
+	if i.local != nil || i.upstream.forwardInterrupt(payload) {
+		return true
+	}
+	i.local = bytes.Clone(payload)
+	i.cancel()
+	return true
+}
+
+// localPayload 返回本地取消当前回合的中断帧；未本地中断时为 nil。
+func (i *responsesWebsocketInterrupt) localPayload() []byte {
+	if i == nil {
+		return nil
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.local
+}
+
+func responsesWebsocketInterruptResponseID(payload []byte) string {
+	responseID := gjson.GetBytes(payload, "response_id")
+	if responseID.Type != gjson.String {
+		return ""
+	}
+	return strings.TrimSpace(responseID.String())
+}
+
+// writeResponsesWebsocketLocalInterrupt 以 response.incomplete（reason=interrupted）
+// 结束本地取消的回合，与上游确认中断的事件同形；output 只含已完成的 item，
+// 客户端随后可以在同一连接继续下一回合。
+func writeResponsesWebsocketLocalInterrupt(
+	conn *websocket.Conn,
+	interruptPayload []byte,
+	output []byte,
+) (responsesWebsocketTurnResult, error) {
+	responseID := responsesWebsocketInterruptResponseID(interruptPayload)
+	incomplete := []byte(`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}`)
+	incomplete, err := sjson.SetBytes(incomplete, "response.id", responseID)
+	if err != nil {
+		return responsesWebsocketTurnResult{}, err
+	}
+	if incomplete, err = sjson.SetRawBytes(incomplete, "response.output", output); err != nil {
+		return responsesWebsocketTurnResult{}, err
+	}
+	if err = writeResponsesWebsocketPayload(conn, incomplete); err != nil {
+		return responsesWebsocketTurnResult{}, err
+	}
+	return responsesWebsocketTurnResult{
+		completedOutput:     output,
+		completedResponseID: responseID,
+		pendingToolCallIDs:  responsesWebsocketPendingToolCallIDs(output),
+	}, nil
 }
 
 func startResponsesWebsocketPingLoop(
@@ -389,14 +525,44 @@ func (e *responsesWebsocketClientRetryError) responseStatus() int {
 	return http.StatusBadGateway
 }
 
+// acquireResponsesWebsocketTurnSlots admits one client turn before transcript
+// normalization or execution. Replays and retries inside the turn reuse it.
+func (s *Server) acquireResponsesWebsocketTurnSlots(ctx context.Context, tokenHash string, tokenID int64) (func(), error) {
+	releaseGlobal, err := s.acquireConcurrencySlotForContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	releaseToken, active, limit, acquired := s.authService.acquireTokenConcurrencySlot(tokenHash)
+	if !acquired {
+		releaseGlobal()
+		return nil, fmt.Errorf("token concurrency limit exceeded: %d active of %d limit", active, limit)
+	}
+	if err := ctx.Err(); err != nil {
+		releaseToken()
+		releaseGlobal()
+		return nil, err
+	}
+	if err := s.authService.reserveTokenRPM(tokenID); err != nil {
+		releaseToken()
+		releaseGlobal()
+		return nil, err
+	}
+	return func() {
+		releaseToken()
+		releaseGlobal()
+	}, nil
+}
+
 func (s *Server) executeResponsesWebsocketTurn(
 	ctx context.Context,
 	c *gin.Context,
 	conn *websocket.Conn,
+	clientPayload []byte,
 	requestBody []byte,
 	nativeRequestBody []byte,
 	executionSession *responsesExecutionSession,
 	allowLocalPrewarm bool,
+	interrupt *responsesWebsocketInterrupt,
 ) (responsesWebsocketTurnResult, error) {
 	nativeCodexWS := executionSession.upstream
 	requestedModel := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
@@ -404,6 +570,9 @@ func (s *Server) executeResponsesWebsocketTurn(
 		return responsesWebsocketTurnResult{}, errors.New("missing model in normalized websocket request")
 	}
 	clientModel := model.RoutingModelName(requestedModel)
+	// 原始帧可省略 model，归一化会继承上一轮带后缀的模型名；
+	// 仅非 auto 后缀跳过判断，请求体中本轮或继承的等级都允许自动改写。
+	reasoningModel := requestedModel
 	// 多模态回退：按完整 transcript 检测。一旦某轮带图，历史里会一直留着这张图，
 	// 用完整体检测才能让后续每一轮的判定保持稳定。改写必须在 Token 白名单
 	// （:431 modelName）与候选选择之前，与 HTTP 入口同契约。
@@ -417,23 +586,8 @@ func (s *Server) executeResponsesWebsocketTurn(
 	thinkingEffort := thinkingEffortFromRequest(requestedModel, requestBody)
 	modelName := model.RoutingModelName(requestedModel)
 
-	release, err := s.acquireConcurrencySlotForContext(ctx)
-	if err != nil {
-		return responsesWebsocketTurnResult{}, err
-	}
-	defer release()
-
 	tokenHash, _ := c.Get("token_hash")
 	tokenHashString, _ := tokenHash.(string)
-	releaseTokenSlot, activeTokenRequests, maxTokenRequests, acquired := s.authService.acquireTokenConcurrencySlot(tokenHashString)
-	if !acquired {
-		return responsesWebsocketTurnResult{}, fmt.Errorf(
-			"token concurrency limit exceeded: %d active of %d limit",
-			activeTokenRequests,
-			maxTokenRequests,
-		)
-	}
-	defer releaseTokenSlot()
 
 	if tokenHashString != "" && !s.authService.IsModelAllowed(tokenHashString, modelName) {
 		return responsesWebsocketTurnResult{}, fmt.Errorf("model %q is not allowed for this token", modelName)
@@ -513,6 +667,10 @@ func (s *Server) executeResponsesWebsocketTurn(
 		sessionAffinityKey: sessionAffinityKey,
 		sessionAffinity:    sessionAffinity,
 	}
+	if s.reasoningTarget(reqCtx) {
+		s.prepareReasoningTurn(ctx, reqCtx, requestBody, clientPayload, hasExplicitThinkingSuffix(reasoningModel))
+	}
+	ctx = withReasoningRequest(ctx, reqCtx)
 	reqCtx.observer = &ForwardObserver{
 		OnBytesRead: func(n int64) {
 			s.activeRequests.AddBytes(reqCtx.activeReqID, n)
@@ -525,6 +683,9 @@ func (s *Server) executeResponsesWebsocketTurn(
 		},
 		OnDebugCapture: func(dc *debugCapture) {
 			s.activeRequests.SetDebugCapture(reqCtx.activeReqID, dc)
+		},
+		OnThinkingEffort: func(sent, client string) {
+			s.activeRequests.SetThinkingEffort(reqCtx.activeReqID, sent, client)
 		},
 	}
 	defer func() {
@@ -554,6 +715,10 @@ func (s *Server) executeResponsesWebsocketTurn(
 	)
 	if bridgeWriter.closedForMessageTooBig {
 		return responsesWebsocketTurnResult{}, &responsesWebsocketTerminalError{forwarded: true}
+	}
+	// 本地中断按客户端取消收尾（499、不冷却、不换渠道）；上游抢先终结时以上游为准。
+	if payload := interrupt.localPayload(); payload != nil && !bridgeWriter.completed {
+		return writeResponsesWebsocketLocalInterrupt(conn, payload, bridgeWriter.collectedOutput())
 	}
 	if clientReplay && !succeeded {
 		return responsesWebsocketTurnResult{}, &responsesWebsocketClientRetryError{}
@@ -1110,6 +1275,7 @@ func writeResponsesWebsocketClientRetryError(
 }
 
 type responsesWebsocketErrorBody struct {
+	RetryAfter   int    `json:"retry_after,omitempty"`
 	Message      string `json:"message"`
 	Type         string `json:"type"`
 	Code         string `json:"code"`

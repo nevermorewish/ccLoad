@@ -493,3 +493,25 @@ func TestChannelURLs_NormalizeRejectsInvalidData(t *testing.T) {
 		})
 	}
 }
+
+func TestSystemOneChannelURLs(t *testing.T) {
+	t.Parallel()
+	declared := ChannelURLs{{URL: "https://one.example", Protocols: []string{"openai"}}}
+	for _, tc := range []struct {
+		authType string
+		urls     ChannelURLs
+		valid    bool
+	}{
+		{AuthTypeSystemOne, ChannelURLs{{URL: "https://one.example"}, {URL: "https://two.example/v1"}}, true},
+		{AuthTypeSystemOne, declared, false},
+		{AuthTypeAPIKey, declared, true},
+	} {
+		if err := tc.urls.ValidateForAuthType(tc.authType); (err == nil) != tc.valid {
+			t.Fatalf("ValidateForAuthType(%s, %+v) error = %v, valid = %v", tc.authType, tc.urls, err, tc.valid)
+		}
+	}
+	cfg := &Config{AuthType: AuthTypeSystemOne}
+	if !cfg.IsSystemOne() || cfg.UsesOAuth() || !UsesAPIKeyCredentials(cfg.AuthType) {
+		t.Fatal("System One must be a decision-only API key channel")
+	}
+}

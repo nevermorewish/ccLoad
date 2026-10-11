@@ -2,8 +2,8 @@
 
 - Repository: `https://github.com/caidaoli/CLIProxyAPI`
 - Module source path: `github.com/router-for-me/CLIProxyAPI/v8`
-- Last synchronized commit: `a6dfa6bdf07fc1ad68bb513f60b49e84e2720148` (`fork/v10.3.0`)
-- Synchronized at: `2026-10-04`
+- Last synchronized commit: `3042bc989b41366f12f8d6c67c5a483e919b49d7` (`fork/v11.1.0`)
+- Synchronized at: `2026-10-09`
 
 This directory is maintained by one atomic synchronization operation. It currently
 contains the four-protocol conversion core. Allowlisted provider-specific pure
@@ -31,6 +31,38 @@ in Chat clients that define `reasoning` as a string. Signature and redacted
 thinking metadata are omitted on this path; Anthropic-to-Responses retains its
 structured reasoning support. Thinking text included in a block-start event
 is retained in both streaming and buffered event conversion.
+
+## Synchronization adaptations (2026-10-09)
+
+The core and the allowlisted Antigravity adapter share the target above.
+Adopted: request converters that return `([]byte, error)` together with
+`common.UserTurnDrops` / `UnsupportedPartError`, so a user turn emptied by
+unsendable parts is refused instead of being sent empty; OpenAI-to-Claude
+streams that defer `message_delta`/`message_stop` from the `finish_reason`
+chunk to the trailing usage-only chunk or `[DONE]`, keeping authoritative
+cache usage; Claude-to-OpenAI base64 documents as data-URL `file` parts; and the
+Gemini-to-Claude response carrier thinking blocks and refusal `stop_reason`.
+
+ccLoad boundaries: `builtin/cliproxy_adapter.go` and the Antigravity wire return
+converter errors, which the Registry wraps as `RequestTranslationError` (no
+cooldown; protocol fallback continues and ends in HTTP 400 when no candidate can
+represent the request). The Responses-to-Codex normalizer never reports an
+unsendable part, so its error is ignored. Upstream's `...WithError` Responses-to-
+Chat wrapper is gone; ccLoad's tool-search validation is folded into the
+exported converter.
+
+Retained local wire shapes: Claude-to-Codex keeps any image URL, `file_id`, and
+non-PDF `file_data` inputs; Claude-to-Gemini and Chat-to-Gemini send remote image
+URLs as `fileData` (`image/*`) and Claude document URL/`file_id` as `fileData`;
+Responses-to-Gemini forwards `input_file.file_id` as `fileData`; Responses-to-Chat
+forwards `file_id` and `file_url`; Claude-to-OpenAI documents map URL to
+`file_url`, file source to `file_id`, and `title` to `filename`. Gemini-to-Claude
+keeps the client model override and emits `message_stop` on the finish chunk.
+Upstream user-turn tests that treated those references as unsendable use a
+reference-less part instead, Gemini field assertions follow ccLoad's camelCase
+output, and `TestConvertClaudeRequestToGemini_ImageURLAndRedactedThinkingStaySkipped`
+is recorded as `skip-test`. The local test helper `requestEnvelope` stands in for
+the excluded SDK envelope.
 
 ## Synchronization adaptations (2026-10-04)
 
@@ -218,29 +250,29 @@ Antigravity is the first eligible provider adapter:
 - Local destination: `internal/protocol/cliproxy/providers/antigravity`
 - Snapshot status: synchronized at shared commit
 - Excluded: dynamic `init.go` registration, noop/allocation tests, runtime cache/logging services, executors, auth, Interactions, and the two Claude request/response suites coupled to those runtime services
-- Pure provider test files synchronized: 8; ccLoad HTTP wire contracts cover request, non-stream response, and stream response for Claude, Codex, Gemini, and OpenAI clients
+- Pure provider test files synchronized: 12; ccLoad HTTP wire contracts cover request, non-stream response, and stream response for Claude, Codex, Gemini, and OpenAI clients
 
 ## Synchronized tests
 
-The core snapshot includes 79 `_test.go` files from the same commit as the
+The core snapshot includes 99 `_test.go` files from the same commit as the
 production sources:
 
 - `applypatch`: 1
-- `claude/gemini`: 2
-- `claude/openai/chat-completions`: 3
-- `claude/openai/responses`: 9
-- `codex/claude`: 4
+- `claude/gemini`: 3
+- `claude/openai/chat-completions`: 6
+- `claude/openai/responses`: 12
+- `codex/claude`: 5
 - `codex/gemini`: 2
-- `codex/openai/chat-completions`: 2
+- `codex/openai/chat-completions`: 3
 - `codex/openai/responses`: 2
-- `common`: 14
-- `gemini/claude`: 3
-- `gemini/openai/chat-completions`: 4
-- `gemini/openai/responses`: 6
-- `openai/claude`: 3
+- `common`: 15
+- `gemini/claude`: 4
+- `gemini/openai/chat-completions`: 7
+- `gemini/openai/responses`: 8
+- `openai/claude`: 4
 - `openai/gemini`: 2
-- `openai/openai/responses`: 7
-- `signature`: 8
+- `openai/openai/responses`: 8
+- `signature`: 10
 - `util`: 7
 
 Tests for excluded packages are not copied. Performance-only benchmarks are
@@ -434,7 +466,10 @@ documented adaptations:
   `models.json` may still include a top-level kimi catalog; ccLoad's
   `modelCatalog` does not deserialize that key, so Lookup never sees those
   models. Generic API-key channels remain model-agnostic and retain Kimi
-  pricing and wire-format compatibility.
+  pricing and wire-format compatibility. The ccLoad-local
+  `LookupThinkingLevels` reads every top-level catalog (including kimi, xai,
+  meta and gemini-cli) for automatic reasoning levels only; translators keep
+  using Lookup.
 - `fork/v8.65.0` also rewrites Gemini function-call pairing validation to use
   short-circuiting `gjson.ForEach`; ccLoad carries that pure control-flow update
   while preserving its local `ccLoad/internal/protocol/cliproxy/util` import and

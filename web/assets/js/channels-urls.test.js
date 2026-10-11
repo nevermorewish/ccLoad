@@ -4,7 +4,8 @@ const assert = require('node:assert/strict');
 const {
   createURLRow,
   normalizeInlineURLConfigs,
-  runtimeInlineURL
+  runtimeInlineURL,
+  testInlineURL
 } = require('./channels-urls.js');
 
 test('channel URL configs serialize one selected protocol or automatic detection', () => {
@@ -85,6 +86,59 @@ test('URL row echoes the persisted exact flag in its checkbox', () => {
     previousGlobals.forEach((value, key) => {
       if (value === undefined) delete global[key];
       else global[key] = value;
+    });
+  }
+});
+
+test('URL testing submits the native System One protocol without streaming', async t => {
+  const requests = [];
+  const globals = {
+    editingChannelId: 7,
+    editingChannelAuthType: 'api_key',
+    redirectTableData: [{ model: 'test-model' }],
+    inlineURLTableData: [],
+    getValidInlineKeyRows: () => [{ api_key: 'test-key' }],
+    fetchDataWithAuth: async (url, options) => {
+      requests.push({ url, method: options.method, body: JSON.parse(options.body) });
+      return { success: true };
+    },
+    refreshKeyCooldownStatus: async () => {},
+    window: { t: key => key, showNotification: () => {} }
+  };
+  const previousGlobals = new Map(
+    Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(global, key)])
+  );
+
+  Object.assign(global, globals);
+  try {
+    for (const [authType, protocols] of [
+      ['system_one', []], ['system_one', ['openai']], ['api_key', []], ['api_key', ['codex']], ['api_key', ['gemini']]
+    ]) {
+      await t.test(`${authType}: ${protocols.join(', ') || 'automatic'}`, async () => {
+        requests.length = 0;
+        global.editingChannelAuthType = authType;
+        global.inlineURLTableData = [{ url: 'https://upstream.test/v1', exact: true, protocols }];
+        await testInlineURL(0, { innerHTML: 'Test', disabled: false });
+
+        const systemOne = authType === 'system_one';
+        assert.deepEqual(requests, [{
+          url: '/admin/channels/7/test-url',
+          method: 'POST',
+          body: {
+            model: 'test-model',
+            stream: !systemOne,
+            content: 'test',
+            ...(systemOne ? {} : { client_protocol: 'anthropic' }),
+            key_index: 0,
+            base_url: 'https://upstream.test/v1#'
+          }
+        }]);
+      });
+    }
+  } finally {
+    previousGlobals.forEach((descriptor, key) => {
+      if (descriptor) Object.defineProperty(global, key, descriptor);
+      else delete global[key];
     });
   }
 });

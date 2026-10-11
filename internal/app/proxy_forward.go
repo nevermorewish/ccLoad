@@ -239,6 +239,9 @@ func (s *Server) buildProxyRequest(
 	xaiResponsesRequest := isXAIOAuthResponsesRequest(cfg, upstreamProtocol, requestPath)
 	upstreamQuery := upstreamQueryForAttempt(reqCtx, rawQuery)
 	upstreamURL := buildUpstreamURL(baseURL, requestPath, upstreamQuery)
+	if upstreamProtocol == protocol.SystemOne {
+		upstreamURL = systemOneURL(baseURL)
+	}
 	if isAnthropicClaudeCodeMessagesRequest(cfg, upstreamProtocol, requestPath) ||
 		isAnthropicCountTokensRequest(upstreamProtocol, requestPath) {
 		upstreamURL = buildAnthropicClaudeCodeURL(baseURL, requestPath, upstreamQuery)
@@ -2292,7 +2295,15 @@ func (s *Server) handleResponse(
 		return res, duration, err
 	}
 
-	return s.handleSuccessResponse(reqCtx, resp, hdrClone, w, upstreamProtocol, readStats, observer)
+	if !hideOAuthQuota(cfg) {
+		return s.handleSuccessResponse(reqCtx, resp, hdrClone, w, upstreamProtocol, readStats, observer)
+	}
+	filtered := &oauthQuotaResponseWriter{ResponseWriter: w, streaming: reqCtx.isStreaming}
+	result, duration, err := s.handleSuccessResponse(reqCtx, resp, hdrClone, filtered, upstreamProtocol, readStats, observer)
+	if finishErr := filtered.finish(); finishErr != nil && err == nil {
+		err = finishErr
+	}
+	return result, duration, err
 }
 
 // ============================================================================
@@ -2605,7 +2616,6 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 	}
 	res, duration, err = s.handleResponse(reqCtx, resp, responseWriter, string(reqCtx.upstreamProtocol), cfg, apiKey, observer)
 	if res != nil {
-		res.errorReceivedAt = time.Now()
 		res.RetryStrategy = reqCtx.anthropicThinkingOmitStrategy
 	}
 	reqCtx.antigravityReplay.finish(res, err)
@@ -2833,9 +2843,6 @@ func cloneRequestWithBody(req *http.Request, body []byte) *http.Request {
 // ============================================================================
 
 func markSSEErrorForwardResult(res *fwResult) {
-	if res.errorReceivedAt.IsZero() {
-		res.errorReceivedAt = time.Now()
-	}
 	res.Body = res.SSEErrorEvent
 	res.Status = classifySSEErrorStatus(res.SSEErrorEvent)
 	if upstreamStatus, headers := websocketErrorStatusAndHeaders(res.SSEErrorEvent); upstreamStatus != 0 {
@@ -3081,6 +3088,7 @@ func (s *Server) forwardAttempt(
 			actualModel,
 		)
 		incrementalBody = replaceJSONRequestModel(incrementalBody, actualModel)
+		incrementalBody = applyAutomaticReasoning(incrementalBody, reqCtx, upstreamProtocol, actualModel)
 		incrementalBody = prepareCodexResponsesBodyForUpstream(cfg, upstreamProtocol, requestPath, incrementalBody)
 		nativeAttempt = &nativeCodexWebsocketAttempt{
 			session:                     reqCtx.nativeCodexWS,
@@ -4037,6 +4045,11 @@ func (s *Server) attemptKeyAcrossURLs(
 			protocolCandidates = []protocol.Protocol{protocol.Codex}
 			declared = true
 		}
+		if cfg.IsSystemOne() {
+			// System One 渠道不声明聊天协议，只原样透传 /v1/systemone。
+			protocolCandidates = []protocol.Protocol{protocol.SystemOne}
+			declared = true
+		}
 		learnCapability := transformMode == model.ProtocolTransformModeAuto && !declared
 		if learnCapability {
 			if cachedProtocol, known := s.protocolCapabilities.get(capabilityKey); known {
@@ -4257,6 +4270,7 @@ func prioritizePinnedCodexWebsocketURL(
 }
 
 func (s *Server) tryChannelWithKeys(ctx context.Context, cfg *model.Config, reqCtx *proxyRequestContext, w http.ResponseWriter) (result *proxyResult, err error) {
+	defer func() { filterOAuthQuotaResult(cfg, result) }()
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	reqCtx.abortChannel = cancel
@@ -4283,7 +4297,7 @@ func (s *Server) tryChannelWithKeys(ctx context.Context, cfg *model.Config, reqC
 		return buildCtxDoneResult(cfg, ctxErr), nil
 	}
 	var apiKeys []*model.APIKey
-	if cfg.GetAuthType() == model.AuthTypeAPIKey {
+	if !cfg.UsesOAuth() {
 		apiKeys, err = s.getAPIKeys(ctx, cfg.ID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get API keys: %w", err)

@@ -439,7 +439,7 @@ type channelEnrichmentContext struct {
 // channelCostMultiplierRange 返回渠道成本倍率区间。
 // api_key 渠道取未禁用 Key 的 min/max（无启用 Key 时回退渠道列）；OAuth 渠道即渠道列。
 func channelCostMultiplierRange(cfg *model.Config, apiKeys []*model.APIKey) (float64, float64) {
-	if cfg.AuthType == model.AuthTypeAPIKey {
+	if model.UsesAPIKeyCredentials(cfg.AuthType) {
 		var minValue, maxValue float64
 		hasEnabled := false
 		for _, key := range apiKeys {
@@ -806,7 +806,7 @@ func (s *Server) handleCreateChannel(c *gin.Context) {
 		RespondErrorMsg(c, http.StatusConflict, "OAuth channels cannot use management_account")
 		return
 	}
-	if req.AuthType != model.AuthTypeAPIKey {
+	if !model.UsesAPIKeyCredentials(req.AuthType) {
 		RespondErrorMsg(c, http.StatusBadRequest, "OAuth channels must be created by login or credential import")
 		return
 	}
@@ -1309,6 +1309,9 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 	if err := sonic.Unmarshal(reqBytes, &req); err != nil {
 		RespondErrorMsg(c, http.StatusBadRequest, "invalid request format")
 		return
+	}
+	if !req.oauthQuotaPassthroughSet {
+		req.OAuthQuotaPassthrough = existing.OAuthQuotaPassthrough
 	}
 	rawAuthType := strings.TrimSpace(req.AuthType)
 	if rawAuthType == "" {
@@ -2464,7 +2467,7 @@ func (s *Server) removeDeletedChannelRuntimeState(cfg *model.Config) {
 		s.urlSelector.RemoveChannel(id)
 	}
 	if s.channelRPMLimiter != nil {
-		s.channelRPMLimiter.RemoveChannel(id)
+		s.channelRPMLimiter.Remove(id)
 	}
 	if s.codexCredentials != nil {
 		s.codexCredentials.invalidate(id)

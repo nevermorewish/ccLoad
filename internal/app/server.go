@@ -63,8 +63,9 @@ type Server struct {
 	cooldownManager               *cooldown.Manager          // 统一冷却管理器
 	healthCache                   *HealthCache               // 渠道健康度缓存
 	costCache                     *CostCache                 // 渠道每日成本缓存
-	channelRPMLimiter             *channelRPMLimiter         // 渠道RPM限制器（内存滑动窗口）
+	channelRPMLimiter             *rpmLimiter                // 渠道RPM限制器（内存滑动窗口）
 	sessionAffinity               *sessionAffinityStore      // Anthropic/Codex 会话 → 渠道/Key 绑定
+	sameChannelFailures           sameChannelFailureCounter  // same_channel_retries 跨请求连续失败计数(零值可用)
 	channelConcurrencyLimiter     *channelConcurrencyLimiter // 渠道并发限制器（内存计数）
 	statsCache                    *StatsCache                // 统计结果缓存层
 	updateManager                 *version.UpdateManager     // 版本检查与可选自动应用的唯一状态源
@@ -163,7 +164,9 @@ type Server struct {
 	multimodalFallbackUpdateMu sync.Mutex
 	modelPricingUpdateMu       sync.Mutex
 	settingsUpdateMu           sync.Mutex
-	jevClient                  *http.Client
+	reasoningAuto              model.ReasoningAutoConfig
+	reasoningStates            reasoningStateStore
+	reasoningDecisionSlots     chan struct{}
 
 	// 登录速率限制器（用于传递给AuthService）
 	loginRateLimiter *util.LoginRateLimiter
@@ -233,6 +236,10 @@ func newServer(store storage.Store, logBatchTimeout time.Duration) *Server {
 
 	// 从ConfigService读取运行时配置（启动时加载一次，修改后重启生效）
 	runtimeCfg := loadServerRuntimeConfig(configService)
+	reasoningAuto, reasoningErr := ParseReasoningAutoConfig(configService.GetString(reasoningAutoSettingKey, "{}"))
+	if reasoningErr != nil {
+		log.Fatalf("[FATAL] 无效的 reasoning_auto: %v", reasoningErr)
+	}
 	warnMigratedEnvSettings()
 
 	// 运行时配置必须归属具体 Server/存储实例，构造函数不修改进程级状态。
@@ -264,10 +271,12 @@ func newServer(store storage.Store, logBatchTimeout time.Duration) *Server {
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 
 	s := &Server{
-		startedAt:        startedAt,
-		store:            store,
-		configService:    configService,
-		loginRateLimiter: util.NewLoginRateLimiter(),
+		startedAt:              startedAt,
+		store:                  store,
+		configService:          configService,
+		reasoningAuto:          reasoningAuto,
+		reasoningDecisionSlots: make(chan struct{}, 16),
+		loginRateLimiter:       util.NewLoginRateLimiter(),
 
 		// 运行时配置（启动时加载，修改后重启生效）
 		maxKeyRetries:            runtimeCfg.MaxKeyRetries,
@@ -323,7 +332,7 @@ func newServer(store storage.Store, logBatchTimeout time.Duration) *Server {
 				defaultResponsesWebsocketConnectionPerSubjectLimit,
 			),
 		),
-		channelRPMLimiter:         newChannelRPMLimiter(time.Now),
+		channelRPMLimiter:         newRPMLimiter(time.Now),
 		channelConcurrencyLimiter: newChannelConcurrencyLimiter(),
 		sessionAffinity:           newSessionAffinityStore(),
 	}
@@ -1890,12 +1899,12 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		// API访问令牌管理
 		admin.GET("/auth-tokens", s.HandleListAuthTokens)
 		admin.POST("/auth-tokens", s.HandleCreateAuthToken)
+		admin.POST("/route-preview", s.HandleRoutePreview)
 		admin.PUT("/auth-tokens/:id", s.HandleUpdateAuthToken)
 		admin.DELETE("/auth-tokens/:id", s.HandleDeleteAuthToken)
 
 		// 系统配置管理
 		admin.GET("/model-pricing", s.HandleGetModelPricing)
-		admin.POST("/typesafe/test", s.AdminTestTypeSafe)
 		admin.GET("/settings", s.AdminListSettings)
 		admin.GET("/settings/:key", s.AdminGetSetting)
 		admin.POST("/settings/batch", s.AdminBatchUpdateSettings)
@@ -1990,6 +1999,9 @@ func (s *Server) stateCleanupLoop() {
 			if s.channelRPMLimiter != nil {
 				s.channelRPMLimiter.CleanupExpired()
 			}
+			if s.authService != nil {
+				s.authService.tokenRPMLimiter.CleanupExpired()
+			}
 			s.sessionAffinity.cleanupExpired(time.Now())
 		}
 	}
@@ -2019,8 +2031,7 @@ func (s *Server) AddLogAsync(entry *model.LogEntry) {
 }
 
 func (s *Server) recordURLRequestFromLog(entry *model.LogEntry) {
-	if s == nil || s.urlSelector == nil || entry == nil ||
-		entry.LogSource == model.LogSourceJev || entry.LogSource == model.LogSourceCountTokens {
+	if s == nil || s.urlSelector == nil || entry == nil || entry.LogSource == model.LogSourceCountTokens {
 		return
 	}
 	s.urlSelector.RecordRequestResult(entry.ChannelID, entry.BaseURL, entry.StatusCode)

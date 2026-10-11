@@ -155,21 +155,31 @@ var (
 // - Gemini: https://ai.google.dev/gemini-api/docs/pricing
 var basePricing = map[string]ModelPricing{
 	// ========== Claude 模型 ==========
+	// https://platform.claude.com/docs/en/about-claude/pricing （2026-10-08）
+	// Sonnet 5.5 缓存读取降至输入价的 5%；Sonnet 5 仍为 10%。
 	"claude-sonnet-5-5": {
 		InputPrice: 2.00, OutputPrice: 10.00,
-		CacheReadPrice: 0.20, HasCacheReadPrice: true,
+		CacheReadPrice: 0.10, HasCacheReadPrice: true,
 		CacheWritePrice: 2.50, HasCacheWritePrice: true,
 	},
-	"claude-sonnet-5":   {InputPrice: 3.00, OutputPrice: 15.00}, // 同 claude-sonnet-4-6
+	"claude-sonnet-5":   {InputPrice: 2.00, OutputPrice: 10.00}, // 全1M窗口统一价格
 	"claude-sonnet-4-6": {InputPrice: 3.00, OutputPrice: 15.00}, // 全1M窗口统一价格
+	// 4/4.5 的 1M beta 已于 2026-04-30 退役，不再登记旧 >200K 加价。
+	// https://platform.claude.com/docs/en/release-notes/overview#april-30-2026
+	// 保留完整 prompt 分档语义，供显式自定义价格使用。
 	"claude-sonnet-4-5": {
 		InputPrice: 3.00, OutputPrice: 15.00,
-		InputPriceHigh: 6.00, OutputPriceHigh: 22.50, // >200k context
 		CacheReadCountsTowardTier: true,
 	},
 	"claude-sonnet-4-0": {
 		InputPrice: 3.00, OutputPrice: 15.00,
-		InputPriceHigh: 6.00, OutputPriceHigh: 22.50, // >200k context
+		CacheReadCountsTowardTier: true,
+	},
+	// https://platform.claude.com/docs/en/about-claude/pricing （2026-10-08）
+	// 完整 prompt 超过 100K 后，整次请求（含缓存读写）按高档计费。
+	"claude-haiku-5-5": {
+		InputPrice: 0.10, OutputPrice: 0.50,
+		InputPriceHigh: 0.50, OutputPriceHigh: 2.50,
 		CacheReadCountsTowardTier: true,
 	},
 	"claude-haiku-4-5": {InputPrice: 1.00, OutputPrice: 5.00},
@@ -187,6 +197,10 @@ var basePricing = map[string]ModelPricing{
 	"claude-fable-5-1": {
 		InputPrice: 10.00, OutputPrice: 50.00, CacheReadPrice: 0.25, HasCacheReadPrice: true,
 	},
+	"claude-mythos-5-1": {
+		InputPrice: 10.00, OutputPrice: 50.00, CacheReadPrice: 0.25, HasCacheReadPrice: true,
+	},
+	"claude-mythos-5":   {InputPrice: 10.00, OutputPrice: 50.00},
 	"claude-fable-5":    {InputPrice: 10.00, OutputPrice: 50.00}, // claude-opus-4-8 两倍
 	"claude-opus-4-5":   {InputPrice: 5.00, OutputPrice: 25.00},
 	"claude-3-7-sonnet": {InputPrice: 3.00, OutputPrice: 15.00},
@@ -227,14 +241,15 @@ var basePricing = map[string]ModelPricing{
 		InputPriceHigh: 0.20, OutputPriceHigh: 0.75, CacheReadPriceHigh: 0.02, // >272K context
 		CacheReadCountsTowardTier: true,
 	},
+	// 官方 2026-10-08 核实：Sol 优惠价至少持续到 2026-11-21，别名同价。
 	"gpt-5.6": {
-		InputPrice: 5.00, OutputPrice: 30.00, CacheReadPrice: 0.50, HasCacheReadPrice: true,
-		InputPriceHigh: 10.00, OutputPriceHigh: 45.00, CacheReadPriceHigh: 1.00, // >272K context
+		InputPrice: 4.00, OutputPrice: 20.00, CacheReadPrice: 0.40, HasCacheReadPrice: true,
+		InputPriceHigh: 8.00, OutputPriceHigh: 30.00, CacheReadPriceHigh: 0.80, // >272K context
 		CacheReadCountsTowardTier: true,
 	},
 	"gpt-5.6-sol": {
-		InputPrice: 5.00, OutputPrice: 30.00, CacheReadPrice: 0.50, HasCacheReadPrice: true,
-		InputPriceHigh: 10.00, OutputPriceHigh: 45.00, CacheReadPriceHigh: 1.00, // >272K context
+		InputPrice: 4.00, OutputPrice: 20.00, CacheReadPrice: 0.40, HasCacheReadPrice: true,
+		InputPriceHigh: 8.00, OutputPriceHigh: 30.00, CacheReadPriceHigh: 0.80, // >272K context
 		CacheReadCountsTowardTier: true,
 	},
 	// Terra/Luna 应用 OpenAI 2026-07-31 调价；长上下文倍率保持不变。
@@ -248,17 +263,27 @@ var basePricing = map[string]ModelPricing{
 		InputPriceHigh: 0.40, OutputPriceHigh: 1.80, CacheReadPriceHigh: 0.04, // >272K context
 		CacheReadCountsTowardTier: true,
 	},
+	"gpt-5.6-cyber": {InputPrice: 12.50, OutputPrice: 75.00, CacheReadPrice: 1.25, HasCacheReadPrice: true},
+	"gpt-5.5-cyber": {InputPrice: 12.50, OutputPrice: 75.00, CacheReadPrice: 1.25, HasCacheReadPrice: true},
+	"gpt-5.5-pro": {
+		InputPrice: 30.00, OutputPrice: 180.00,
+		InputPriceHigh: 60.00, OutputPriceHigh: 270.00,
+		CacheReadCountsTowardTier: true,
+	},
 	"gpt-5.5": {
 		InputPrice: 5.00, OutputPrice: 30.00,
 		InputPriceHigh: 10.00, OutputPriceHigh: 45.00, // >272K context; 2× gpt-5.4
+		CacheReadCountsTowardTier: true,
 	},
 	"gpt-5.4": {
 		InputPrice: 2.50, OutputPrice: 15.00,
 		InputPriceHigh: 5.00, OutputPriceHigh: 22.50, // >272K context
+		CacheReadCountsTowardTier: true,
 	},
 	"gpt-5.4-pro": {
 		InputPrice: 30.00, OutputPrice: 180.00,
 		InputPriceHigh: 60.00, OutputPriceHigh: 270.00, // >272K context
+		CacheReadCountsTowardTier: true,
 	},
 	"gpt-5.4-mini":        {InputPrice: 0.75, OutputPrice: 4.50},
 	"gpt-5.4-nano":        {InputPrice: 0.20, OutputPrice: 1.25},
@@ -295,12 +320,18 @@ var basePricing = map[string]ModelPricing{
 	"gpt-4":                      {InputPrice: 30.00, OutputPrice: 60.00},
 	"gpt-4-32k":                  {InputPrice: 60.00, OutputPrice: 120.00},
 	"gpt-3.5-turbo":              {InputPrice: 0.50, OutputPrice: 1.50},
+	"gpt-3.5-turbo-1106":         {InputPrice: 1.00, OutputPrice: 2.00},
 	"gpt-3.5-legacy":             {InputPrice: 1.50, OutputPrice: 2.00},
 	"gpt-3.5-16k":                {InputPrice: 3.00, OutputPrice: 4.00},
 
 	// ========== OpenAI Realtime/Audio ==========
-	"gpt-realtime":                 {InputPrice: 4.00, OutputPrice: 16.00},
-	"gpt-realtime-mini":            {InputPrice: 0.60, OutputPrice: 2.40},
+	// 此目录记录文本 token 费率，不用于音频/图像 token。
+	"gpt-realtime-2.1":             {InputPrice: 4.00, OutputPrice: 24.00, CacheReadPrice: 0.40, HasCacheReadPrice: true},
+	"gpt-realtime-2.1-mini":        {InputPrice: 0.60, OutputPrice: 2.40, CacheReadPrice: 0.06, HasCacheReadPrice: true},
+	"gpt-realtime-2":               {InputPrice: 4.00, OutputPrice: 24.00, CacheReadPrice: 0.40, HasCacheReadPrice: true},
+	"gpt-realtime-1.5":             {InputPrice: 4.00, OutputPrice: 16.00, CacheReadPrice: 0.40, HasCacheReadPrice: true},
+	"gpt-realtime":                 {InputPrice: 4.00, OutputPrice: 16.00, CacheReadPrice: 0.40, HasCacheReadPrice: true},
+	"gpt-realtime-mini":            {InputPrice: 0.60, OutputPrice: 2.40, CacheReadPrice: 0.06, HasCacheReadPrice: true},
 	"gpt-4o-realtime-preview":      {InputPrice: 5.00, OutputPrice: 20.00},
 	"gpt-4o-mini-realtime-preview": {InputPrice: 0.60, OutputPrice: 2.40},
 	"gpt-audio":                    {InputPrice: 2.50, OutputPrice: 10.00},
@@ -309,10 +340,10 @@ var basePricing = map[string]ModelPricing{
 	"gpt-4o-mini-audio-preview":    {InputPrice: 0.15, OutputPrice: 0.60},
 
 	// ========== OpenAI Image ==========
-	"gpt-image-1.5":        {InputPrice: 5.00, OutputPrice: 10.00},
-	"chatgpt-image-latest": {InputPrice: 5.00, OutputPrice: 10.00},
-	"gpt-image-1":          {InputPrice: 5.00, OutputPrice: 0.00},
-	"gpt-image-1-mini":     {InputPrice: 2.00, OutputPrice: 0.00},
+	"gpt-image-1.5":        {InputPrice: 5.00, OutputPrice: 10.00, CacheReadPrice: 1.25, HasCacheReadPrice: true},
+	"chatgpt-image-latest": {InputPrice: 5.00, OutputPrice: 10.00, CacheReadPrice: 1.25, HasCacheReadPrice: true},
+	"gpt-image-1":          {InputPrice: 5.00, OutputPrice: 0.00, CacheReadPrice: 1.25, HasCacheReadPrice: true},
+	"gpt-image-1-mini":     {InputPrice: 2.00, OutputPrice: 0.00, CacheReadPrice: 0.20, HasCacheReadPrice: true},
 
 	// ========== OpenAI o系列 ==========
 	"o1":                    {InputPrice: 15.00, OutputPrice: 60.00},
@@ -708,8 +739,12 @@ var basePricing = map[string]ModelPricing{
 	"gpt-oss-120b:exacto":   {InputPrice: 0.039, OutputPrice: 0.19, CacheReadPrice: 0.04, HasCacheReadPrice: true},
 	"gpt-oss-safeguard-20b": {InputPrice: 0.075, OutputPrice: 0.30, CacheReadPrice: 0.037, HasCacheReadPrice: true},
 
-	// Typesafe Jev 1.13.0：仅输入 token 计费，输出 token 免费。
-	"jev-latest": {InputPrice: 0.042, OutputPrice: 0.00},
+	// ========== System One 模型（只按输入 token 计费，输出免费） ==========
+	// 前缀匹配覆盖别名与版本号（jev-latest、jev-1.13.0、drex-latest、drex-v1.5 等）
+	// 来源: https://typesafe.ai/blog/introducing-system-one-models-and-jev（$42/十亿输入 token）
+	"jev": {InputPrice: 0.042, OutputPrice: 0},
+	// 来源: Nace Drex 文档 /docs/drex/reference/pricing（50 nUSD/输入 token；退役版本按 drex-v1.5 计价）
+	"drex": {InputPrice: 0.05, OutputPrice: 0},
 }
 
 // modelAliases 模型别名映射（多对一）
@@ -755,7 +790,6 @@ var modelAliases = map[string]string{
 	"gpt-4-0314":                 "gpt-4",
 	"gpt-4-32k-0613":             "gpt-4-32k",
 	"gpt-3.5-turbo-0125":         "gpt-3.5-turbo",
-	"gpt-3.5-turbo-1106":         "gpt-3.5-legacy",
 	"gpt-3.5-turbo-0613":         "gpt-3.5-legacy",
 	"gpt-3.5-0301":               "gpt-3.5-legacy",
 	"gpt-3.5-turbo-instruct":     "gpt-3.5-legacy",

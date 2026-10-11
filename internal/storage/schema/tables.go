@@ -25,6 +25,7 @@ func DefineChannelsTable() *TableBuilder {
 		Column("auth_type VARCHAR(32) NOT NULL DEFAULT 'api_key'").
 		Column("oauth_credential TEXT").
 		Column("websockets TINYINT NOT NULL DEFAULT 0").
+		Column("oauth_quota_passthrough TINYINT NOT NULL DEFAULT 0").
 		Column("protocol_transform_mode VARCHAR(32) NOT NULL DEFAULT 'auto'").
 		Column("enabled TINYINT NOT NULL DEFAULT 1").
 		Column("scheduled_check_enabled TINYINT NOT NULL DEFAULT 0").
@@ -42,6 +43,7 @@ func DefineChannelsTable() *TableBuilder {
 		Column("available_time_end VARCHAR(5) NOT NULL DEFAULT ''").
 		Column("retry_other_keys_on_failure TINYINT NOT NULL DEFAULT 0").
 		Column("sort_override INT NOT NULL DEFAULT 0").
+		Column("same_channel_retries INT NOT NULL DEFAULT 0").
 		Column("created_at BIGINT NOT NULL").
 		Column("updated_at BIGINT NOT NULL").
 		Index("idx_channels_enabled", "enabled").
@@ -151,6 +153,7 @@ func DefineAuthTokensTable() *TableBuilder {
 		Column("allowed_channel_ids VARCHAR(2000) NOT NULL DEFAULT ''").
 		Column("channel_restriction_mode VARCHAR(16) NOT NULL DEFAULT 'allow'").
 		Column("max_concurrency INT NOT NULL DEFAULT 0").
+		Column("rpm_limit INT NOT NULL DEFAULT 0").
 		Index("idx_auth_tokens_active", "is_active").
 		Index("idx_auth_tokens_expires", "expires_at")
 }
@@ -211,6 +214,7 @@ func DefineLogsTable() *TableBuilder {
 		Column("base_url VARCHAR(500) NOT NULL DEFAULT ''").    // 请求使用的上游URL（多URL场景）
 		Column("service_tier VARCHAR(20) NOT NULL DEFAULT ''"). // OpenAI service_tier: priority/flex
 		Column("thinking_effort VARCHAR(32) NOT NULL DEFAULT ''").
+		Column("reasoning_decision TEXT NULL").
 		Column("input_tokens INT NOT NULL DEFAULT 0").
 		Column("output_tokens INT NOT NULL DEFAULT 0").
 		Column("reasoning_tokens INT NOT NULL DEFAULT 0").

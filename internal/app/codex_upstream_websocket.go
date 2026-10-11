@@ -214,6 +214,7 @@ type codexUpstreamWebsocketSession struct {
 	maxAgeTimer           *time.Timer
 	maxAgeExpired         bool
 	turnTerminal          bool
+	streamingConn         *websocket.Conn
 	pendingHeartbeatConn  *websocket.Conn
 	pendingHeartbeatCause error
 
@@ -497,6 +498,7 @@ func (s *codexUpstreamWebsocketSession) expireConnection(conn *websocket.Conn) {
 
 func (s *codexUpstreamWebsocketSession) finishTurn() {
 	s.mu.Lock()
+	s.streamingConn = nil
 	if s.maxAgeExpired {
 		s.closeLocked()
 	}
@@ -708,6 +710,27 @@ func (s *codexUpstreamWebsocketSession) writeRequest(conn *websocket.Conn, body 
 	err := conn.WriteMessage(websocket.TextMessage, body)
 	_ = conn.SetWriteDeadline(time.Time{})
 	return err
+}
+
+func (s *codexUpstreamWebsocketSession) setStreamingConn(conn *websocket.Conn) {
+	s.mu.Lock()
+	s.streamingConn = conn
+	s.mu.Unlock()
+}
+
+// forwardInterrupt writes response.interrupt unchanged to the socket streaming
+// the current turn. It never dials or replays: a retired or reconnecting socket,
+// or a turn that already reached its terminal event, returns false so the
+// caller cancels the turn locally instead.
+func (s *codexUpstreamWebsocketSession) forwardInterrupt(payload []byte) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	conn := s.streamingConn
+	live := conn != nil && s.conn == conn && !s.turnTerminal
+	s.mu.Unlock()
+	return live && s.writeRequest(conn, payload) == nil
 }
 
 func isCodexWebsocketSemanticEvent(eventType string) bool {
@@ -1231,6 +1254,7 @@ func (s *codexUpstreamWebsocketSession) reconnectWithReplay(
 		}
 		return nil, nil, err
 	}
+	reasoningBusinessSending(ctx, prepared)
 	if err = s.writeRequest(conn, prepared); err != nil {
 		s.invalidate(conn)
 		return nil, nil, err
@@ -1260,6 +1284,7 @@ func (s *codexUpstreamWebsocketSession) streamResponse(
 ) *http.Response {
 	reader, writer := io.Pipe()
 	body := &codexWebsocketResponseBody{PipeReader: reader, abort: func() { s.invalidate(conn) }}
+	s.setStreamingConn(conn)
 	go func() {
 		defer s.finishTurn()
 		stopCancel := context.AfterFunc(ctx, func() {
@@ -1296,6 +1321,7 @@ func (s *codexUpstreamWebsocketSession) streamResponse(
 							onReconnectHandshake(retryHeaders)
 						}
 						conn = connRetry
+						s.setStreamingConn(conn)
 						continue
 					}
 					_ = writer.CloseWithError(errRetry)
@@ -1324,6 +1350,7 @@ func (s *codexUpstreamWebsocketSession) streamResponse(
 						onReconnectHandshake(retryHeaders)
 					}
 					conn = connRetry
+					s.setStreamingConn(conn)
 					continue
 				}
 				_ = writer.CloseWithError(errRetry)
@@ -1343,6 +1370,7 @@ func (s *codexUpstreamWebsocketSession) streamResponse(
 							onReconnectHandshake(retryHeaders)
 						}
 						conn = connRetry
+						s.setStreamingConn(conn)
 						replayBody = retryReplay
 						continue
 					}
@@ -1481,6 +1509,7 @@ func (s *codexUpstreamWebsocketSession) roundTrip(
 		s.mu.Unlock()
 	}
 
+	reasoningBusinessSending(ctx, preparedBody)
 	err = s.writeRequest(conn, preparedBody)
 	if err != nil {
 		s.invalidate(conn)

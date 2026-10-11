@@ -41,6 +41,16 @@ func (s *Server) applyCooldownDecision(
 
 	in = s.completeCooldownInput(cfg, in)
 
+	// 同渠道重试期间，可重试故障的冷却先登记不落库，由重试循环在放弃该渠道时统一提交；
+	// 换 Key 回退本身就是重试手段，照常冷却当前 Key。
+	if pending := pendingSameChannelCooldownsFrom(ctx); pending != nil &&
+		(!cfg.RetryOtherKeysOnFailure || !s.cooldownManager.CanFallbackToOtherKey(in)) {
+		if action := s.cooldownManager.DecideAction(ctx, in); sameChannelRetryableFailure(action, in) {
+			pending.inputs = append(pending.inputs, in)
+			return action
+		}
+	}
+
 	var action cooldown.Action
 	if cfg.RetryOtherKeysOnFailure {
 		action = s.cooldownManager.HandleErrorWithKeyFallback(cooldownCtx, in)
@@ -131,7 +141,6 @@ func httpErrorInput(channelID int64, keyIndex int, res *fwResult) cooldown.Error
 		return httpErrorInputFromParts(channelID, keyIndex, 0, nil, nil)
 	}
 	in := httpErrorInputFromParts(channelID, keyIndex, res.Status, res.Body, res.Header)
-	in.ReceivedAt = res.errorReceivedAt
 	if res.UpstreamStatus != 0 {
 		in.UpstreamStatusCode = res.UpstreamStatus
 	}
@@ -259,12 +268,10 @@ func buildProxyLogEntry(
 		ModelPrice:       reqCtx.attemptModelPrice,
 		ThinkingEffort:   reqCtx.thinkingEffort,
 	})
-	if res != nil && res.jevNote != "" {
-		entry.Message += " [jev " + res.jevNote + "]"
-	}
 	if cfg.UsesAntigravityOAuth() && cfg.AntigravityCredits {
 		entry.Message += " [credits]"
 	}
+	entry.ReasoningDecision = reqCtx.reasoningLogMetadata()
 	if reqCtx.countTokens() {
 		entry.LogSource = model.LogSourceCountTokens
 		entry.Cost = 0
@@ -645,6 +652,9 @@ func (s *Server) handleProxySuccess(
 		// 冷却状态已恢复，刷新相关缓存避免下次命中过期数据
 		s.invalidateChannelRelatedCache(cfg.ID)
 	}
+	if cfg.SameChannelRetries > 0 {
+		s.sameChannelFailures.reset(sameChannelFailureKey{channelID: cfg.ID, model: actualModel})
+	}
 	if !cfg.AntigravityCredits && s.antigravityCredentials.standardQuotaUntil(cfg, actualModel).After(time.Now()) {
 		s.antigravityCredentials.updateQuotaState(ctx, cfg, actualModel, time.Time{}, false)
 	}
@@ -689,9 +699,6 @@ func (s *Server) handleStreamingErrorNoRetry(
 	reqCtx *proxyRequestContext,
 ) (*proxyResult, cooldown.Action) {
 	input := cooldownInputForModel(httpErrorInput(cfg.ID, keyIndex, res), actualModel)
-	if !res.UpstreamWebsocketTransportFailure {
-		input = s.prepareJevError(ctx, cfg, reqCtx, res, input, selectedKey)
-	}
 	// 记录错误日志；已提交的部分 usage 上游已收费，照常计入令牌费用
 	s.logProxyResult(reqCtx, cfg, actualModel, selectedKey, res.Status, duration, res, res.StreamDiagMsg)
 	s.updateTokenStatsForProxy(reqCtx, model.TokenStatsFailure, duration, res, actualModel)
@@ -794,9 +801,6 @@ func (s *Server) handleProxyErrorResponse(
 	}
 	if isAntigravityModelNotFound(cfg, res.Status) {
 		input.ModelScoped = true
-	}
-	if !forceReturnClient && !modelCapacityRateLimited {
-		input = s.prepareJevError(ctx, cfg, reqCtx, res, input, selectedKey)
 	}
 	// 日志改进: 明确标识上游返回的499错误
 	errMsg := ""

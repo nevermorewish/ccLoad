@@ -1107,6 +1107,10 @@ func TestMigrateSQLite_LegacyCostLimitedAuthTokenGetsDefaultMaxConcurrency(t *te
 		t.Fatalf("migrate legacy auth_tokens: %v", err)
 	}
 
+	var rpmLimit int
+	if err := db.QueryRowContext(ctx, `SELECT rpm_limit FROM auth_tokens WHERE token = 'limited-legacy'`).Scan(&rpmLimit); err != nil || rpmLimit != 0 {
+		t.Fatalf("legacy rpm_limit=%d err=%v, want 0", rpmLimit, err)
+	}
 	var limitedMaxConcurrency int
 	if err := db.QueryRowContext(ctx, `
 		SELECT max_concurrency FROM auth_tokens WHERE token = 'limited-legacy'
@@ -1133,7 +1137,7 @@ func TestMigrateSQLite_LegacyCostLimitedAuthTokenGetsDefaultMaxConcurrency(t *te
 	}
 	for _, col := range []string{
 		"cost_daily_used_microusd", "cost_daily_limit_microusd", "cost_daily_period_start",
-		"cost_monthly_used_microusd", "cost_monthly_limit_microusd", "cost_monthly_period_start",
+		"cost_monthly_used_microusd", "cost_monthly_limit_microusd", "cost_monthly_period_start", "rpm_limit",
 	} {
 		if !cols[col] {
 			t.Errorf("legacy migrate missing column %s", col)
@@ -2176,7 +2180,7 @@ func TestEnsureLogsNewColumns_SQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqliteExistingColumns: %v", err)
 	}
-	for _, col := range []string{"minute_bucket", "auth_token_id", "client_ip", "actual_model", "response_model", "log_source"} {
+	for _, col := range []string{"minute_bucket", "auth_token_id", "client_ip", "actual_model", "response_model", "reasoning_decision", "log_source"} {
 		if !cols[col] {
 			t.Errorf("column %s not found in logs", col)
 		}
@@ -2565,5 +2569,80 @@ func TestEnsureChannelsSortOverride_SQLite(t *testing.T) {
 	}
 	if loaded.SortPriority() != 42 {
 		t.Fatalf("SortPriority() = %d, want 42", loaded.SortPriority())
+	}
+}
+
+func TestMigrateSQLiteOAuthQuotaPassthroughDefault(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "quota.db")
+	store, err := createSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := store.CreateConfig(ctx, &model.Config{Name: "legacy", URLs: model.ChannelURLs{{URL: "https://example.com"}}, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ExecContext(ctx, "ALTER TABLE channels DROP COLUMN oauth_quota_passthrough"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = createSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	got, err := store.GetConfig(ctx, cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OAuthQuotaPassthrough {
+		t.Fatal("legacy channel must migrate with false default")
+	}
+}
+
+func TestReasoningDecisionMigrationAndRoundTripSQLite(t *testing.T) {
+	db := openTestDB(t)
+	if err := migrate(context.Background(), db, DialectSQLite); err != nil {
+		t.Fatal(err)
+	}
+	verifyReasoningDecisionMigrationAndRoundTrip(t, db, sqlstore.NewSQLStore(db, "sqlite"), DialectSQLite)
+}
+
+func verifyReasoningDecisionMigrationAndRoundTrip(t *testing.T, db *sql.DB, store Store, dialect Dialect) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now()
+	legacy := &model.LogEntry{Time: model.JSONTime{Time: now}, Model: "legacy", StatusCode: 200, Message: "legacy"}
+	if err := store.AddLog(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "ALTER TABLE logs DROP COLUMN reasoning_decision"); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(ctx, db, dialect); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(ctx, db, dialect); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := store.ListLogs(ctx, now.Add(-time.Minute), 10, 0, nil)
+	if err != nil || len(logs) != 1 || logs[0].ReasoningDecision != nil {
+		t.Fatalf("legacy log after migration: %+v, error = %v", logs, err)
+	}
+	metadata := &model.ReasoningDecision{Status: "applied", SuggestedEffort: "high", ClientEffort: "xhigh", CostUnknown: true}
+	decision := &model.LogEntry{Time: model.JSONTime{Time: now}, Model: "jev-latest", ClientProtocol: "system_one",
+		StatusCode: 200, Message: "decision", ReasoningDecision: metadata, InputTokens: 25, Cost: 0.5}
+	if err := store.BatchAddLogs(ctx, []*model.LogEntry{decision}); err != nil {
+		t.Fatal(err)
+	}
+	logs, err = store.ListLogs(ctx, now.Add(-time.Minute), 10, 0, &model.LogFilter{ClientProtocol: "system_one"})
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("decision logs: %+v, error = %v", logs, err)
+	}
+	if got := logs[0]; got.ReasoningDecision == nil || *got.ReasoningDecision != *metadata || got.InputTokens != 25 || got.Cost != 0.5 {
+		t.Fatalf("decision metadata = %+v", got)
 	}
 }

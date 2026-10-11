@@ -58,6 +58,7 @@ type testChannel struct {
 	customRequestRules      *model.CustomRequestRules
 	cooldownDetectionRules  *model.CooldownDetectionRules
 	retryOtherKeysOnFailure bool
+	sameChannelRetries      int
 	models                  string // 逗号分隔的模型列表
 	modelEntries            []model.ModelEntry
 	apiKey                  string
@@ -888,7 +889,7 @@ func setupProxyTestEnvWithSettings(
 		}
 
 		urls := channelURLsForTest(upURL)
-		if transformMode == model.ProtocolTransformModeLocal {
+		if transformMode == model.ProtocolTransformModeLocal && ch.authType != model.AuthTypeSystemOne {
 			for urlIndex := range urls {
 				urls[urlIndex].Protocols = []string{upstreamProtocol}
 			}
@@ -903,6 +904,7 @@ func setupProxyTestEnvWithSettings(
 			CustomRequestRules:      ch.customRequestRules,
 			CooldownDetectionRules:  ch.cooldownDetectionRules,
 			RetryOtherKeysOnFailure: ch.retryOtherKeysOnFailure,
+			SameChannelRetries:      ch.sameChannelRetries,
 			Priority:                priority,
 			Enabled:                 true,
 			ModelEntries:            modelEntries,
@@ -7149,6 +7151,166 @@ func TestProxy_RetryOtherKeysOnFailure(t *testing.T) {
 	}
 }
 
+func TestProxy_SameChannelRetries(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name                 string
+		sameChannelRetries   int
+		failures             int64 // 主渠道前 N 次请求失败
+		failStatus           int
+		wantPrimaryAttempts  int64
+		wantFallbackAttempts int64
+		wantPrimaryCooled    bool
+	}{
+		{
+			name: "disabled switches channel on first 5xx", failures: 1, failStatus: http.StatusBadGateway,
+			wantPrimaryAttempts: 1, wantFallbackAttempts: 1, wantPrimaryCooled: true,
+		},
+		{
+			name: "transient 5xx recovers on same channel without cooldown", sameChannelRetries: 2, failures: 2, failStatus: http.StatusBadGateway,
+			wantPrimaryAttempts: 3, wantFallbackAttempts: 0,
+		},
+		{
+			name: "exhausted retries cool once then switch", sameChannelRetries: 2, failures: 100, failStatus: http.StatusBadGateway,
+			wantPrimaryAttempts: 3, wantFallbackAttempts: 1, wantPrimaryCooled: true,
+		},
+		{
+			name: "rate limit is not retried on same channel", sameChannelRetries: 2, failures: 100, failStatus: http.StatusTooManyRequests,
+			wantPrimaryAttempts: 1, wantFallbackAttempts: 1, wantPrimaryCooled: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var primaryAttempts, fallbackAttempts atomic.Int64
+			primary := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if primaryAttempts.Add(1) <= tt.failures {
+					w.WriteHeader(tt.failStatus)
+					_, _ = w.Write([]byte(`{"error":{"message":"upstream flaky"}}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"id":"primary","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			}))
+			defer primary.Close()
+			fallback := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fallbackAttempts.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"fallback","choices":[{"message":{"content":"fallback"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			}))
+			defer fallback.Close()
+
+			env := setupProxyTestEnv(t, []testChannel{
+				{name: "flaky", models: "gpt-test", priority: 100, sameChannelRetries: tt.sameChannelRetries},
+				{name: "fallback", models: "gpt-test", priority: 50},
+			}, map[int]string{0: primary.URL, 1: fallback.URL})
+
+			response := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
+				"model": "gpt-test", "messages": []map[string]string{{"role": "user", "content": "hi"}},
+			}, nil)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			if got := primaryAttempts.Load(); got != tt.wantPrimaryAttempts {
+				t.Fatalf("primary attempts=%d, want %d", got, tt.wantPrimaryAttempts)
+			}
+			if got := fallbackAttempts.Load(); got != tt.wantFallbackAttempts {
+				t.Fatalf("fallback attempts=%d, want %d", got, tt.wantFallbackAttempts)
+			}
+
+			ctx := context.Background()
+			cfg, err := env.store.GetConfig(ctx, 1)
+			if err != nil {
+				t.Fatalf("get primary config: %v", err)
+			}
+			modelCooldowns, err := env.store.GetAllModelCooldowns(ctx)
+			if err != nil {
+				t.Fatalf("get model cooldowns: %v", err)
+			}
+			cooledUntil := time.Unix(cfg.CooldownUntil, 0)
+			for _, until := range modelCooldowns[1] {
+				if until.After(cooledUntil) {
+					cooledUntil = until
+				}
+			}
+			now := time.Now()
+			if !tt.wantPrimaryCooled {
+				if cooledUntil.After(now) {
+					t.Fatalf("recovered channel must not be cooled, until=%v", cooledUntil)
+				}
+				return
+			}
+			if !cooledUntil.After(now) {
+				t.Fatalf("primary channel should be cooled after giving up")
+			}
+			// 只提交最后一次失败：冷却停在退避首档，没有因重试翻倍。
+			if remaining := cooledUntil.Sub(now); remaining > 3*time.Minute {
+				t.Fatalf("cooldown applied more than once, remaining=%v", remaining)
+			}
+		})
+	}
+}
+
+func TestProxy_SameChannelRetriesToleratesCommittedStreamInterruptions(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name               string
+		sameChannelRetries int
+		outcomes           []bool // 依次每个请求上游是否中途断流
+		wantCooled         bool
+	}{
+		{name: "disabled cools on first interruption", outcomes: []bool{true}, wantCooled: true},
+		{name: "interruptions within limit do not cool", sameChannelRetries: 2, outcomes: []bool{true, true}},
+		{name: "interruption beyond limit cools", sameChannelRetries: 2, outcomes: []bool{true, true, true}, wantCooled: true},
+		{name: "success resets consecutive count", sameChannelRetries: 2, outcomes: []bool{true, true, false, true, true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var interrupt atomic.Bool
+			upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: response.output_text.delta\n"+
+					`data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"partial"}`+"\n\n")
+				if interrupt.Load() {
+					if flusher, ok := w.(http.Flusher); ok {
+						flusher.Flush()
+					}
+					panic(http.ErrAbortHandler)
+				}
+				_, _ = io.WriteString(w, "event: response.completed\n"+
+					`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`+"\n\n")
+			}))
+			defer upstream.Close()
+
+			env := setupProxyTestEnv(t, []testChannel{{
+				name: "flaky", upstreamProtocol: "codex", models: "gpt-test", priority: 100,
+				sameChannelRetries: tt.sameChannelRetries,
+			}}, map[int]string{0: upstream.URL})
+
+			for i, interrupted := range tt.outcomes {
+				interrupt.Store(interrupted)
+				response := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{
+					"model": "gpt-test", "stream": true, "input": "hi",
+				}, nil)
+				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "partial") {
+					t.Fatalf("request %d status=%d body=%s", i, response.Code, response.Body.String())
+				}
+			}
+
+			modelCooldowns, err := env.store.GetAllModelCooldowns(context.Background())
+			if err != nil {
+				t.Fatalf("get model cooldowns: %v", err)
+			}
+			cooled := false
+			for _, until := range modelCooldowns[1] {
+				cooled = cooled || until.After(time.Now())
+			}
+			if cooled != tt.wantCooled {
+				t.Fatalf("cooled=%v, want %v (cooldowns=%v)", cooled, tt.wantCooled, modelCooldowns[1])
+			}
+		})
+	}
+}
+
 func TestProxy_RetryOtherKeysSessionAffinity(t *testing.T) {
 	t.Parallel()
 	var phase atomic.Int32
@@ -8334,7 +8496,7 @@ func TestProxy_CodexPriorityRequestBillsFastModeWithoutResponseTier(t *testing.T
 	if entry.ServiceTier != "priority" {
 		t.Fatalf("ServiceTier=%q, want priority", entry.ServiceTier)
 	}
-	wantCost := util.CalculateCostDetailed("gpt-5.6", 1000, 1000, 0, 0, 0) * 2.5
+	wantCost := util.CalculateCostDetailed("gpt-5.6", 1000, 1000, 0, 0, 0) * 2
 	if !floatEquals(entry.Cost, wantCost) {
 		t.Fatalf("Cost=%v, want fast-mode cost %v", entry.Cost, wantCost)
 	}
@@ -8369,7 +8531,7 @@ func TestProxy_CodexPriorityRequestBillsFastModeDespiteUpstreamDefaultTier(t *te
 	if entry.ServiceTier != "priority" {
 		t.Fatalf("ServiceTier=%q, want priority", entry.ServiceTier)
 	}
-	wantCost := util.CalculateCostDetailed("gpt-5.6", 1000, 1000, 0, 0, 0) * 2.5
+	wantCost := util.CalculateCostDetailed("gpt-5.6", 1000, 1000, 0, 0, 0) * 2
 	if !floatEquals(entry.Cost, wantCost) {
 		t.Fatalf("Cost=%v, want fast-mode cost %v", entry.Cost, wantCost)
 	}
@@ -8404,13 +8566,13 @@ func TestProxy_CodexAutoResponseChargesFastMode(t *testing.T) {
 	if entry.ServiceTier != "auto" {
 		t.Fatalf("ServiceTier=%q, want auto", entry.ServiceTier)
 	}
-	wantCost := util.CalculateCostDetailed("gpt-5.6-sol", 1000, 1000, 0, 0, 0) * 2.5
+	wantCost := util.CalculateCostDetailed("gpt-5.6-sol", 1000, 1000, 0, 0, 0) * 2
 	if !floatEquals(entry.Cost, wantCost) {
 		t.Fatalf("Cost=%v, want auto fast-mode cost %v", entry.Cost, wantCost)
 	}
 }
 
-func TestProxy_CodexUltrafastResponseChargesTenfold(t *testing.T) {
+func TestProxy_CodexUltrafastResponseChargesSixfold(t *testing.T) {
 	t.Parallel()
 
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -8439,7 +8601,7 @@ func TestProxy_CodexUltrafastResponseChargesTenfold(t *testing.T) {
 	if entry.ServiceTier != "ultrafast" {
 		t.Fatalf("ServiceTier=%q, want ultrafast", entry.ServiceTier)
 	}
-	wantCost := util.CalculateCostDetailed("gpt-5.6", 1000, 1000, 0, 0, 0) * 10
+	wantCost := util.CalculateCostDetailed("gpt-5.6", 1000, 1000, 0, 0, 0) * 6
 	if !floatEquals(entry.Cost, wantCost) {
 		t.Fatalf("Cost=%v, want ultrafast cost %v", entry.Cost, wantCost)
 	}
@@ -15066,7 +15228,7 @@ func TestProxy_ResponsesMetadataThenSSEError_RetriesNextChannel(t *testing.T) {
 }
 
 // 上游静默中止：response.incomplete 无 output 且 output_tokens=0，首包前按流中断切渠道；
-// content_filter 是确定性结果，原样返回不切渠道。
+// content_filter 与 interrupted（上游确认 response.interrupt）原样返回不切渠道。
 func TestProxy_ResponsesEmptyIncompleteBeforeOutput(t *testing.T) {
 	t.Parallel()
 
@@ -15078,6 +15240,7 @@ func TestProxy_ResponsesEmptyIncompleteBeforeOutput(t *testing.T) {
 	}{
 		{name: "silent abort retries next channel", reason: "max_output_tokens", wantRetry: true, wantInBody: "resp-ch2"},
 		{name: "content filter is returned", reason: "content_filter", wantRetry: false, wantInBody: "resp-ch1-incomplete"},
+		{name: "interrupt acknowledgement is returned", reason: "interrupted", wantRetry: false, wantInBody: "resp-ch1-incomplete"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -16938,5 +17101,103 @@ func TestProxy_SessionAffinityDisabledFallsBackToRotation(t *testing.T) {
 	}
 	if !rotated["peer-a"] || !rotated["peer-b"] {
 		t.Fatalf("sticky disabled but session pinned to %v, want rotation across both peers", rotated)
+	}
+}
+
+func TestTokenRPMHTTPUpstreamRetriesAndFailureCountOnce(t *testing.T) {
+	for _, success := range []bool{true, false} {
+		t.Run(fmt.Sprintf("success=%t", success), func(t *testing.T) {
+			var hits atomic.Int32
+			upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				n := hits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				if n < 3 || !success {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(w, `{"error":{"type":"server_error","message":"try again"}}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"id":"chat-rpm","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+			}))
+			env := setupProxyTestEnv(t, []testChannel{{name: "rpm-retry", models: "gpt-rpm", sameChannelRetries: 2}}, map[int]string{0: upstream.URL})
+			token := &model.AuthToken{Token: model.HashToken("rpm-retry"), Description: "retry", IsActive: true, RPMLimit: 1}
+			if err := env.store.CreateAuthToken(context.Background(), token); err != nil {
+				t.Fatal(err)
+			}
+			if err := env.server.authService.ReloadAuthTokens(); err != nil {
+				t.Fatal(err)
+			}
+			clock := &channelRPMFakeClock{now: time.Unix(1000, 0)}
+			env.server.authService.tokenRPMLimiter = newRPMLimiter(clock.Now)
+			request := func() *httptest.ResponseRecorder {
+				return doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{"model": "gpt-rpm", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}, map[string]string{"Authorization": "Bearer rpm-retry"})
+			}
+			w := request()
+			if success && w.Code != http.StatusOK || !success && w.Code != http.StatusInternalServerError {
+				t.Fatalf("first response status=%d body=%s", w.Code, w.Body.String())
+			}
+			if hits.Load() != 3 {
+				t.Fatalf("upstream attempts=%d, want 3", hits.Load())
+			}
+			assertTokenRPMHTTPError(t, request(), 60)
+			if hits.Load() != 3 {
+				t.Fatalf("rejected client request reached upstream: %d", hits.Load())
+			}
+		})
+	}
+}
+
+// /v1/systemone 只透传到 System One 渠道；聊天入口也永不选中 System One 渠道。
+func TestProxySystemOneEndpointRoutesOnlySystemOneChannels(t *testing.T) {
+	t.Parallel()
+	var systemOneCalls, chatCalls atomic.Int32
+	systemOne := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		systemOneCalls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		if r.URL.Path != "/v1/systemone" || r.Header.Get("Authorization") != "Bearer sk-one" || r.Header.Get("X-Api-Key") != "" {
+			t.Errorf("System One wire: path=%s authorization=%q x-api-key=%q", r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("X-Api-Key"))
+		}
+		if gjson.GetBytes(body, "model").String() != "jev-1" || gjson.GetBytes(body, "state").String() != "task data" ||
+			gjson.GetBytes(body, "questions.effort.type").String() != "choice" {
+			t.Errorf("System One body was not passed through: %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"model":"jev-1.13.0","answers":{"effort":{"type":"choice","choice":"high"}},"usage":{"input_tokens":12,"output_tokens":6}}`)
+	}))
+	t.Cleanup(systemOne.Close)
+	chat := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chatCalls.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chat-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`)
+	}))
+	t.Cleanup(chat.Close)
+	env := setupProxyTestEnv(t, []testChannel{
+		{name: "decision", authType: model.AuthTypeSystemOne, apiKey: "sk-one",
+			modelEntries: []model.ModelEntry{{Model: "jev-latest", RedirectModel: "jev-1"}}},
+		{name: "chat", upstreamProtocol: "openai", models: "jev-latest,gpt-chat", apiKey: "sk-chat", priority: 100},
+	}, map[int]string{0: systemOne.URL, 1: chat.URL})
+
+	decision := map[string]any{"model": "jev-latest", "state": "task data", "stream": true,
+		"questions": map[string]any{"effort": map[string]any{"type": "choice", "criteria": map[string]string{"low": "easy", "high": "hard"}}}}
+	w := doProxyRequest(t, env.engine, "/v1/systemone", decision, nil)
+	if w.Code != http.StatusOK || gjson.Get(w.Body.String(), "answers.effort.choice").String() != "high" {
+		t.Fatalf("System One status=%d body=%s", w.Code, w.Body.String())
+	}
+	entry := waitForProxyLogMatching(t, env, func(entry *model.LogEntry) bool { return entry.ClientProtocol == util.ProtocolSystemOne })
+	if entry.UpstreamProtocol != util.ProtocolSystemOne || entry.IsStreaming || entry.InputTokens != 12 || entry.OutputTokens != 6 ||
+		entry.ActualModel != "jev-1" || entry.ResponseModel != "jev-1.13.0" {
+		t.Fatalf("System One log = %+v", entry)
+	}
+
+	// 只有聊天渠道支持的模型不会被转换后发给聊天渠道。
+	if w = doProxyRequest(t, env.engine, "/v1/systemone", map[string]any{"model": "gpt-chat", "state": "x"}, nil); w.Code == http.StatusOK {
+		t.Fatalf("chat-only model served by /v1/systemone: %s", w.Body.String())
+	}
+	if w = doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{"model": "jev-latest",
+		"messages": []any{map[string]string{"role": "user", "content": "hi"}}}, nil); w.Code != http.StatusOK {
+		t.Fatalf("chat status=%d body=%s", w.Code, w.Body.String())
+	}
+	if systemOneCalls.Load() != 1 || chatCalls.Load() != 1 {
+		t.Fatalf("upstream calls: system_one=%d chat=%d", systemOneCalls.Load(), chatCalls.Load())
 	}
 }

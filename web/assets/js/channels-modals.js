@@ -17,6 +17,7 @@ function setChannelDrawerIdentityVisible(visible) {
 
 function channelDrawerAuthLabel(authType) {
   if (!authType || authType === 'api_key') return window.t('channels.drawer.authApiKey');
+  if (authType === 'system_one') return window.t('channels.authTypeSystemOne');
   return window.t('channels.drawer.authOAuth', { provider: channelAuthTypeFilterLabel(authType) });
 }
 
@@ -528,20 +529,25 @@ function resetModalKeyStatusFilter() {
   if (filter) filter.value = 'all';
 }
 
-async function showAddModal() {
+// 认证方式由新建入口决定（API Key / System One），创建后不可改；OAuth 渠道由登录或导入创建。
+async function showAddModal(authType = 'api_key') {
   editingChannelId = null;
-  editingChannelAuthType = 'api_key';
+  editingChannelAuthType = authType === 'system_one' ? 'system_one' : 'api_key';
   currentChannelKeyCooldowns = [];
   resetModalKeyStatusFilter();
 
-  setChannelModalTitle('channels.addChannel');
+  setChannelModalTitle(editingChannelAuthType === 'system_one' ? 'channels.addSystemOneChannel' : 'channels.addChannel');
   document.getElementById('channelForm').reset();
   document.getElementById('channelEnabled').checked = true;
   document.getElementById('channelScheduledCheckEnabled').checked = false;
   const retryOtherKeysCheckbox = document.getElementById('channelRetryOtherKeysOnFailure');
   if (retryOtherKeysCheckbox) retryOtherKeysCheckbox.checked = false;
+  const sameChannelRetriesInput = document.getElementById('channelSameChannelRetries');
+  if (sameChannelRetriesInput) sameChannelRetriesInput.value = '0';
   const websocketCheckbox = document.getElementById('channelWebsockets');
   if (websocketCheckbox) websocketCheckbox.checked = false;
+  const quotaPassthroughCheckbox = document.getElementById('channelOAuthQuotaPassthrough');
+  if (quotaPassthroughCheckbox) quotaPassthroughCheckbox.checked = false;
   document.getElementById('channelScheduledCheckModel').value = '';
   document.getElementById('channelScheduledCheckIntervalMinutes').value = '300';
   document.getElementById('channelScheduledCheckStartTime').value = '00:00';
@@ -565,7 +571,7 @@ async function showAddModal() {
   inlineKeyVisible = true;
   document.getElementById('inlineEyeIcon').style.display = 'none';
   document.getElementById('inlineEyeOffIcon').style.display = 'block';
-  invokeChannelEditorAction('resetManagementAccountDraft', null, getValidInlineURLConfigs(), 'api_key');
+  invokeChannelEditorAction('resetManagementAccountDraft', null, getValidInlineURLConfigs(), editingChannelAuthType);
   renderInlineKeyTable();
   if (typeof applyChannelAuthEditorMode === 'function') applyChannelAuthEditorMode(editingChannelAuthType, null);
 
@@ -604,7 +610,7 @@ async function editChannel(id) {
   const protocolModeRenderPromise = ensureProtocolTransformModeCombobox(channel.protocol_transform_mode);
 
   editingChannelId = id;
-  editingChannelAuthType = ['codebuddy_oauth', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth'].includes(channel.auth_type)
+  editingChannelAuthType = ['system_one', 'codebuddy_oauth', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth'].includes(channel.auth_type)
     ? channel.auth_type
     : 'api_key';
   clearChannelDuplicateHint();
@@ -660,12 +666,16 @@ async function editChannel(id) {
   document.getElementById('channelEnabled').checked = channel.enabled;
   const websocketCheckbox = document.getElementById('channelWebsockets');
   if (websocketCheckbox) websocketCheckbox.checked = !!channel.websockets;
+  const quotaPassthroughCheckbox = document.getElementById('channelOAuthQuotaPassthrough');
+  if (quotaPassthroughCheckbox) quotaPassthroughCheckbox.checked = channel.oauth_quota_passthrough === true;
   document.getElementById('channelScheduledCheckEnabled').checked = !!channel.scheduled_check_enabled;
   document.getElementById('channelScheduledCheckModel').value = channel.scheduled_check_model || '';
   document.getElementById('channelScheduledCheckIntervalMinutes').value = channel.scheduled_check_interval_minutes ?? 300;
   document.getElementById('channelScheduledCheckStartTime').value = channel.scheduled_check_start_time ?? '00:00';
   const retryOtherKeysCheckbox = document.getElementById('channelRetryOtherKeysOnFailure');
   if (retryOtherKeysCheckbox) retryOtherKeysCheckbox.checked = !!channel.retry_other_keys_on_failure;
+  const sameChannelRetriesInput = document.getElementById('channelSameChannelRetries');
+  if (sameChannelRetriesInput) sameChannelRetriesInput.value = String(channel.same_channel_retries || 0);
 
   // 加载模型配置（新格式：models是 {model, redirect_model} 数组）
   const modelCooldowns = new Map(
@@ -1041,9 +1051,10 @@ async function saveChannel(event) {
   const models = collectModelsForSubmit(redirectTableData);
 
 
+  const quotaPassthroughCheckbox = document.getElementById('channelOAuthQuotaPassthrough');
   const formData = {
     name: document.getElementById('channelName').value.trim(),
-    auth_type: isOAuth ? editingChannelAuthType : 'api_key',
+    auth_type: editingChannelAuthType,
     urls: validURLConfigs,
     api_key: validKeys.join(','),
     api_keys: validKeyRows.map(row => ({
@@ -1064,6 +1075,7 @@ async function saveChannel(event) {
     enabled: document.getElementById('channelEnabled').checked,
     scheduled_check_enabled: document.getElementById('channelScheduledCheckEnabled').checked,
     websockets: !!document.getElementById('channelWebsockets')?.checked,
+    oauth_quota_passthrough: !!quotaPassthroughCheckbox && !quotaPassthroughCheckbox.disabled && quotaPassthroughCheckbox.checked,
     scheduled_check_model: document.getElementById('channelScheduledCheckModel').value.trim(),
     scheduled_check_interval_minutes: Number(document.getElementById('channelScheduledCheckIntervalMinutes').value),
     scheduled_check_start_time: document.getElementById('channelScheduledCheckStartTime').value.trim(),
@@ -1072,7 +1084,8 @@ async function saveChannel(event) {
     proxy_url: (document.getElementById('channelProxyURL')?.value || '').trim(),
     available_time_start: (document.getElementById('channelAvailableTimeStart')?.value || '').trim(),
     available_time_end: (document.getElementById('channelAvailableTimeEnd')?.value || '').trim(),
-    retry_other_keys_on_failure: !!document.getElementById('channelRetryOtherKeysOnFailure')?.checked
+    retry_other_keys_on_failure: !!document.getElementById('channelRetryOtherKeysOnFailure')?.checked,
+    same_channel_retries: parseInt(document.getElementById('channelSameChannelRetries')?.value, 10) || 0
   };
   if (isOAuth) {
     // OAuth 凭证 1:1：倍率经合成 Key 行提交（后端 ToConfig 取 APIKeys[0].CostMultiplier 写入渠道列）。
@@ -2101,6 +2114,7 @@ async function copyChannel(id, name) {
   const copiedName = generateCopyName(name);
 
   editingChannelId = null;
+  editingChannelAuthType = channel.auth_type === 'system_one' ? 'system_one' : 'api_key';
   clearChannelDuplicateHint();
   currentChannelKeyCooldowns = [];
   resetModalKeyStatusFilter();
@@ -2133,6 +2147,8 @@ async function copyChannel(id, name) {
   document.getElementById('channelEnabled').checked = true;
   const websocketCheckbox = document.getElementById('channelWebsockets');
   if (websocketCheckbox) websocketCheckbox.checked = !!channel.websockets;
+  const quotaPassthroughCheckbox = document.getElementById('channelOAuthQuotaPassthrough');
+  if (quotaPassthroughCheckbox) quotaPassthroughCheckbox.checked = channel.oauth_quota_passthrough === true;
   document.getElementById('channelScheduledCheckEnabled').checked = !!channel.scheduled_check_enabled;
   document.getElementById('channelScheduledCheckModel').value = channel.scheduled_check_model || '';
   document.getElementById('channelScheduledCheckIntervalMinutes').value = channel.scheduled_check_interval_minutes ?? 300;
@@ -2145,6 +2161,8 @@ async function copyChannel(id, name) {
   if (availableTimeEnd) availableTimeEnd.value = channel.available_time_end || '';
   const retryOtherKeysCheckbox = document.getElementById('channelRetryOtherKeysOnFailure');
   if (retryOtherKeysCheckbox) retryOtherKeysCheckbox.checked = !!channel.retry_other_keys_on_failure;
+  const sameChannelRetriesInput = document.getElementById('channelSameChannelRetries');
+  if (sameChannelRetriesInput) sameChannelRetriesInput.value = String(channel.same_channel_retries || 0);
 
   // 加载模型配置（新格式：models是 {model, redirect_model} 数组）
   redirectTableData = (channel.models || []).map(m => ({
@@ -2857,9 +2875,13 @@ function getVisibleModelIndices() {
 /**
  * 按关键字筛选模型
  */
+let modelKeywordRenderTimer = null;
+
 function filterModelsByKeyword(keyword) {
   currentModelFilter = (keyword || '').trim();
-  renderRedirectTable();
+  // 整表重建数百行，连续输入时只渲染最后一次
+  clearTimeout(modelKeywordRenderTimer);
+  modelKeywordRenderTimer = setTimeout(renderRedirectTable, 120);
 }
 
 function renderRedirectTable() {
@@ -2913,7 +2935,7 @@ function renderRedirectTable() {
 
   // Translate dynamically rendered elements
   if (window.i18n && window.i18n.translatePage) {
-    window.i18n.translatePage();
+    window.i18n.translatePage(tbody);
   }
 }
 
@@ -3655,6 +3677,7 @@ async function fetchModelsFromAPI() {
         urls,
         api_keys: availableKeys,
         per_key: true,
+        auth_type: editingChannelAuthType,
         ...(proxyURL ? { proxy_url: proxyURL } : {})
       })
     };
@@ -4026,6 +4049,7 @@ if (typeof module !== 'undefined' && module.exports) {
     parseQuickAddChannelInfo,
     proposeFetchedKeyModelScopes,
     saveChannel,
+    showAddModal,
     testRedirectModel,
     toggleModelDisabledState
   };

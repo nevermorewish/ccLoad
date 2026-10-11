@@ -156,6 +156,7 @@ func TestHybridStore_ChannelFinalStateConvergesToPrimary(t *testing.T) {
 	}
 	updated := created.Clone()
 	updated.Name = "final"
+	updated.OAuthQuotaPassthrough = true
 	if _, err := hybrid.UpdateConfig(ctx, created.ID, updated); err != nil {
 		t.Fatalf("UpdateConfig: %v", err)
 	}
@@ -166,7 +167,7 @@ func TestHybridStore_ChannelFinalStateConvergesToPrimary(t *testing.T) {
 		disabled, disabledErr := primary.LoadDisabledURLs(ctx)
 		// The model cooldown replicates as its own queued entity, so waiting on
 		// the channel state alone can observe a queue that is still draining.
-		return cfgErr == nil && cfg.Name == "final" &&
+		return cfgErr == nil && cfg.Name == "final" && cfg.OAuthQuotaPassthrough &&
 			keysErr == nil && len(keys) == 1 && keys[0].Disabled && keys[0].Priority == -9 &&
 			disabledErr == nil && len(disabled[created.ID]) == 1 &&
 			hybrid.RuntimeMetrics().PrimarySyncPending == 0
@@ -385,6 +386,7 @@ func TestHybridStore_CreateUpdateDeleteKeepsTombstone(t *testing.T) {
 	token := &model.AuthToken{
 		Token:                  "hybrid-delete-channel-token",
 		Description:            "hybrid channel restriction",
+		RPMLimit:               12,
 		IsActive:               true,
 		AllowedChannelIDs:      []int64{created.ID},
 		ChannelRestrictionMode: model.ChannelRestrictionModeAllow,
@@ -394,7 +396,7 @@ func TestHybridStore_CreateUpdateDeleteKeepsTombstone(t *testing.T) {
 	}
 	waitForCondition(t, 3*time.Second, func() bool {
 		primaryToken, tokenErr := primary.GetAuthToken(ctx, token.ID)
-		return tokenErr == nil && len(primaryToken.AllowedChannelIDs) == 1 &&
+		return tokenErr == nil && primaryToken.RPMLimit == 12 && len(primaryToken.AllowedChannelIDs) == 1 &&
 			hybrid.RuntimeMetrics().PrimarySyncPending == 0
 	})
 	if err := hybrid.DeleteConfig(ctx, created.ID); err != nil {
@@ -403,7 +405,7 @@ func TestHybridStore_CreateUpdateDeleteKeepsTombstone(t *testing.T) {
 	waitForCondition(t, 3*time.Second, func() bool {
 		_, getErr := primary.GetConfig(ctx, created.ID)
 		primaryToken, tokenErr := primary.GetAuthToken(ctx, token.ID)
-		return getErr != nil && tokenErr == nil && !primaryToken.IsActive && len(primaryToken.AllowedChannelIDs) == 0 &&
+		return getErr != nil && tokenErr == nil && primaryToken.RPMLimit == 12 && !primaryToken.IsActive && len(primaryToken.AllowedChannelIDs) == 0 &&
 			hybrid.RuntimeMetrics().PrimarySyncPending == 0
 	})
 	if _, err := hybrid.GetConfig(ctx, created.ID); err == nil {
@@ -899,4 +901,27 @@ func TestHybridStore_ChannelManagementCASMarksDirtyOnlyOnSuccess(t *testing.T) {
 	if generationAfterStaleCAS != generationBeforeStaleCAS {
 		t.Fatalf("stale CAS marked channel dirty: generation %d -> %d", generationBeforeStaleCAS, generationAfterStaleCAS)
 	}
+}
+
+func TestHybridStoreDecisionMetadataReplicated(t *testing.T) {
+	primary := createTestSQLiteStore(t)
+	sqlite := createTestSQLiteStore(t)
+	hybrid := NewHybridStore(sqlite, primary)
+	t.Cleanup(func() { _ = hybrid.Close() })
+	ctx := context.Background()
+	metadata := &model.ReasoningDecision{Status: "applied", SuggestedEffort: "high", ClientEffort: "xhigh", CostUnknown: true}
+	entry := &model.LogEntry{Time: model.JSONTime{Time: time.Now()}, ClientProtocol: "system_one", ReasoningDecision: metadata,
+		Model: "jev-latest", StatusCode: 200, Cost: 0.1, InputTokens: 20}
+	if err := hybrid.AddLog(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	filter := &model.LogFilter{ClientProtocol: "system_one"}
+	logs, err := hybrid.ListLogs(ctx, time.Time{}, 10, 0, filter)
+	if err != nil || len(logs) != 1 || logs[0].ReasoningDecision == nil || *logs[0].ReasoningDecision != *metadata {
+		t.Fatalf("SQLite metadata = %+v, error = %v", logs, err)
+	}
+	waitForCondition(t, time.Second, func() bool {
+		logs, err := primary.ListLogs(ctx, time.Time{}, 10, 0, filter)
+		return err == nil && len(logs) == 1 && logs[0].ReasoningDecision != nil && *logs[0].ReasoningDecision == *metadata
+	})
 }

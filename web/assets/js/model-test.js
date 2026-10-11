@@ -2,6 +2,7 @@ const TEST_MODE_CHANNEL = 'channel';
 const TEST_MODE_MODEL = 'model';
 const TEST_MODE_CHAT = 'chat';
 const TEST_MODE_IMAGE = 'image';
+const TEST_MODE_PREVIEW = 'preview';
 
 // localStorage keys
 const STORAGE_KEY_TEST_MODE = 'ccload_model_test_mode';
@@ -581,7 +582,6 @@ function chatStatPart(labelKey, fallback, valueHtml) {
 
 const MODEL_TEST_PRIORITY_MIN = -99999;
 const MODEL_TEST_PRIORITY_MAX = 9999999;
-let modelTestPrioritySaveTimers = new Map();
 
 function normalizeModelTestPriorityValue(value, fallback) {
   const fallbackValue = Number.isFinite(Number(fallback)) ? Number(fallback) : 0;
@@ -748,31 +748,6 @@ function reorderModelTestRowsByChannelPriority() {
       row.dataset.baseOrder = String(index);
     });
   applyCurrentSort();
-}
-
-function queueModelTestPrioritySave(input, delay = 1000) {
-  if (!input) return;
-  const channelId = Number(input.dataset.channelId);
-  if (!Number.isFinite(channelId) || channelId <= 0) return;
-  input.classList.add('is-dirty');
-  const existingTimer = modelTestPrioritySaveTimers.get(channelId);
-  if (existingTimer) clearTimeout(existingTimer);
-  const timer = setTimeout(() => {
-    modelTestPrioritySaveTimers.delete(channelId);
-    saveModelTestInlinePriority(input);
-  }, delay);
-  modelTestPrioritySaveTimers.set(channelId, timer);
-}
-
-function flushModelTestPrioritySave(input) {
-  if (!input) return;
-  const channelId = Number(input.dataset.channelId);
-  const existingTimer = modelTestPrioritySaveTimers.get(channelId);
-  if (existingTimer) {
-    clearTimeout(existingTimer);
-    modelTestPrioritySaveTimers.delete(channelId);
-  }
-  return saveModelTestInlinePriority(input);
 }
 
 function findChannelModelEntry(channel, modelName) {
@@ -1523,13 +1498,25 @@ function syncClientProtocolCombobox() {
     });
   }
 
-  const label = protocolLabel(selectedProtocol);
+  // 渠道模式选中决策渠道时固定原生 /v1/systemone，协议不可选
+  const decision = testMode === TEST_MODE_CHANNEL && isSystemOneChannel(selectedChannel);
+  const label = decision ? i18nText('modelTest.clientProtocolSystemOne', 'System One') : protocolLabel(selectedProtocol);
   if (clientProtocolCombobox) {
-    clientProtocolCombobox.setValue(selectedProtocol, label);
+    clientProtocolCombobox.setValue(decision ? 'system_one' : selectedProtocol, label);
     clientProtocolCombobox.refresh();
   } else if (clientProtocolSelect) {
     clientProtocolSelect.value = label;
   }
+  if (clientProtocolSelect) clientProtocolSelect.disabled = decision;
+}
+
+function isSystemOneChannel(channel) {
+  return channel?.auth_type === 'system_one';
+}
+
+// 决策渠道测试不带 client_protocol（带了后端返回 400）；JSON 序列化会省略 undefined
+function testClientProtocolFor(channel) {
+  return isSystemOneChannel(channel) ? undefined : selectedProtocol;
 }
 
 function syncChatClientProtocolCombobox() {
@@ -1782,6 +1769,7 @@ function renderChannelModeRows() {
 }
 
 function populateModelSelector() {
+  window.ModelTestRoutePreview.refreshModels();
   const models = getAllModels();
   const typedModel = getModelInputValue();
 
@@ -1850,6 +1838,7 @@ function renderModelModeRows() {
       channelId: String(ch.id),
       channelName,
       channelBaseName: baseName,
+      oauthPlanBadge: buildOAuthPlanBadge(ch),
       channelEnabled: String(channelEnabled),
       channelPriority: String(priorityValue),
       dynamicPriorityHtml: buildModelTestDynamicPriorityHtml(ch, priorityValue),
@@ -1889,7 +1878,8 @@ const MODEL_TEST_MODE_TABS = [
   { id: 'modeTabChat', mode: TEST_MODE_CHAT },
   { id: 'modeTabImage', mode: TEST_MODE_IMAGE },
   { id: 'modeTabChannel', mode: TEST_MODE_CHANNEL },
-  { id: 'modeTabModel', mode: TEST_MODE_MODEL }
+  { id: 'modeTabModel', mode: TEST_MODE_MODEL },
+  { id: 'modeTabPreview', mode: TEST_MODE_PREVIEW }
 ];
 
 function syncModeTabState() {
@@ -1938,7 +1928,8 @@ function updateModeUI() {
   const isModelMode = testMode === TEST_MODE_MODEL;
   const isChatMode = testMode === TEST_MODE_CHAT;
   const isImageMode = testMode === TEST_MODE_IMAGE;
-  const isStandaloneMode = isChatMode || isImageMode;
+  const isPreviewMode = testMode === TEST_MODE_PREVIEW;
+  const isStandaloneMode = isChatMode || isImageMode || isPreviewMode;
   const fetchModelsBtn = getFetchModelsBtn();
   const addModelsBtn = getAddModelsBtn();
   const deleteModelsBtn = getDeleteModelsBtn();
@@ -1953,6 +1944,7 @@ function updateModeUI() {
   chatToolbar?.classList.toggle('hidden', !isChatMode);
   chatPanel?.classList.toggle('hidden', !isChatMode);
   imagePanel?.classList.toggle('hidden', !isImageMode);
+  document.getElementById('routePreviewPanel')?.classList.toggle('hidden', !isPreviewMode);
   modelTestCard?.classList.toggle('model-test-card--chat-mode', isChatMode);
 
   if (isStandaloneMode) return;
@@ -1997,7 +1989,7 @@ function getSelectedTargets() {
           row,
           model: row.dataset.model || selectedModelName,
           channelId: channel.id,
-          clientProtocol: selectedProtocol
+          clientProtocol: testClientProtocolFor(channel)
         };
       }
 
@@ -2006,7 +1998,7 @@ function getSelectedTargets() {
         row,
         model: row.dataset.model,
         channelId: selectedChannel.id,
-        clientProtocol: selectedProtocol,
+        clientProtocol: testClientProtocolFor(selectedChannel),
         keyIndex: selectedKeyIndex
       };
     })
@@ -3401,7 +3393,8 @@ function bindEvents() {
   tbody.addEventListener('input', (event) => {
     const input = event.target.closest('.ch-priority-input');
     if (!input) return;
-    queueModelTestPrioritySave(input);
+    // 只标记脏状态：保存期间禁用输入框会夺走焦点并吞掉后续按键
+    input.classList.add('is-dirty');
   });
 
   tbody.addEventListener('keydown', (event) => {
@@ -3409,7 +3402,7 @@ function bindEvents() {
     if (!input) return;
     if (event.key === 'Enter') {
       event.preventDefault();
-      flushModelTestPrioritySave(input);
+      saveModelTestInlinePriority(input);
     } else if (event.key === 'Escape') {
       const originalPriority = normalizeModelTestPriorityValue(input.dataset.originalPriority, 0);
       input.value = String(originalPriority);
@@ -3420,7 +3413,7 @@ function bindEvents() {
   tbody.addEventListener('focusout', (event) => {
     const input = event.target.closest('.ch-priority-input');
     if (!input) return;
-    flushModelTestPrioritySave(input);
+    saveModelTestInlinePriority(input);
   });
 
   tbody.addEventListener('change', (event) => {
@@ -3432,7 +3425,7 @@ function bindEvents() {
 }
 
 function setTestMode(mode) {
-  if (mode !== TEST_MODE_CHANNEL && mode !== TEST_MODE_MODEL && mode !== TEST_MODE_CHAT && mode !== TEST_MODE_IMAGE) return;
+  if (mode !== TEST_MODE_CHANNEL && mode !== TEST_MODE_MODEL && mode !== TEST_MODE_CHAT && mode !== TEST_MODE_IMAGE && mode !== TEST_MODE_PREVIEW) return;
   if (testMode === mode) return;
 
   const previousMode = testMode;
@@ -3444,6 +3437,11 @@ function setTestMode(mode) {
   saveTestModeToStorage(mode);
   clearProgress();
 
+  if (testMode === TEST_MODE_PREVIEW) {
+    updateModeUI();
+    window.ModelTestRoutePreview.open();
+    return;
+  }
   if (testMode === TEST_MODE_CHAT) {
     updateModeUI();
     initChatPanel();
@@ -3492,7 +3490,7 @@ function saveTestModeToStorage(mode) {
 function loadTestModeFromStorage() {
   try {
     const mode = localStorage.getItem(STORAGE_KEY_TEST_MODE);
-    if (mode === TEST_MODE_CHANNEL || mode === TEST_MODE_MODEL || mode === TEST_MODE_CHAT || mode === TEST_MODE_IMAGE) {
+    if (mode === TEST_MODE_CHANNEL || mode === TEST_MODE_MODEL || mode === TEST_MODE_CHAT || mode === TEST_MODE_IMAGE || mode === TEST_MODE_PREVIEW) {
       return mode;
     }
   } catch (_) { /* ignore */ }
@@ -4023,7 +4021,7 @@ function initChatPanel() {
   }
 }
 
-/** 收集所有渠道的模型并集（去重 + 字母排序），供 chat 模式模型下拉使用 */
+/** 收集所有渠道的具体模型并集（去重 + 字母排序），供模型下拉使用 */
 function getAllChatModelOptions() {
   const set = new Set();
   channelsList.forEach(ch => {
@@ -4984,6 +4982,7 @@ async function bootstrap() {
   bindEvents();
   initChatExportDropdown();
   initModeTabKeyboard();
+  window.ModelTestRoutePreview.init({ t: i18nText, protocols: getClientProtocols(), protocolLabel, getModelOptions: getAllChatModelOptions });
   window.ModelTestImage?.init({
     t: i18nText,
     getModelName,
@@ -5045,6 +5044,8 @@ async function bootstrap() {
     initChatPanel();
   } else if (testMode === TEST_MODE_IMAGE) {
     window.ModelTestImage?.open();
+  } else if (testMode === TEST_MODE_PREVIEW) {
+    window.ModelTestRoutePreview.open();
   }
 }
 

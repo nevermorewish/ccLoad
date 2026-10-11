@@ -26,13 +26,14 @@ func selectScheduledCheckModel(cfg *model.Config) (string, string) {
 	return "", "scheduled_check_model 不在渠道模型列表中"
 }
 
-func detectionLogFromResult(cfg *model.Config, logSource, requestModel, actualModel, apiKeyUsed, clientIP, requestThinkingEffort string, result map[string]any) *model.LogEntry {
+func detectionLogFromResult(cfg *model.Config, logSource, requestModel, actualModel string, key channelTestKeySelection, clientIP, requestThinkingEffort string, result map[string]any) *model.LogEntry {
 	entry := &model.LogEntry{
 		Time:             model.JSONTime{Time: time.Now()},
 		LogSource:        logSource,
 		Model:            requestModel,
 		ClientIP:         clientIP,
-		APIKeyUsed:       apiKeyUsed,
+		APIKeyUsed:       key.apiKey,
+		CostMultiplier:   key.costMultiplier,
 		BaseURL:          getResultString(result, "base_url"),
 		ClientProtocol:   getResultString(result, "client_protocol"),
 		UpstreamProtocol: getResultString(result, "upstream_protocol"),
@@ -49,6 +50,9 @@ func detectionLogFromResult(cfg *model.Config, logSource, requestModel, actualMo
 	}
 	if actualModel != "" && actualModel != requestModel {
 		entry.ActualModel = actualModel
+	}
+	if result["cost_unknown"] == true {
+		entry.ReasoningDecision = &model.ReasoningDecision{Status: "manual_test", CostUnknown: true}
 	}
 	populateDetectionUsage(entry, result, entry.UpstreamProtocol)
 	entry.Message = detectionMessage(result)
@@ -73,12 +77,13 @@ func detectionThinkingEffort(requestThinkingEffort string, result map[string]any
 
 func detectionSkipLog(cfg *model.Config, logSource, modelName, reason string) *model.LogEntry {
 	return &model.LogEntry{
-		Time:       model.JSONTime{Time: time.Now()},
-		LogSource:  logSource,
-		ChannelID:  cfg.ID,
-		Model:      modelName,
-		StatusCode: 0,
-		Message:    strings.TrimSpace(reason),
+		Time:           model.JSONTime{Time: time.Now()},
+		LogSource:      logSource,
+		ChannelID:      cfg.ID,
+		Model:          modelName,
+		StatusCode:     0,
+		Message:        strings.TrimSpace(reason),
+		CostMultiplier: cfg.CostMultiplier,
 	}
 }
 

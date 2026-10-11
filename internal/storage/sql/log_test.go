@@ -204,9 +204,6 @@ func TestLog_OAuthQuotaResetUsesIncrementalRounding(t *testing.T) {
 				}
 			}
 
-			if err := store.AddLog(ctx, &model.LogEntry{Time: newJSONTime(base.Add(time.Second)), ChannelID: cfg.ID, Model: "gpt-5.6-sol", LogSource: model.LogSourceJev, StatusCode: 200, Cost: 50}); err != nil {
-				t.Fatal(err)
-			}
 			assertCost := func() {
 				t.Helper()
 				got := quotaCostAt(t, ctx, store, cfg.ID, "codex|primary", base.Add(time.Minute))
@@ -1366,62 +1363,30 @@ func TestLog_CodexPurchasedCreditsStayOutsideWindows(t *testing.T) {
 	}
 }
 
-func TestJevLogsAreAuditsNotChannelUsage(t *testing.T) {
+func TestDecisionLogMetadataAndChannelCost(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	ctx := context.Background()
-	channelID := createTestChannel(t, ctx, store, "jev-origin")
+	channelID := createTestChannel(t, ctx, store, "decision-log")
 	now := time.Now()
-	for _, entry := range []*model.LogEntry{
-		{Time: newJSONTime(now), LogSource: model.LogSourceProxy, ChannelID: channelID, BaseURL: "https://upstream.example", Model: "m", StatusCode: 200, Duration: 1},
-		{Time: newJSONTime(now), LogSource: model.LogSourceJev, ChannelID: channelID, BaseURL: "https://upstream.example", Model: "jev-latest", StatusCode: 500, Duration: 10, Cost: 12, InputTokens: 100, Message: `{"version":1,"call_id":"first"}`},
-	} {
-		if err := store.AddLog(ctx, entry); err != nil {
-			t.Fatal(err)
-		}
+	decision := &model.ReasoningDecision{Status: "fallback", SuggestedEffort: "high", CostUnknown: true, ClientEffort: "xhigh"}
+	entry := &model.LogEntry{Time: newJSONTime(now), Model: "decision-model", ChannelID: channelID,
+		ClientProtocol: "system_one", StatusCode: 200, Cost: 0.25, CostMultiplier: 2,
+		ReasoningDecision: decision, InputTokens: 50, OutputTokens: 10}
+	if err := store.AddLog(ctx, entry); err != nil {
+		t.Fatal(err)
 	}
-	logs, err := store.ListLogs(ctx, now.Add(-time.Minute), 10, 0, &model.LogFilter{LogSource: model.LogSourceJev})
-	if err != nil || len(logs) != 1 || logs[0].LogSource != model.LogSourceJev {
-		t.Fatalf("logs=%v err=%v", logs, err)
+	// 决策调用属于代理流量，按请求协议 system_one 区分。
+	logs, err := store.ListLogs(ctx, now.Add(-time.Minute), 10, 0, &model.LogFilter{ClientProtocol: "system_one"})
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("decision logs = %v, error = %v", logs, err)
 	}
-	stats, err := store.GetTodayChannelURLStats(ctx, now.Add(-time.Minute))
-	if err != nil || len(stats) != 1 || stats[0].Failures != 0 || stats[0].Requests != 1 {
-		t.Fatalf("url stats=%+v err=%v", stats, err)
-	}
-	health, err := store.GetChannelSuccessRates(ctx, now.Add(-time.Minute))
-	if err != nil || health[channelID].SampleCount != 1 || health[channelID].SuccessRate != 1 {
-		t.Fatalf("health=%v err=%v", health, err)
+	got := logs[0]
+	if got.LogSource != model.LogSourceProxy || got.ReasoningDecision == nil || *got.ReasoningDecision != *decision || got.InputTokens != 50 || got.Cost != 0.25 {
+		t.Fatalf("decision round trip = %+v", got)
 	}
 	costs, err := store.GetTodayChannelCosts(ctx, now.Add(-time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if costs[channelID] != 0 {
-		t.Fatalf("Jev affected channel cost: %v", costs)
-	}
-	if err := store.DeleteConfig(ctx, channelID); err != nil {
-		t.Fatal(err)
-	}
-	// An in-flight audit remains recordable after its associated channel is removed.
-	entry := &model.LogEntry{Time: newJSONTime(now), LogSource: model.LogSourceJev, ChannelID: channelID, Model: "jev-latest", StatusCode: 200, Message: `{"version":1,"call_id":"after-delete"}`}
-	if err := store.BatchAddLogs(ctx, []*model.LogEntry{entry}); err != nil {
-		t.Fatal(err)
-	}
-	logs, err = store.ListLogs(ctx, now.Add(-time.Minute), 10, 0, &model.LogFilter{LogSource: model.LogSourceJev})
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, entry := range logs {
-		var message map[string]any
-		if err := json.Unmarshal([]byte(entry.Message), &message); err != nil {
-			t.Fatal(err)
-		}
-		if message["call_id"] == "after-delete" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("deleted channel silently discarded TypeSafe audit")
+	if err != nil || costs[channelID] != 0.5 {
+		t.Fatalf("channel costs = %v, error = %v", costs, err)
 	}
 }

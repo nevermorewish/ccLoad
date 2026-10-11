@@ -5227,7 +5227,7 @@ func TestHandleChannelTest_WritesManualTestLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateConfig failed: %v", err)
 	}
-	if err := srv.store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: created.ID, KeyIndex: 0, APIKey: "sk-invalid-key"}}); err != nil {
+	if err := srv.store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: created.ID, KeyIndex: 0, APIKey: "sk-invalid-key", CostMultiplier: 0.5}}); err != nil {
 		t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 	}
 
@@ -5267,6 +5267,10 @@ func TestHandleChannelTest_WritesManualTestLog(t *testing.T) {
 	}
 	if entry.BaseURL != upstream.URL {
 		t.Fatalf("BaseURL=%q, want %q", entry.BaseURL, upstream.URL)
+	}
+	// api_key 渠道的检测日志按所选 Key 快照倍率，与代理日志一致。
+	if entry.CostMultiplier != 0.5 {
+		t.Fatalf("CostMultiplier=%v, want key multiplier 0.5", entry.CostMultiplier)
 	}
 }
 
@@ -6159,6 +6163,7 @@ func TestHandleChannelImageGeneration_AntigravityNoImagePersistsDebugBody(t *tes
 	srv.client = upstream.Client()
 	created := createAntigravityOAuthChannelForAdminTest(t, srv, upstream.URL)
 	created.ModelEntries = []model.ModelEntry{{Model: "gemini-3.1-flash-image"}}
+	created.CostMultiplier = 1.5
 	updated, err := srv.store.UpdateConfig(context.Background(), created.ID, created)
 	if err != nil {
 		t.Fatalf("UpdateConfig failed: %v", err)
@@ -6185,6 +6190,10 @@ func TestHandleChannelImageGeneration_AntigravityNoImagePersistsDebugBody(t *tes
 	)
 	if err != nil || len(logs) != 1 {
 		t.Fatalf("ListLogsRange logs=%v err=%v", logs, err)
+	}
+	// OAuth 渠道的检测日志按渠道级倍率快照，而不是零值。
+	if logs[0].CostMultiplier != 1.5 {
+		t.Fatalf("CostMultiplier=%v, want channel multiplier 1.5", logs[0].CostMultiplier)
 	}
 	debugLog, err := srv.store.GetDebugLogByLogID(context.Background(), logs[0].ID)
 	if err != nil || debugLog == nil {
@@ -7263,5 +7272,198 @@ func TestPrepareChannelTestAuthEnforcesPersistedKeyModelScope(t *testing.T) {
 	}
 	if selected.keyIndex != 1 || selected.apiKey != "sk-qwen" {
 		t.Fatalf("selected=%+v, want qwen-scoped key", selected)
+	}
+}
+
+func TestHandleChannelTestSystemOneNative(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/systemone" || r.Header.Get("Authorization") != "Bearer decision-key" {
+			t.Errorf("native request method=%s path=%s authorization=%s", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		}
+		var request map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		var modelName string
+		if err := json.Unmarshal(request["model"], &modelName); err != nil {
+			t.Error(err)
+		}
+		if modelName != "jev-latest" || request["state"] == nil || request["questions"] == nil || request["messages"] != nil {
+			t.Errorf("native body = %s", request)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"effort":{"type":"choice","choice":"medium"}}}`))
+	}))
+	server := newInMemoryServer(t)
+	ctx := context.Background()
+	channel, err := server.store.CreateConfig(ctx, &model.Config{Name: "system-one-test", Enabled: true,
+		AuthType: model.AuthTypeSystemOne, URLs: model.ChannelURLs{{URL: upstream.URL + "/v1"}}, ModelEntries: []model.ModelEntry{{Model: "jev-latest"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: channel.ID, KeyIndex: 0, APIKey: "decision-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/1/test", map[string]any{"model": "jev-latest", "content": "simple task", "stream": true}))
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(channel.ID, 10)}}
+	server.HandleChannelTest(c)
+	response := mustParseAPIResponse[map[string]any](t, w.Body.Bytes())
+	if w.Code != http.StatusOK || response.Data["success"] != true || response.Data["effort"] != "medium" || response.Data["cost_unknown"] != true || calls.Load() != 1 {
+		t.Fatalf("native test = %s, calls=%d", w.Body.String(), calls.Load())
+	}
+	logs, err := server.store.ListLogs(ctx, time.Time{}, 10, 0, &model.LogFilter{LogSource: model.LogSourceManualTest})
+	if err != nil || len(logs) != 1 || logs[0].UpstreamProtocol != "system_one" || logs[0].ReasoningDecision == nil || !logs[0].ReasoningDecision.CostUnknown {
+		t.Fatalf("native test log = %+v, error = %v", logs, err)
+	}
+
+	// 决策渠道不模拟客户端协议；普通渠道仍必须声明。
+	chatChannel, err := server.store.CreateConfig(ctx, &model.Config{Name: "chat-test", Enabled: true,
+		URLs: model.ChannelURLs{{URL: upstream.URL}}, ModelEntries: []model.ModelEntry{{Model: "chat-model"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		channelID int64
+		body      map[string]any
+		wantError string
+	}{
+		{channel.ID, map[string]any{"model": "jev-latest", "client_protocol": "openai"}, "client_protocol is not supported for System One channels"},
+		{chatChannel.ID, map[string]any{"model": "chat-model"}, "client_protocol cannot be empty"},
+	} {
+		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/1/test", tc.body))
+		c.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(tc.channelID, 10)}}
+		server.HandleChannelTest(c)
+		response := mustParseAPIResponse[map[string]any](t, w.Body.Bytes())
+		if w.Code != http.StatusBadRequest || response.Error != tc.wantError {
+			t.Fatalf("channel %d body %v = %d %s", tc.channelID, tc.body, w.Code, w.Body.String())
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("rejected requests reached upstream, calls=%d", calls.Load())
+	}
+}
+
+func TestHandleChannelTestSystemOneRecordsUsageAndCost(t *testing.T) {
+	t.Parallel()
+	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"effort":{"type":"choice","choice":"high"}},"usage":{"input_tokens":1000,"output_tokens":500}}`))
+	}))
+	server := newInMemoryServer(t)
+	ctx := context.Background()
+	channel, err := server.store.CreateConfig(ctx, &model.Config{Name: "system-one-priced", Enabled: true,
+		AuthType: model.AuthTypeSystemOne, URLs: model.ChannelURLs{{URL: upstream.URL + "/v1"}},
+		ModelEntries: []model.ModelEntry{{Model: "jev-priced", Pricing: channelPrice(1, 2)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: channel.ID, KeyIndex: 0, APIKey: "decision-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/1/test", map[string]any{"model": "jev-priced", "content": "simple task"}))
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(channel.ID, 10)}}
+	server.HandleChannelTest(c)
+	response := mustParseAPIResponse[map[string]any](t, w.Body.Bytes())
+	cost, _ := response.Data["cost_usd"].(float64)
+	if response.Data["success"] != true || response.Data["cost_unknown"] != false || cost <= 0 {
+		t.Fatalf("priced native test = %s", w.Body.String())
+	}
+	logs, err := server.store.ListLogs(ctx, time.Time{}, 10, 0, &model.LogFilter{LogSource: model.LogSourceManualTest})
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("priced native test logs = %+v, error = %v", logs, err)
+	}
+	entry := logs[0]
+	if entry.InputTokens != 1000 || entry.OutputTokens != 500 || math.Abs(entry.Cost-cost) > 1e-12 || entry.ReasoningDecision != nil {
+		t.Fatalf("priced native test log = %+v", entry)
+	}
+}
+
+func TestHandleChannelTestSystemOneChallengeKeepsClassification(t *testing.T) {
+	t.Parallel()
+	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("cf-mitigated", "challenge")
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(403)
+		_, _ = io.WriteString(w, "<html>Just a moment...</html>")
+	}))
+	server := newInMemoryServer(t)
+	ctx := context.Background()
+	cfg, err := server.store.CreateConfig(ctx, &model.Config{Name: "judge", Enabled: true, AuthType: model.AuthTypeSystemOne, URLs: model.ChannelURLs{{URL: upstream.URL}}, ModelEntries: []model.ModelEntry{{Model: "judge"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = server.store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: cfg.ID, KeyIndex: 0, APIKey: "sk-one"}, {ChannelID: cfg.ID, KeyIndex: 1, APIKey: "sk-two"}}); err != nil {
+		t.Fatal(err)
+	}
+	c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/1/test", map[string]any{"model": "judge", "content": "task", "key_index": 0}))
+	c.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(cfg.ID, 10)}}
+	server.HandleChannelTest(c)
+	response := mustParseAPIResponse[map[string]any](t, w.Body.Bytes())
+	if response.Data["cooldown_action"] != "channel_cooldown_applied" {
+		t.Fatalf("Cloudflare challenge misclassified by native test: %s", w.Body.String())
+	}
+	if response.Data["raw_response"] != "<html>Just a moment...</html>" {
+		t.Fatalf("native error response lost: %s", w.Body.String())
+	}
+	headers, ok := response.Data["response_headers"].(map[string]any)
+	if !ok || headers["Cf-Mitigated"] != "challenge" {
+		t.Fatalf("native error headers lost: %s", w.Body.String())
+	}
+	stored, err := server.store.GetConfig(ctx, cfg.ID)
+	if err != nil || !stored.IsCoolingDown(time.Now()) {
+		t.Fatalf("channel cooldown missing: config=%+v error=%v", stored, err)
+	}
+	keys, err := server.store.GetAPIKeys(ctx, cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range keys {
+		if key.IsCoolingDown(time.Now()) {
+			t.Fatalf("challenge incorrectly cooled key: %+v", key)
+		}
+	}
+}
+
+func TestSystemOneChannelTestLocalLimitsDoNotCooldown(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"rpm", "concurrency"} {
+		t.Run(kind, func(t *testing.T) {
+			upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"answers":{"effort":{"type":"choice","choice":"medium"}}}`)
+			}))
+			server := newInMemoryServer(t)
+			ctx := context.Background()
+			cfg := &model.Config{Name: "native-local-limit", Enabled: true, AuthType: model.AuthTypeSystemOne, URLs: model.ChannelURLs{{URL: upstream.URL}}, ModelEntries: []model.ModelEntry{{Model: "judge"}}}
+			if kind == "rpm" {
+				cfg.RPMLimit = 1
+			} else {
+				cfg.MaxConcurrency = 1
+			}
+			cfg, err := server.store.CreateConfig(ctx, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A live upstream response consumes RPM and holds its concurrency slot until Close.
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := server.doUpstreamRequest(cfg, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = response.Body.Close() }()
+			result := server.executeChannelTestWithCooldown(ctx, cfg, 0, "test-key", &testutil.TestChannelRequest{Model: "judge", Content: "task"}, true)
+			if result["success"] != false || result[kind+"_limited"] != true || result["cooldown_action"] != kind+"_limited_no_cooldown" {
+				t.Fatalf("native %s limit result = %+v", kind, result)
+			}
+			if status, _ := getResultInt(result["status_code"]); status != http.StatusTooManyRequests {
+				t.Fatalf("local limit status = %d", status)
+			}
+		})
 	}
 }

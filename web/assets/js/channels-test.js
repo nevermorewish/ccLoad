@@ -17,6 +17,7 @@ function getFirstConfiguredTestContent(value) {
     .find(Boolean) || '';
 }
 
+let testingDecisionChannel = false;
 let testingTargetModel = '';
 let testingTargetGroup = '';
 
@@ -39,6 +40,7 @@ async function testChannel(channel, initialModel = '', targetModel = '') {
     return false;
   }
 
+  testingDecisionChannel = channel.auth_type === 'system_one';
   testingChannelId = id;
   testingTargetModel = String(targetModel || '').trim();
   testingTargetGroup = requestedModel;
@@ -94,8 +96,17 @@ async function testChannel(channel, initialModel = '', targetModel = '') {
   }
 
   resetTestModal();
-  testingClientProtocol = 'anthropic';
-  await window.ProtocolManager.renderProtocolSelect('testClientProtocolSelect', testingClientProtocol);
+  // 决策渠道固定发原生 /v1/systemone，不带 client_protocol（JSON 序列化会省略 undefined）
+  testingClientProtocol = testingDecisionChannel ? undefined : 'anthropic';
+  const protocolSelect = document.getElementById('testClientProtocolSelect');
+  protocolSelect.disabled = testingDecisionChannel;
+  if (testingDecisionChannel) {
+    protocolSelect.innerHTML = `<option value="system_one">${escapeHtml(window.t('modelTest.clientProtocolSystemOne'))}</option>`;
+    protocolSelect.value = 'system_one';
+  } else await window.ProtocolManager.renderProtocolSelect('testClientProtocolSelect', testingClientProtocol);
+  const streamInput = document.getElementById('testStreamEnabled');
+  streamInput.disabled = testingDecisionChannel;
+  if (testingDecisionChannel) streamInput.checked = false;
 
   document.getElementById('testModal').classList.add('show');
   return true;
@@ -131,8 +142,8 @@ async function runChannelTest() {
   const keySelectGroup = document.getElementById('testKeySelectGroup');
   const selectedModel = modelSelect.value;
   const testContent = contentInput.value.trim() || defaultTestContent;
-  const streamEnabled = streamCheckbox.checked;
-  testingClientProtocol = clientProtocolSelect?.value || 'anthropic';
+  const streamEnabled = !testingDecisionChannel && streamCheckbox.checked;
+  testingClientProtocol = testingDecisionChannel ? undefined : (clientProtocolSelect?.value || 'anthropic');
 
   if (!selectedModel) {
     if (window.showError) window.showError(window.t('channels.test.selectModelRequired'));
@@ -203,8 +214,8 @@ async function runBatchTest() {
 
   const selectedModel = modelSelect.value;
   const testContent = contentInput.value.trim() || defaultTestContent;
-  const streamEnabled = streamCheckbox.checked;
-  testingClientProtocol = clientProtocolSelect?.value || 'anthropic';
+  const streamEnabled = !testingDecisionChannel && streamCheckbox.checked;
+  testingClientProtocol = testingDecisionChannel ? undefined : (clientProtocolSelect?.value || 'anthropic');
   const concurrency = Math.max(1, Math.min(50, parseInt(concurrencyInput.value) || 10));
 
   if (!selectedModel) {

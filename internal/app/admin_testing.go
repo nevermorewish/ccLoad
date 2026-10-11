@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -262,6 +263,21 @@ func newChannelTester(protocolName string) testutil.ChannelTester {
 	default:
 		return &testutil.AnthropicTester{}
 	}
+}
+
+// validateTestClientProtocol 校验测试请求的客户端协议：决策渠道固定发原生 POST /v1/systemone，
+// 不模拟客户端协议；其余渠道必须声明。
+func validateTestClientProtocol(cfg *model.Config, testReq *testutil.TestChannelRequest) error {
+	if cfg.IsSystemOne() {
+		if testReq.ClientProtocol != "" {
+			return errors.New("client_protocol is not supported for System One channels")
+		}
+		return nil
+	}
+	if testReq.ClientProtocol == "" {
+		return errors.New("client_protocol cannot be empty")
+	}
+	return nil
 }
 
 func resolveClientProtocol(testReq *testutil.TestChannelRequest) string {
@@ -670,6 +686,10 @@ func (s *Server) handleChannelTestRequest(c *gin.Context, requireBaseURL bool) {
 		RespondError(c, http.StatusNotFound, fmt.Errorf("channel not found"))
 		return
 	}
+	if err := validateTestClientProtocol(cfg, &testReq); err != nil {
+		RespondErrorMsg(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	if forcedBaseURL != "" {
 		normalizedBaseURL, err := validateChannelBaseURL(forcedBaseURL, cfg.GetAuthType())
 		if err != nil {
@@ -745,7 +765,7 @@ func (s *Server) handleChannelTestRequest(c *gin.Context, requireBaseURL bool) {
 		c.Request.Context(), runtimeCfg, keySelection.keyIndex, &testReq,
 		keySelection.updatePersistedCooldown, testResult,
 	)
-	s.persistDetectionLog(c.Request.Context(), detectionLogFromResult(cfg, model.LogSourceManualTest, logModel, channelTestActualModel(testResult, testReq.Model), keySelection.apiKey, c.ClientIP(), logThinking, testResult))
+	s.persistDetectionLog(c.Request.Context(), detectionLogFromResult(cfg, model.LogSourceManualTest, logModel, channelTestActualModel(testResult, testReq.Model), keySelection, c.ClientIP(), logThinking, testResult))
 	testResult["tested_key_index"] = keySelection.keyIndex
 	testResult["total_keys"] = len(apiKeys)
 
@@ -870,6 +890,8 @@ type channelTestKeySelection struct {
 	apiKey                  string
 	requestCredential       string
 	updatePersistedCooldown bool
+	// costMultiplier 是检测日志的倍率快照，与代理一致：api_key 取所选 Key，OAuth 取渠道级。
+	costMultiplier float64
 }
 
 type oauthCredentialLoadMode uint8
@@ -949,6 +971,7 @@ func (s *Server) prepareOAuthChannelTestAuthForRejectedToken(
 	if cfg == nil || !cfg.UsesOAuth() {
 		return nil, selection, false, nil
 	}
+	selection.costMultiplier = cfg.CostMultiplier
 
 	cfg = withAntigravityDefaultFallbackURLs(cfg)
 	cfg = s.withOAuthBaseURLOverride(cfg)
@@ -1147,11 +1170,17 @@ func (s *Server) selectChannelTestKey(
 			keyIndex = *requestedKeyIndex
 		}
 		matchedKey, ok := findAPIKeyByIndex(apiKeys, keyIndex)
+		persisted := ok && matchedKey.APIKey == requestAPIKey
+		costMultiplier := cfg.CostMultiplier
+		if persisted {
+			costMultiplier = matchedKey.CostMultiplier
+		}
 		return channelTestKeySelection{
 			keyIndex:                keyIndex,
 			apiKey:                  requestAPIKey,
 			requestCredential:       requestAPIKey,
-			updatePersistedCooldown: ok && matchedKey.APIKey == requestAPIKey,
+			updatePersistedCooldown: persisted,
+			costMultiplier:          costMultiplier,
 		}, nil
 	}
 	if requestedKeyIndex == nil {
@@ -1164,6 +1193,7 @@ func (s *Server) selectChannelTestKey(
 			apiKey:                  apiKey,
 			requestCredential:       apiKey,
 			updatePersistedCooldown: true,
+			costMultiplier:          apiKeyCostMultiplierAt(cfg, apiKeys, keyIndex),
 		}, nil
 	}
 
@@ -1179,7 +1209,16 @@ func (s *Server) selectChannelTestKey(
 		apiKey:                  requestedKey.APIKey,
 		requestCredential:       requestedKey.APIKey,
 		updatePersistedCooldown: true,
+		costMultiplier:          requestedKey.CostMultiplier,
 	}, nil
+}
+
+// apiKeyCostMultiplierAt 按语义索引取 Key 倍率；找不到时回落渠道级，与代理 attempt 的默认值一致。
+func apiKeyCostMultiplierAt(cfg *model.Config, apiKeys []*model.APIKey, keyIndex int) float64 {
+	if key, ok := findAPIKeyByIndex(apiKeys, keyIndex); ok {
+		return key.CostMultiplier
+	}
+	return cfg.CostMultiplier
 }
 
 func findAPIKeyByIndex(apiKeys []*model.APIKey, keyIndex int) (*model.APIKey, bool) {
@@ -1339,6 +1378,25 @@ func (s *Server) testChannelAPIWithCooldownTarget(
 	keyIndex int,
 	updatePersistedCooldown bool,
 ) map[string]any {
+	// 决策调用固定非流式：忽略 stream，前端流式开关不影响决策渠道测试。
+	if cfg.IsSystemOne() {
+		testCfg := cfg
+		if baseURL := strings.TrimSpace(testReq.BaseURL); baseURL != "" {
+			idx := slices.IndexFunc(cfg.URLs, func(endpoint model.ChannelURL) bool {
+				return endpoint.RuntimeURL() == baseURL || endpoint.URL == baseURL
+			})
+			if idx < 0 {
+				return map[string]any{"success": false, "error": "System One test URL must belong to the channel"}
+			}
+			testCfg = cfg.Clone()
+			testCfg.URLs = model.ChannelURLs{cfg.URLs[idx]}
+		}
+		ctx, timeout := s.newChannelTestTimeoutContextWithTimeouts(reqCtx, false, s.resolveProtocolTimeouts(protocol.TransformPlan{
+			UpstreamProtocol: protocol.Protocol(util.ProtocolSystemOne),
+		}))
+		defer timeout.cancelAll()
+		return s.testSystemOneChannel(ctx, testCfg, apiKey, testReq.Model, testReq.Content)
+	}
 	// 设置默认测试内容（从配置读取）
 	if strings.TrimSpace(testReq.Content) == "" {
 		testReq.Content = configuredChannelTestContent(s.configService)

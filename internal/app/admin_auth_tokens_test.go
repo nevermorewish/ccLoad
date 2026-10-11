@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"math"
 	"net/http"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"ccLoad/internal/model"
+	"ccLoad/internal/storage"
 )
 
 func TestAdminAPI_CreateAuthToken_Basic(t *testing.T) {
@@ -574,4 +576,101 @@ func TestHandleListAuthTokens_StatsZeroForNoData(t *testing.T) {
 		}
 	}
 	t.Errorf("token ID=%d not found in response", token.ID)
+}
+
+type authTokenRangeStatsFailureStore struct {
+	storage.Store
+}
+
+func (s *authTokenRangeStatsFailureStore) GetAuthTokenStatsInRange(context.Context, time.Time, time.Time) (map[int64]*model.AuthTokenRangeStats, error) {
+	return nil, errors.New("forced range stats failure")
+}
+
+// 范围统计失败时不能返回累计统计：前端会把它当作所选范围的数据展示。
+func TestHandleListAuthTokens_RangeStatsFailureReturnsError(t *testing.T) {
+	server := newInMemoryServerWithCustomStore(t, func(s storage.Store) storage.Store {
+		return &authTokenRangeStatsFailureStore{Store: s}
+	})
+	createTestToken(t, server, "range-failure")
+
+	c, w := newTestContext(t, newRequest(http.MethodGet, "/admin/auth-tokens?range=last_month", nil))
+	server.HandleListAuthTokens(c)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleListAuthTokens_RollingRange(t *testing.T) {
+	for _, tc := range []struct {
+		rng     string
+		seconds float64
+		live    bool
+	}{
+		{"last_1h", 3600, true}, {"last_6h", 21600, true}, {"last_24h", 86400, true},
+		{"last_week", 0, false}, {"last_month", 0, false},
+	} {
+		t.Run(tc.rng, func(t *testing.T) {
+			server := newInMemoryServer(t)
+			createTestToken(t, server, "rolling-token")
+			req := newRequest(http.MethodGet, "/admin/auth-tokens?range="+tc.rng, nil)
+			c, w := newTestContext(t, req)
+			server.HandleListAuthTokens(c)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status=%d, body=%s", w.Code, w.Body.String())
+			}
+			resp := mustParseAPIResponse[authTokenListResponse](t, w.Body.Bytes())
+			if !resp.Success || resp.Data.IsToday != tc.live {
+				t.Fatalf("unexpected response: %+v", resp)
+			}
+			if tc.seconds != 0 && resp.Data.DurationSeconds != tc.seconds {
+				t.Fatalf("duration=%v, want %v", resp.Data.DurationSeconds, tc.seconds)
+			}
+		})
+	}
+}
+
+func TestAdminAPI_AuthTokenRPMLimit(t *testing.T) {
+	server := newInMemoryServer(t)
+	for _, limit := range []int{15, -1} {
+		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/auth-tokens", map[string]any{
+			"description": "RPM token", "rpm_limit": limit,
+		}))
+		server.HandleCreateAuthToken(c)
+		if limit < 0 {
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("negative RPM create status=%d", w.Code)
+			}
+			continue
+		}
+		var response struct {
+			Data struct {
+				ID       int64 `json:"id"`
+				RPMLimit int   `json:"rpm_limit"`
+			} `json:"data"`
+		}
+		mustUnmarshalJSON(t, w.Body.Bytes(), &response)
+		if w.Code != http.StatusOK || response.Data.RPMLimit != 15 {
+			t.Fatalf("create status=%d body=%s", w.Code, w.Body.String())
+		}
+		for _, tc := range []struct {
+			payload      map[string]any
+			status, want int
+		}{
+			{map[string]any{"description": "keep RPM"}, http.StatusOK, 15},
+			{map[string]any{"rpm_limit": -1}, http.StatusBadRequest, 15},
+			{map[string]any{"rpm_limit": 0}, http.StatusOK, 0},
+		} {
+			c, w = newTestContext(t, newJSONRequest(t, http.MethodPut, "/admin/auth-tokens/1", tc.payload))
+			c.Params = append(c.Params, struct{ Key, Value string }{Key: "id", Value: strconv.FormatInt(response.Data.ID, 10)})
+			server.HandleUpdateAuthToken(c)
+			if w.Code != tc.status {
+				t.Fatalf("update status=%d body=%s", w.Code, w.Body.String())
+			}
+			got, err := server.store.GetAuthToken(context.Background(), response.Data.ID)
+			if err != nil || got.RPMLimit != tc.want {
+				t.Fatalf("stored token=%+v err=%v, want RPM %d", got, err, tc.want)
+			}
+		}
+	}
 }

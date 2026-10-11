@@ -187,6 +187,9 @@ func sqliteExistingColumns(ctx context.Context, db *sql.DB, table string) (map[s
 
 // ensureLogsNewColumns 确保logs表有新增字段(2025-12新增,支持MySQL和SQLite)
 func ensureLogsNewColumns(ctx context.Context, db *sql.DB, dialect Dialect) error {
+	if err := ensureColumn(ctx, db, dialect, "logs", "reasoning_decision", "TEXT NULL", "TEXT NULL"); err != nil {
+		return err
+	}
 	switch dialect {
 	case DialectMySQL:
 		if err := ensureLogsMinuteBucketMySQL(ctx, db); err != nil {
@@ -628,6 +631,24 @@ func ensureAuthTokensMaxConcurrency(ctx context.Context, db *sql.DB, dialect Dia
 	}
 }
 
+// ensureAuthTokensRPMLimit adds the token rolling-minute limit.
+func ensureAuthTokensRPMLimit(ctx context.Context, db *sql.DB, dialect Dialect) error {
+	switch dialect {
+	case DialectMySQL:
+		return ensureMySQLColumns(ctx, db, "auth_tokens", []mysqlColumnDef{
+			{name: "rpm_limit", definition: "INT NOT NULL DEFAULT 0"},
+		})
+	case DialectPostgres:
+		return ensurePostgresColumns(ctx, db, "auth_tokens", []mysqlColumnDef{
+			{name: "rpm_limit", definition: "INT NOT NULL DEFAULT 0"},
+		})
+	default:
+		return ensureSQLiteColumns(ctx, db, "auth_tokens", []sqliteColumnDef{
+			{name: "rpm_limit", definition: "INTEGER NOT NULL DEFAULT 0"},
+		})
+	}
+}
+
 // ensureChannelsDailyCostLimit 确保channels表有daily_cost_limit字段
 func ensureChannelsDailyCostLimit(ctx context.Context, db *sql.DB, dialect Dialect) error {
 	return ensureColumn(ctx, db, dialect, "channels", "daily_cost_limit",
@@ -714,8 +735,20 @@ func ensureChannelsRetryOtherKeysOnFailure(ctx context.Context, db *sql.DB, dial
 		"INTEGER NOT NULL DEFAULT 0")
 }
 
+func ensureChannelsSameChannelRetries(ctx context.Context, db *sql.DB, dialect Dialect) error {
+	return ensureColumn(ctx, db, dialect, "channels", "same_channel_retries",
+		"INT NOT NULL DEFAULT 0",
+		"INTEGER NOT NULL DEFAULT 0")
+}
+
 func ensureChannelsWebsockets(ctx context.Context, db *sql.DB, dialect Dialect) error {
 	return ensureColumn(ctx, db, dialect, "channels", "websockets",
+		"TINYINT NOT NULL DEFAULT 0",
+		"INTEGER NOT NULL DEFAULT 0")
+}
+
+func ensureChannelsOAuthQuotaPassthrough(ctx context.Context, db *sql.DB, dialect Dialect) error {
+	return ensureColumn(ctx, db, dialect, "channels", "oauth_quota_passthrough",
 		"TINYINT NOT NULL DEFAULT 0",
 		"INTEGER NOT NULL DEFAULT 0")
 }

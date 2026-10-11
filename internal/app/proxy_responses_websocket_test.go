@@ -1277,6 +1277,199 @@ func TestResponsesWebsocketNativeClientDisconnectStopsFailover(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketInterruptForwardsToNativeUpstream(t *testing.T) {
+	t.Parallel()
+	interrupts := make(chan map[string]any, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade native upstream: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		var request map[string]any
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Errorf("read first native request: %v", err)
+			return
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response.created", "response": map[string]any{"id": "resp-native-1"}})
+		_ = conn.WriteJSON(map[string]any{"type": "response.output_text.delta", "delta": "partial"})
+		var interrupt map[string]any
+		if err := conn.ReadJSON(&interrupt); err != nil {
+			t.Errorf("read native interrupt: %v", err)
+			return
+		}
+		interrupts <- interrupt
+		_ = conn.WriteJSON(map[string]any{"type": "response.incomplete", "response": map[string]any{
+			"id": "resp-native-1", "status": "incomplete",
+			"incomplete_details": map[string]any{"reason": "interrupted"}, "output": []any{},
+		}})
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Errorf("read second native request: %v", err)
+			return
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{
+			"id": "resp-native-2", "output": []any{},
+			"usage": map[string]any{"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+		}})
+	}))
+	defer upstream.Close()
+
+	env := setupProxyTestEnv(t, []testChannel{{
+		name: "native-codex", upstreamProtocol: "codex", websockets: true,
+		models: "gpt-test", apiKey: "sk-upstream", priority: 100,
+	}}, map[int]string{0: upstream.URL})
+	downstream := dialResponsesWebsocket(t, env.engine)
+	if err := downstream.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set downstream read deadline: %v", err)
+	}
+	if err := downstream.WriteJSON(map[string]any{
+		"type": "response.create", "model": "gpt-test",
+		"input": []any{map[string]any{"role": "user", "content": "long task"}},
+	}); err != nil {
+		t.Fatalf("write first turn: %v", err)
+	}
+	readWebsocketUntilType(t, downstream, "response.output_text.delta")
+	if err := downstream.WriteJSON(map[string]any{"type": "response.interrupt", "response_id": "resp-native-1"}); err != nil {
+		t.Fatalf("write interrupt: %v", err)
+	}
+	incomplete := readWebsocketUntilType(t, downstream, "response.incomplete")
+	response, _ := incomplete["response"].(map[string]any)
+	details, _ := response["incomplete_details"].(map[string]any)
+	if response["id"] != "resp-native-1" || details["reason"] != "interrupted" {
+		t.Fatalf("interrupt acknowledgement=%#v", incomplete)
+	}
+	select {
+	case interrupt := <-interrupts:
+		if interrupt["type"] != "response.interrupt" || interrupt["response_id"] != "resp-native-1" {
+			t.Fatalf("native upstream interrupt=%#v", interrupt)
+		}
+	default:
+		t.Fatal("interrupt was not forwarded to native upstream")
+	}
+
+	if err := downstream.WriteJSON(map[string]any{
+		"type": "response.create", "previous_response_id": "resp-native-1",
+		"input": []any{map[string]any{"role": "user", "content": "next"}},
+	}); err != nil {
+		t.Fatalf("write second turn: %v", err)
+	}
+	readWebsocketUntilType(t, downstream, "response.completed")
+}
+
+func TestResponsesWebsocketInterruptCancelsHTTPTurnLocally(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	canceled := make(chan struct{})
+	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls.Add(1) == 1 {
+			_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+			_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+				close(canceled)
+			case <-time.After(2 * time.Second):
+			}
+			return
+		}
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	env := setupProxyTestEnv(t, []testChannel{{
+		name: "codex-http", upstreamProtocol: "codex",
+		models: "gpt-test", apiKey: "sk-upstream", priority: 100,
+	}}, map[int]string{0: upstream.URL})
+	conn := dialResponsesWebsocket(t, env.engine)
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set websocket read deadline: %v", err)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"type": "response.create", "model": "gpt-test",
+		"input": []any{map[string]any{"role": "user", "content": "long task"}},
+	}); err != nil {
+		t.Fatalf("write first turn: %v", err)
+	}
+	readWebsocketUntilType(t, conn, "response.output_text.delta")
+	if err := conn.WriteJSON(map[string]any{"type": "response.interrupt", "response_id": "resp-1"}); err != nil {
+		t.Fatalf("write interrupt: %v", err)
+	}
+	incomplete := readWebsocketUntilType(t, conn, "response.incomplete")
+	response, _ := incomplete["response"].(map[string]any)
+	details, _ := response["incomplete_details"].(map[string]any)
+	if response["id"] != "resp-1" || response["status"] != "incomplete" || details["reason"] != "interrupted" {
+		t.Fatalf("local interrupt event=%#v", incomplete)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream HTTP request was not canceled by interrupt")
+	}
+	if entry := waitForProxyLog(t, env, "gpt-test"); entry.StatusCode != StatusClientClosedRequest {
+		t.Fatalf("interrupted turn status=%d, want %d (message=%q)", entry.StatusCode, StatusClientClosedRequest, entry.Message)
+	}
+
+	// 同一连接继续下一轮：渠道未冷却，previous_response_id 指向被中断的响应。
+	if err := conn.WriteJSON(map[string]any{
+		"type": "response.create", "previous_response_id": "resp-1",
+		"input": []any{map[string]any{"role": "user", "content": "next"}},
+	}); err != nil {
+		t.Fatalf("write second turn: %v", err)
+	}
+	readWebsocketUntilType(t, conn, "response.completed")
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls=%d, want 2", calls.Load())
+	}
+}
+
+func TestResponsesWebsocketInterruptWithoutActiveTurn(t *testing.T) {
+	t.Parallel()
+	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	env := setupProxyTestEnv(t, []testChannel{{
+		name: "codex-http", upstreamProtocol: "codex",
+		models: "gpt-test", apiKey: "sk-upstream", priority: 100,
+	}}, map[int]string{0: upstream.URL})
+	conn := dialResponsesWebsocket(t, env.engine)
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set websocket read deadline: %v", err)
+	}
+
+	if err := conn.WriteJSON(map[string]any{"type": "response.interrupt"}); err != nil {
+		t.Fatalf("write interrupt: %v", err)
+	}
+	var event struct {
+		Type   string `json:"type"`
+		Status int    `json:"status"`
+		Error  struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatalf("read websocket error event: %v", err)
+	}
+	if event.Type != "error" || event.Status != http.StatusBadRequest || event.Error.Type != "invalid_request_error" {
+		t.Fatalf("missing response_id event=%+v", event)
+	}
+
+	// 轮次已结束后到达的合法中断静默忽略，不能把错误归到客户端下一轮。
+	if err := conn.WriteJSON(map[string]any{"type": "response.interrupt", "response_id": "resp-0"}); err != nil {
+		t.Fatalf("write late interrupt: %v", err)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"type": "response.create", "model": "gpt-test",
+		"input": []any{map[string]any{"role": "user", "content": "hi"}},
+	}); err != nil {
+		t.Fatalf("write turn: %v", err)
+	}
+	readWebsocketUntilType(t, conn, "response.completed")
+}
+
 func TestResponsesWebsocketBridgesHTTPSSEResponse(t *testing.T) {
 	t.Parallel()
 	requestSeen := make(chan map[string]any, 1)
@@ -7738,4 +7931,266 @@ func TestNativeCodexWebsocketStripsInputItemStatusBeforeFirstSend(t *testing.T) 
 	if got := handshakes.Load(); got != 1 {
 		t.Fatalf("status strip must succeed on the first send, handshakes=%d", got)
 	}
+}
+
+func TestResponsesWebsocketTokenRPMSharedAdmissionAndRecovery(t *testing.T) {
+	requests := make(chan []byte, 10)
+	var calls atomic.Int32
+	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		requests <- body
+		n := calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-rpm-%d\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\ndata: [DONE]\n\n", n)
+	}))
+	var failedCalls atomic.Int32
+	failed := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		failedCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"type":"server_error","message":"retry elsewhere"}}`)
+	}))
+	env := setupProxyTestEnv(t, []testChannel{
+		{name: "rpm-failover", upstreamProtocol: "codex", models: "gpt-test", priority: 100},
+		{name: "rpm-success", upstreamProtocol: "codex", models: "gpt-test", priority: 90},
+	}, map[int]string{0: failed.URL, 1: upstream.URL})
+	token := &model.AuthToken{Description: "shared RPM", RPMLimit: 2, MaxConcurrency: 1}
+	webSession := createDashboardSession(t, env, "rpm-shared", token)
+	clock := &channelRPMFakeClock{now: time.Unix(1000, 0)}
+	env.server.authService.tokenRPMLimiter = newRPMLimiter(clock.Now)
+	conn := dialResponsesWebsocketWithToken(t, env.engine, "rpm-shared")
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	writeTurn := func(kind, content string) {
+		t.Helper()
+		if err := conn.WriteJSON(map[string]any{"type": kind, "model": "gpt-test", "input": []any{map[string]any{"role": "user", "content": content}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Token concurrency rejection releases the acquired global/session slots
+	// without consuming any of the two available RPM admissions.
+	releaseToken, _, _, acquired := env.server.authService.acquireTokenConcurrencySlot(token.Token)
+	if !acquired {
+		t.Fatal("could not hold token concurrency slot")
+	}
+	writeTurn("response.create", "concurrency-rejected")
+	var concurrencyEvent struct {
+		Type  string `json:"type"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	errConcurrency := conn.ReadJSON(&concurrencyEvent)
+	releaseToken()
+	if errConcurrency != nil || concurrencyEvent.Type != "error" || concurrencyEvent.Error.Code != "upstream_error" {
+		t.Fatalf("concurrency event=%+v err=%v", concurrencyEvent, errConcurrency)
+	}
+	writeTurn("response.create", "first")
+	readWebsocketUntilType(t, conn, "response.completed")
+	<-requests
+	if failedCalls.Load() != 1 || calls.Load() != 1 {
+		t.Fatalf("failover calls=%d successful=%d", failedCalls.Load(), calls.Load())
+	}
+	// Control frames and the upgrade itself cannot consume a generation slot.
+	if err := conn.WriteControl(websocket.PingMessage, []byte("rpm"), time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(map[string]any{"type": "response.interrupt", "response_id": "resp-rpm-1"}); err != nil {
+		t.Fatal(err)
+	}
+	// A control-event reply is the public boundary showing the previous turn's
+	// completion bookkeeping and concurrency release have finished.
+	if err := conn.WriteJSON(map[string]any{"type": "rpm-test-barrier"}); err != nil {
+		t.Fatal(err)
+	}
+	var controlEvent struct {
+		Type  string `json:"type"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := conn.ReadJSON(&controlEvent); err != nil {
+		t.Fatal(err)
+	}
+	if controlEvent.Type != "error" || controlEvent.Error.Code != "unsupported_event" {
+		t.Fatalf("control event=%+v", controlEvent)
+	}
+	w := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{"model": "gpt-test", "input": "http", "stream": true}, map[string]string{"Authorization": "Bearer rpm-shared"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("HTTP status=%d body=%s", w.Code, w.Body.String())
+	}
+	<-requests
+	w = doProxyRequest(t, env.engine, "/dashboard/v1/responses", map[string]any{"model": "gpt-test", "input": "web"}, map[string]string{"Authorization": "Bearer " + webSession})
+	assertTokenRPMHTTPError(t, w, 60)
+	writeTurn("response.append", "rejected")
+	assertTokenRPMWebsocketError(t, conn, 60)
+	setLimit := func(limit int) {
+		token.RPMLimit = limit
+		if err := env.store.UpdateAuthToken(context.Background(), token); err != nil {
+			t.Fatal(err)
+		}
+		if err := env.server.authService.ReloadAuthTokens(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setLimit(3)
+	writeTurn("response.append", "accepted")
+	readWebsocketUntilType(t, conn, "response.completed")
+	var body struct {
+		Input []struct {
+			Content string `json:"content"`
+		} `json:"input"`
+	}
+	mustUnmarshalJSON(t, <-requests, &body)
+	if len(body.Input) != 2 || body.Input[0].Content != "first" || body.Input[1].Content != "accepted" {
+		t.Fatalf("rejected turn polluted transcript: %+v", body.Input)
+	}
+	setLimit(1)
+	writeTurn("response.create", "limited")
+	assertTokenRPMWebsocketError(t, conn, 60)
+	clock.Advance(time.Minute)
+	writeTurn("response.append", "recovered")
+	readWebsocketUntilType(t, conn, "response.completed")
+	<-requests
+	setLimit(0)
+	writeTurn("response.append", "unlimited")
+	readWebsocketUntilType(t, conn, "response.completed")
+	<-requests
+	setLimit(1)
+	writeTurn("response.append", "still-limited")
+	assertTokenRPMWebsocketError(t, conn, 60)
+	// A different token has its own quota despite sharing upstream channels.
+	other := &model.AuthToken{Token: model.HashToken("rpm-other"), Description: "other", IsActive: true, RPMLimit: 1}
+	if err := env.store.CreateAuthToken(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.server.authService.ReloadAuthTokens(); err != nil {
+		t.Fatal(err)
+	}
+	w = doProxyRequest(t, env.engine, "/v1/responses", map[string]any{"model": "gpt-test", "input": "other", "stream": true}, map[string]string{"Authorization": "Bearer rpm-other"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("different token status=%d body=%s", w.Code, w.Body.String())
+	}
+	<-requests
+}
+
+func assertTokenRPMWebsocketError(t testing.TB, conn *websocket.Conn, seconds int) {
+	t.Helper()
+	var event struct {
+		Type   string `json:"type"`
+		Status int    `json:"status"`
+		Error  struct {
+			Type, Code, Message string
+			RetryAfter          int `json:"retry_after"`
+		} `json:"error"`
+	}
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != "error" || event.Status != 429 || event.Error.Type != "rate_limit_error" || event.Error.Code != "token_rpm_exceeded" || event.Error.RetryAfter != seconds || event.Error.Message == "" {
+		t.Fatalf("RPM event=%+v", event)
+	}
+}
+
+func TestResponsesWebsocketTokenRPMInterruptWhileWaitingForGlobalSlot(t *testing.T) {
+	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-after-wait\",\"output\":[]}}\n\ndata: [DONE]\n\n")
+	}))
+	env := setupProxyTestEnvWithSettings(t, []testChannel{{name: "rpm-wait", upstreamProtocol: "codex", models: "gpt-test"}}, map[int]string{0: upstream.URL}, map[string]string{"max_concurrency": "1"})
+	token := &model.AuthToken{Token: model.HashToken("rpm-wait"), Description: "wait", IsActive: true, RPMLimit: 1}
+	if err := env.store.CreateAuthToken(context.Background(), token); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.server.authService.ReloadAuthTokens(); err != nil {
+		t.Fatal(err)
+	}
+	release, err := env.server.acquireConcurrencySlotForContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+	conn := dialResponsesWebsocketWithToken(t, env.engine, "rpm-wait")
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "gpt-test", "input": "waiting"}); err != nil {
+		t.Fatal(err)
+	}
+	// Wait until the turn owns its execution-session slot; the global slot is
+	// still occupied, so no upstream request can have begun.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		active := false
+		env.server.responsesExecutionSessions.mu.Lock()
+		for _, session := range env.server.responsesExecutionSessions.sessions {
+			active = active || len(session.turn) > 0
+		}
+		env.server.responsesExecutionSessions.mu.Unlock()
+		if active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("turn did not reach global slot wait")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := conn.WriteJSON(map[string]any{"type": "response.interrupt", "response_id": "resp-waiting"}); err != nil {
+		t.Fatal(err)
+	}
+	event := readWebsocketUntilType(t, conn, "response.incomplete")
+	response := event["response"].(map[string]any)
+	if response["id"] != "resp-waiting" {
+		t.Fatalf("interrupt response=%+v", response)
+	}
+	release()
+	release = nil
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "gpt-test", "input": "after-wait"}); err != nil {
+		t.Fatal(err)
+	}
+	readWebsocketUntilType(t, conn, "response.completed")
+}
+
+func TestResponsesWebsocketTokenRPMAdmittedLocalFailureCounts(t *testing.T) {
+	env := setupProxyTestEnv(t, nil, nil)
+	token := &model.AuthToken{Token: model.HashToken("rpm-failed-turn"), Description: "failed turn", IsActive: true, RPMLimit: 1}
+	if err := env.store.CreateAuthToken(context.Background(), token); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.server.authService.ReloadAuthTokens(); err != nil {
+		t.Fatal(err)
+	}
+	clock := &channelRPMFakeClock{now: time.Unix(1000, 0)}
+	env.server.authService.tokenRPMLimiter = newRPMLimiter(clock.Now)
+	conn := dialResponsesWebsocketWithToken(t, env.engine, "rpm-failed-turn")
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "input": "missing model"}); err != nil {
+		t.Fatal(err)
+	}
+	var event struct {
+		Type  string `json:"type"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != "error" || event.Error.Code != "invalid_request" {
+		t.Fatalf("invalid turn event=%+v", event)
+	}
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "gpt-test", "input": "next"}); err != nil {
+		t.Fatal(err)
+	}
+	assertTokenRPMWebsocketError(t, conn, 60)
 }

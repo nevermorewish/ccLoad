@@ -135,6 +135,51 @@ func TestAdminModels_FetchModelsPreview(t *testing.T) {
 		}
 	})
 
+	t.Run("system one discovery uses decision models API", func(t *testing.T) {
+		systemOneUpstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/models" || r.Header.Get("Authorization") != "Bearer ts-key" {
+				http.Error(w, "unexpected request", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"jev-latest"},{"name":"jev-preview"}]}`))
+		}))
+		t.Cleanup(systemOneUpstream.Close)
+
+		payload := map[string]any{
+			"auth_type": model.AuthTypeSystemOne,
+			"urls":      []map[string]any{{"url": systemOneUpstream.URL}},
+			"api_keys":  []string{"ts-key"},
+			"per_key":   true,
+		}
+		c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/fetch", payload))
+		server.HandleFetchModelsPreview(c)
+		resp := mustParseAPIResponse[FetchModelsResponse](t, w.Body.Bytes())
+		if w.Code != http.StatusOK || !resp.Success || resp.Data.Protocol != "system_one" || len(resp.Data.Models) != 2 || resp.Data.Models[0].Model != "jev-latest" {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+
+		payload["urls"] = []map[string]any{{"url": systemOneUpstream.URL, "protocols": []string{"openai"}}}
+		c, w = newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/models/fetch", payload))
+		server.HandleFetchModelsPreview(c)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("System One URL protocols status=%d body=%s", w.Code, w.Body.String())
+		}
+
+		cfg, err := server.store.CreateConfig(context.Background(), &model.Config{Name: "jev", Enabled: true, AuthType: model.AuthTypeSystemOne,
+			URLs: model.ChannelURLs{{URL: systemOneUpstream.URL}}, ModelEntries: []model.ModelEntry{{Model: "jev-latest"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := server.store.CreateAPIKeysBatch(context.Background(), []*model.APIKey{{ChannelID: cfg.ID, KeyIndex: 0, APIKey: "ts-key"}}); err != nil {
+			t.Fatal(err)
+		}
+		fetched, err := server.fetchModelsForChannel(context.Background(), cfg, "openai", modelFetchFirstAvailableKey)
+		if err != nil || fetched.Protocol != "system_one" || len(fetched.Models) != 2 {
+			t.Fatalf("saved System One discovery = (%+v, %v)", fetched, err)
+		}
+	})
+
 	t.Run("multiple keys fall back after key error", func(t *testing.T) {
 		var authSequence []string
 		multiKeyUpstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -951,6 +996,7 @@ func TestAdminModels_HandleFetchModels_AntigravityOAuth(t *testing.T) {
 			"gemini-3.1-pro-low":{},
 			"gpt-oss-120b-medium":{},
 			"gemini-3.1-flash-lite":{},
+			"gemini-3.5-flash-lite":{},
 			"gemini-3.5-flash-low":{},
 			"gemini-3.5-flash-extra-low":{},
 			"gemini-2.5-flash":{}
@@ -1011,10 +1057,10 @@ func TestAdminModels_HandleFetchModels_AntigravityOAuth(t *testing.T) {
 		{Model: "claude-opus-4-6-thinking", RedirectModel: "claude-opus-4-6-thinking"},
 		{Model: "claude-sonnet-4-6", RedirectModel: "claude-sonnet-4-6"},
 		{Model: "gemini-3-flash", RedirectModel: "gemini-3-flash"},
-		{Model: "gemini-3-flash-agent", RedirectModel: "gemini-3-flash-agent"},
 		{Model: "gemini-3.1-flash-image", RedirectModel: "gemini-3.1-flash-image"},
 		{Model: "gemini-3.1-flash-lite", RedirectModel: "gemini-3.1-flash-lite"},
 		{Model: "gemini-3.1-pro-low", RedirectModel: "gemini-3.1-pro-low"},
+		{Model: "gemini-3.5-flash-lite", RedirectModel: "gemini-3.5-flash-lite"},
 		{Model: "gemini-3.6-flash-high", RedirectModel: "gemini-3.6-flash-high"},
 		{Model: "gemini-3.7-flash", RedirectModel: "gemini-3.7-flash"},
 		{Model: "gemini-3.7-flash-high", RedirectModel: "gemini-3.7-flash-high"},
@@ -1157,7 +1203,7 @@ func TestAdminModels_HandleFetchModels_AntigravityDefaultEndpoints(t *testing.T)
 	}
 }
 
-func TestAdminModels_HandleFetchModels_AnthropicOAuthIncludesFable51(t *testing.T) {
+func TestAdminModels_HandleFetchModels_AnthropicOAuthIncludesCurrentModels(t *testing.T) {
 	server, store, cleanup := setupAdminTestServer(t)
 	defer cleanup()
 	server.channelCache = storage.NewChannelCache(store, time.Minute)
@@ -1182,12 +1228,18 @@ func TestAdminModels_HandleFetchModels_AnthropicOAuthIncludesFable51(t *testing.
 	if !resp.Success || resp.Data.Protocol != "anthropic" || resp.Data.Source != "predefined" {
 		t.Fatalf("unexpected response: %s", w.Body.String())
 	}
-	for _, entry := range resp.Data.Models {
-		if entry.Model == "claude-fable-5-1" && entry.RedirectModel == "claude-fable-5-1" {
-			return
+	for _, name := range []string{"claude-fable-5-1", "claude-haiku-5-5"} {
+		found := false
+		for _, entry := range resp.Data.Models {
+			if entry.Model == name && entry.RedirectModel == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s missing from fetched models: %#v", name, resp.Data.Models)
 		}
 	}
-	t.Fatalf("claude-fable-5-1 missing from fetched models: %#v", resp.Data.Models)
 }
 
 func TestAdminModels_HandleFetchModels_AntigravityCapacityDoesNotCooldownURLs(t *testing.T) {

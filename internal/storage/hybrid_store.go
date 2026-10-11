@@ -140,6 +140,10 @@ func cloneLogEntryForSync(e *model.LogEntry) *model.LogEntry {
 		return nil
 	}
 	clone := *e
+	if e.ReasoningDecision != nil {
+		decision := *e.ReasoningDecision
+		clone.ReasoningDecision = &decision
+	}
 	// 同步到主库时丢弃 DebugData：调试原始请求/响应体仅保留在 SQLite，
 	// 避免膨胀主库；但 logs 表主数据仍需正常同步
 	clone.DebugData = nil
@@ -389,6 +393,12 @@ func (h *HybridStore) GetEnabledChannelsByModel(ctx context.Context, modelName s
 	h.oauthCredentialMu.RLock()
 	defer h.oauthCredentialMu.RUnlock()
 	return h.sqlite.GetEnabledChannelsByModel(ctx, modelName)
+}
+
+func (h *HybridStore) GetEnabledSystemOneChannelsByModel(ctx context.Context, modelName string) ([]*model.Config, error) {
+	h.oauthCredentialMu.RLock()
+	defer h.oauthCredentialMu.RUnlock()
+	return h.sqlite.GetEnabledSystemOneChannelsByModel(ctx, modelName)
 }
 
 func (h *HybridStore) BatchUpdatePriority(ctx context.Context, updates []struct {

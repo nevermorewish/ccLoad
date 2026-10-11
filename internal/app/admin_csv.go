@@ -101,7 +101,7 @@ func (s *Server) HandleExportChannelsCSV(c *gin.Context) {
 	writer := csv.NewWriter(buf)
 	defer writer.Flush()
 
-	header := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "urls", "priority", "sort_override", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "scheduled_check_interval_minutes", "scheduled_check_start_time"}
+	header := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "urls", "priority", "sort_override", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "oauth_quota_passthrough", "scheduled_check_interval_minutes", "scheduled_check_start_time", "same_channel_retries"}
 	if err := writer.Write(header); err != nil {
 		RespondError(c, http.StatusInternalServerError, err)
 		return
@@ -223,8 +223,10 @@ func (s *Server) HandleExportChannelsCSV(c *gin.Context) {
 			managementCheckinEnabled,
 			managementCheckinTime,
 			strconv.FormatBool(cfg.Websockets),
+			strconv.FormatBool(cfg.OAuthQuotaPassthrough),
 			strconv.Itoa(cfg.ScheduledCheckIntervalMinutes),
 			cfg.ScheduledCheckStartTime,
+			strconv.Itoa(cfg.SameChannelRetries),
 		}
 		if err := writer.Write(record); err != nil {
 			RespondError(c, http.StatusInternalServerError, err)
@@ -300,6 +302,7 @@ func (s *Server) HandleImportChannelsCSV(c *gin.Context) {
 	_, hasCooldownDetectionRulesColumn := columnIndex["cooldown_detection_rules"]
 	_, hasRetryOtherKeysOnFailureColumn := columnIndex["retry_other_keys_on_failure"]
 	_, hasWebsocketsColumn := columnIndex["websockets"]
+	_, hasOAuthQuotaPassthroughColumn := columnIndex["oauth_quota_passthrough"]
 	_, hasAPIKeyAllowedModelsColumn := columnIndex["api_key_allowed_models"]
 	_, hasAPIKeyDetectedModelsColumn := columnIndex["api_key_detected_models"]
 	_, hasAPIKeyPrioritiesColumn := columnIndex["api_key_priorities"]
@@ -311,12 +314,14 @@ func (s *Server) HandleImportChannelsCSV(c *gin.Context) {
 	existingSchedulesByName := make(map[string]*model.Config)
 	_, hasInterval := columnIndex["scheduled_check_interval_minutes"]
 	_, hasStart := columnIndex["scheduled_check_start_time"]
+	_, hasSameChannelRetries := columnIndex["same_channel_retries"]
 	existingCooldownDetectionRulesByName := make(map[string]*model.CooldownDetectionRules)
 	existingRetryOtherKeysOnFailureByName := make(map[string]bool)
 	existingWebsocketsByName := make(map[string]bool)
+	existingOAuthQuotaPassthroughByName := make(map[string]bool)
 	existingAPIKeysByName := make(map[string][]*model.APIKey)
 	existingModelEntriesByName := make(map[string][]model.ModelEntry)
-	if !hasInterval || !hasStart || !hasScheduledCheckColumn || !hasScheduledCheckModelColumn || !hasCooldownDetectionRulesColumn || !hasRetryOtherKeysOnFailureColumn || !hasWebsocketsColumn || !hasAPIKeyAllowedModelsColumn || !hasAPIKeyDetectedModelsColumn || !hasAPIKeyCostMultipliersColumn || !hasAPIKeyPrioritiesColumn || !hasAPIKeyModelScopeEmptyColumn || !hasModelPricingColumn {
+	if !hasInterval || !hasStart || !hasSameChannelRetries || !hasScheduledCheckColumn || !hasScheduledCheckModelColumn || !hasCooldownDetectionRulesColumn || !hasRetryOtherKeysOnFailureColumn || !hasWebsocketsColumn || !hasOAuthQuotaPassthroughColumn || !hasAPIKeyAllowedModelsColumn || !hasAPIKeyDetectedModelsColumn || !hasAPIKeyCostMultipliersColumn || !hasAPIKeyPrioritiesColumn || !hasAPIKeyModelScopeEmptyColumn || !hasModelPricingColumn {
 		existingConfigs, err := s.store.ListConfigs(c.Request.Context())
 		if err != nil {
 			RespondError(c, http.StatusInternalServerError, err)
@@ -329,6 +334,7 @@ func (s *Server) HandleImportChannelsCSV(c *gin.Context) {
 			existingCooldownDetectionRulesByName[cfg.Name] = cfg.CooldownDetectionRules.Clone()
 			existingRetryOtherKeysOnFailureByName[cfg.Name] = cfg.RetryOtherKeysOnFailure
 			existingWebsocketsByName[cfg.Name] = cfg.Websockets
+			existingOAuthQuotaPassthroughByName[cfg.Name] = cfg.OAuthQuotaPassthrough
 			existingModelEntriesByName[cfg.Name] = cfg.ModelEntries
 		}
 		if !hasAPIKeyAllowedModelsColumn || !hasAPIKeyDetectedModelsColumn || !hasAPIKeyCostMultipliersColumn || !hasAPIKeyPrioritiesColumn || !hasAPIKeyModelScopeEmptyColumn {
@@ -371,6 +377,7 @@ func (s *Server) HandleImportChannelsCSV(c *gin.Context) {
 			hasCooldownDetectionRulesColumn,
 			hasRetryOtherKeysOnFailureColumn,
 			hasWebsocketsColumn,
+			hasOAuthQuotaPassthroughColumn,
 			hasAPIKeyAllowedModelsColumn,
 			hasAPIKeyCostMultipliersColumn,
 			hasAPIKeyPrioritiesColumn,
@@ -381,6 +388,7 @@ func (s *Server) HandleImportChannelsCSV(c *gin.Context) {
 			existingCooldownDetectionRulesByName,
 			existingRetryOtherKeysOnFailureByName,
 			existingWebsocketsByName,
+			existingOAuthQuotaPassthroughByName,
 			existingAPIKeysByName,
 			existingSchedulesByName,
 			existingModelEntriesByName,
@@ -523,6 +531,7 @@ func (s *Server) parseChannelImportRow(
 	hasCooldownDetectionRulesColumn bool,
 	hasRetryOtherKeysOnFailureColumn bool,
 	hasWebsocketsColumn bool,
+	hasOAuthQuotaPassthroughColumn bool,
 	hasAPIKeyAllowedModelsColumn bool,
 	hasAPIKeyCostMultipliersColumn bool,
 	hasAPIKeyPrioritiesColumn bool,
@@ -533,6 +542,7 @@ func (s *Server) parseChannelImportRow(
 	existingCooldownDetectionRulesByName map[string]*model.CooldownDetectionRules,
 	existingRetryOtherKeysOnFailureByName map[string]bool,
 	existingWebsocketsByName map[string]bool,
+	existingOAuthQuotaPassthroughByName map[string]bool,
 	existingAPIKeysByName map[string][]*model.APIKey,
 	existingSchedulesByName map[string]*model.Config,
 	existingModelEntriesByName map[string][]model.ModelEntry,
@@ -580,10 +590,10 @@ func (s *Server) parseChannelImportRow(
 	if name == "" {
 		missing = append(missing, "name")
 	}
-	if authType == model.AuthTypeAPIKey && apiKey == "" {
+	if model.UsesAPIKeyCredentials(authType) && apiKey == "" {
 		missing = append(missing, "api_key")
 	}
-	if authType != model.AuthTypeAPIKey && oauthCredential == "" {
+	if !model.UsesAPIKeyCredentials(authType) && oauthCredential == "" {
 		missing = append(missing, "oauth_credential")
 	}
 	if urlsRaw == "" {
@@ -608,7 +618,10 @@ func (s *Server) parseChannelImportRow(
 			return nil, fmt.Sprintf("第%d行 API Key 渠道管理账号无效: %v", lineNo, err), true
 		}
 	}
-	if authType != model.AuthTypeAPIKey && apiKey != "" {
+	if authType == model.AuthTypeSystemOne && oauthCredential != "" {
+		return nil, fmt.Sprintf("第%d行 System One 渠道不能包含 OAuth 凭证", lineNo), true
+	}
+	if !model.UsesAPIKeyCredentials(authType) && apiKey != "" {
 		return nil, fmt.Sprintf("第%d行 OAuth 渠道不能包含 API Key", lineNo), true
 	}
 	managementCheckinEnabled := false
@@ -631,7 +644,7 @@ func (s *Server) parseChannelImportRow(
 	if authType != model.AuthTypeAPIKey && (rawManagementCheckinEnabled != "" || managementCheckinTime != "") {
 		return nil, fmt.Sprintf("第%d行 OAuth 渠道不能包含管理账号设置", lineNo), true
 	}
-	if authType != model.AuthTypeAPIKey {
+	if !model.UsesAPIKeyCredentials(authType) {
 		var err error
 		oauthCredential, err = normalizeCSVImportOAuthCredential(authType, oauthCredential)
 		if err != nil {
@@ -745,6 +758,21 @@ func (s *Server) parseChannelImportRow(
 	if _, present := columnIndex["scheduled_check_start_time"]; present {
 		start = fetch("scheduled_check_start_time")
 	}
+
+	sameChannelRetries := 0
+	if existing := existingSchedulesByName[name]; existing != nil {
+		sameChannelRetries = existing.SameChannelRetries
+	}
+	if _, present := columnIndex["same_channel_retries"]; present {
+		sameChannelRetries = 0
+		if raw := fetch("same_channel_retries"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 0 || parsed > model.MaxSameChannelRetries {
+				return nil, fmt.Sprintf("第%d行 same_channel_retries 必须为 0–%d 的整数: %s", lineNo, model.MaxSameChannelRetries, raw), true
+			}
+			sameChannelRetries = parsed
+		}
+	}
 	if err := model.ValidateScheduledCheckSchedule(interval, start); err != nil {
 		return nil, fmt.Sprintf("第%d行: %v", lineNo, err), true
 	}
@@ -788,6 +816,16 @@ func (s *Server) parseChannelImportRow(
 		retryOtherKeysOnFailure = false
 	}
 
+	oauthQuotaPassthrough := existingOAuthQuotaPassthroughByName[name]
+	if raw := fetch("oauth_quota_passthrough"); raw != "" {
+		val, ok := parseImportEnabled(raw)
+		if !ok {
+			return nil, fmt.Sprintf("第%d行 oauth_quota_passthrough 格式错误: %s", lineNo, raw), true
+		}
+		oauthQuotaPassthrough = val
+	} else if hasOAuthQuotaPassthroughColumn {
+		oauthQuotaPassthrough = false
+	}
 	websockets := existingWebsocketsByName[name]
 	if raw := fetch("websockets"); raw != "" {
 		val, ok := parseImportEnabled(raw)
@@ -853,6 +891,7 @@ func (s *Server) parseChannelImportRow(
 		AuthType:                      authType,
 		OAuthCredential:               oauthCredential,
 		Websockets:                    websockets,
+		OAuthQuotaPassthrough:         oauthQuotaPassthrough,
 		URLs:                          urls,
 		Priority:                      priority,
 		SortOverride:                  sortOverride,
@@ -867,6 +906,7 @@ func (s *Server) parseChannelImportRow(
 		ScheduledCheckStartTime:       start,
 		CooldownDetectionRules:        cooldownDetectionRules,
 		RetryOtherKeysOnFailure:       retryOtherKeysOnFailure,
+		SameChannelRetries:            sameChannelRetries,
 	}
 
 	// 解析并构建API Keys

@@ -46,6 +46,7 @@ func TestConfig_CreateAndGet(t *testing.T) {
 		Websockets:              true,
 		ProtocolTransformMode:   model.ProtocolTransformModeLocal,
 		RetryOtherKeysOnFailure: true,
+		SameChannelRetries:      2,
 		AvailableTimeStart:      "22:00",
 		AvailableTimeEnd:        "08:00",
 		RPMLimit:                60,
@@ -98,6 +99,9 @@ func TestConfig_CreateAndGet(t *testing.T) {
 	}
 	if !got.RetryOtherKeysOnFailure {
 		t.Error("expected retry_other_keys_on_failure=true")
+	}
+	if got.SameChannelRetries != 2 {
+		t.Errorf("same_channel_retries: got %d, want 2", got.SameChannelRetries)
 	}
 	if got.AvailableTimeStart != "22:00" || got.AvailableTimeEnd != "08:00" {
 		t.Errorf("available time: got %q-%q, want 22:00-08:00", got.AvailableTimeStart, got.AvailableTimeEnd)
@@ -1819,5 +1823,64 @@ func TestConfig_ModelVariantsPersistAndProject(t *testing.T) {
 	}
 	if _, err := store.GetConfig(ctx, created.ID); err == nil {
 		t.Fatal("mismatched model_variants must fail to load")
+	}
+}
+
+func TestConfigOAuthQuotaPassthroughPersistence(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+	cfg, err := store.CreateConfig(ctx, &model.Config{Name: "quota", URLs: model.ChannelURLs{{URL: "https://example.com"}}, Enabled: true, ModelEntries: []model.ModelEntry{{Model: "gpt-5"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OAuthQuotaPassthrough {
+		t.Fatal("new channel must default to false")
+	}
+	for _, enabled := range []bool{true, false} {
+		cfg.OAuthQuotaPassthrough = enabled
+		cfg, err = store.UpdateConfig(ctx, cfg.ID, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		configs, err := store.ListConfigs(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		routed, err := store.GetEnabledChannelsByModel(ctx, "gpt-5")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range []*model.Config{cfg, cfg.Clone(), configs[0], routed[0]} {
+			if got.OAuthQuotaPassthrough != enabled {
+				t.Fatalf("quota passthrough=%v want %v", got.OAuthQuotaPassthrough, enabled)
+			}
+		}
+	}
+}
+
+func TestSystemOneConfigExcludedFromChatCandidates(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+	cfg, err := store.CreateConfig(ctx, &model.Config{Name: "decision-only", Enabled: true, AuthType: model.AuthTypeSystemOne,
+		URLs:         model.ChannelURLs{{URL: "https://one.example/v1"}},
+		ModelEntries: []model.ModelEntry{{Model: "jev-latest"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetConfig(ctx, cfg.ID)
+	if err != nil || !got.IsSystemOne() {
+		t.Fatalf("GetConfig() = %+v, error = %v", got, err)
+	}
+	for _, name := range []string{"*", "jev-latest"} {
+		candidates, err := store.GetEnabledChannelsByModel(ctx, name)
+		if err != nil || len(candidates) != 0 {
+			t.Fatalf("chat candidates(%s) = %+v, error = %v", name, candidates, err)
+		}
+	}
+	got.URLs = append(got.URLs, model.ChannelURL{URL: "https://chat.example", Protocols: []string{"openai"}})
+	if _, err := store.UpdateConfig(ctx, cfg.ID, got); err == nil {
+		t.Fatal("System One URL protocols must be rejected")
 	}
 }

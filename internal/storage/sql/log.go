@@ -3,6 +3,8 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -34,6 +36,7 @@ func scanLogEntry(scanner interface {
 	var responseModel sql.NullString
 	var serviceTier sql.NullString
 	var thinkingEffort sql.NullString
+	var reasoningDecision sql.NullString
 	var inputTokens, outputTokens, reasoningTokens, cacheReadTokens, cacheCreationTokens, cache5mTokens, cache1hTokens sql.NullInt64
 	var cost sql.NullFloat64
 	var costMultiplier sql.NullFloat64
@@ -41,10 +44,15 @@ func scanLogEntry(scanner interface {
 
 	if err := scanner.Scan(&e.ID, &timeMs, &e.Model, &actualModel, &responseModel, &logSource, &e.ChannelID,
 		&e.StatusCode, &e.Message, &duration, &isStreamingInt, &upstreamWebsocketInt, &firstByteTime, &apiKeyUsed, &apiKeyHash, &e.AuthTokenID, &clientProtocol, &upstreamProtocol, &clientIP, &baseURL, &serviceTier, &thinkingEffort,
-		&inputTokens, &outputTokens, &reasoningTokens, &cacheReadTokens, &cacheCreationTokens, &cache5mTokens, &cache1hTokens, &cost, &costMultiplier, &codexHasCredits); err != nil {
+		&inputTokens, &outputTokens, &reasoningTokens, &cacheReadTokens, &cacheCreationTokens, &cache5mTokens, &cache1hTokens, &cost, &costMultiplier, &codexHasCredits, &reasoningDecision); err != nil {
 		return nil, err
 	}
 
+	if reasoningDecision.Valid && reasoningDecision.String != "" {
+		if err := json.Unmarshal([]byte(reasoningDecision.String), &e.ReasoningDecision); err != nil {
+			return nil, fmt.Errorf("decode log reasoning_decision: %w", err)
+		}
+	}
 	e.CodexHasCredits = codexHasCredits != 0
 	e.Time = model.JSONTime{Time: time.UnixMilli(timeMs)}
 
@@ -188,7 +196,7 @@ func (s *SQLStore) addLog(ctx context.Context, e *model.LogEntry, updateOAuthQuo
 	if e == nil {
 		return OAuthQuotaLogEffects{}, nil
 	}
-	if e.LogSource != model.LogSourceJev && s.isChannelDeleted(e.ChannelID) {
+	if s.isChannelDeleted(e.ChannelID) {
 		return OAuthQuotaLogEffects{}, nil
 	}
 	if e.Time.IsZero() {
@@ -220,11 +228,11 @@ func (s *SQLStore) addLog(ctx context.Context, e *model.LogEntry, updateOAuthQuo
 }
 
 const logsInsertColumns = `INSERT INTO logs(time, minute_bucket, model, actual_model, response_model, log_source, channel_id, status_code, message, duration, is_streaming, upstream_websocket, first_byte_time, api_key_used, api_key_hash, auth_token_id, client_protocol, upstream_protocol, client_ip, base_url, service_tier, thinking_effort,
-				input_tokens, output_tokens, reasoning_tokens, cache_read_input_tokens, cache_creation_input_tokens, cache_5m_input_tokens, cache_1h_input_tokens, cost, cost_multiplier, codex_has_credits) VALUES `
+				input_tokens, output_tokens, reasoning_tokens, cache_read_input_tokens, cache_creation_input_tokens, cache_5m_input_tokens, cache_1h_input_tokens, cost, cost_multiplier, codex_has_credits, reasoning_decision) VALUES `
 
-const logRowPlaceholders = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const logRowPlaceholders = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-const logRowParams = 32
+const logRowParams = 33
 
 // BatchAddLogs 批量写入日志（单事务，多值 INSERT 提升刷盘吞吐）
 // 设计：
@@ -307,7 +315,7 @@ func (s *SQLStore) batchAddLogs(
 func (s *SQLStore) filterDeletedChannelLogs(logs []*model.LogEntry) []*model.LogEntry {
 	out := make([]*model.LogEntry, 0, len(logs))
 	for _, e := range logs {
-		if e == nil || (e.LogSource != model.LogSourceJev && s.isChannelDeleted(e.ChannelID)) {
+		if e == nil || s.isChannelDeleted(e.ChannelID) {
 			continue
 		}
 		out = append(out, e)
@@ -413,6 +421,11 @@ func logRowArgs(e *model.LogEntry) []any {
 		maskedKey = util.MaskAPIKey(maskedKey)
 	}
 
+	var decisionJSON any
+	if e.ReasoningDecision != nil {
+		encoded, _ := json.Marshal(e.ReasoningDecision)
+		decisionJSON = string(encoded)
+	}
 	return []any{
 		timeMs, minuteBucket, e.Model, e.ActualModel, e.ResponseModel,
 		model.NormalizeStoredLogSource(e.LogSource),
@@ -422,23 +435,23 @@ func logRowArgs(e *model.LogEntry) []any {
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CacheReadInputTokens, e.CacheCreationInputTokens,
 		e.Cache5mInputTokens, e.Cache1hInputTokens, e.Cost,
 		normalizeCostMultiplier(e.CostMultiplier),
-		e.CodexHasCredits,
+		e.CodexHasCredits, decisionJSON,
 	}
 }
 
 const logListQuery = `SELECT id, time, model, actual_model, response_model, log_source, channel_id, status_code, message, duration, is_streaming, upstream_websocket, first_byte_time, api_key_used, api_key_hash, auth_token_id, client_protocol, upstream_protocol, client_ip, base_url, service_tier, thinking_effort,
-	input_tokens, output_tokens, reasoning_tokens, cache_read_input_tokens, cache_creation_input_tokens, cache_5m_input_tokens, cache_1h_input_tokens, cost, cost_multiplier, codex_has_credits
+	input_tokens, output_tokens, reasoning_tokens, cache_read_input_tokens, cache_creation_input_tokens, cache_5m_input_tokens, cache_1h_input_tokens, cost, cost_multiplier, codex_has_credits, reasoning_decision
 	FROM logs`
 
 // ListLogs 查询日志列表
 func (s *SQLStore) ListLogs(ctx context.Context, since time.Time, limit, offset int, filter *model.LogFilter) ([]*model.LogEntry, error) {
-	qb := NewQueryBuilder(logListQuery).Where("time >= ?", since.UnixMilli())
+	qb := NewQueryBuilder(logListQuery+s.logsRangeIndexHint(logsTimeRangeIndex, filter)).Where("time >= ?", since.UnixMilli())
 	return s.listLogs(ctx, qb, limit, offset, filter)
 }
 
 // ListLogsRange 查询指定时间范围内的日志（支持精确日期范围如"昨日"）
 func (s *SQLStore) ListLogsRange(ctx context.Context, since, until time.Time, limit, offset int, filter *model.LogFilter) ([]*model.LogEntry, error) {
-	qb := NewQueryBuilder(logListQuery).
+	qb := NewQueryBuilder(logListQuery+s.logsRangeIndexHint(logsTimeRangeIndex, filter)).
 		Where("time >= ?", since.UnixMilli()).
 		Where("time <= ?", until.UnixMilli())
 	return s.listLogs(ctx, qb, limit, offset, filter)
@@ -491,13 +504,13 @@ func (s *SQLStore) listLogs(ctx context.Context, qb *QueryBuilder, limit, offset
 
 // CountLogs 返回符合条件的日志总数（用于分页）
 func (s *SQLStore) CountLogs(ctx context.Context, since time.Time, filter *model.LogFilter) (int, error) {
-	qb := NewQueryBuilder("SELECT COUNT(*) FROM logs").Where("time >= ?", since.UnixMilli())
+	qb := NewQueryBuilder("SELECT COUNT(*) FROM logs"+s.logsRangeIndexHint(logsTimeRangeIndex, filter)).Where("time >= ?", since.UnixMilli())
 	return s.countLogs(ctx, qb, filter)
 }
 
 // CountLogsRange 返回指定时间范围内符合条件的日志总数
 func (s *SQLStore) CountLogsRange(ctx context.Context, since, until time.Time, filter *model.LogFilter) (int, error) {
-	qb := NewQueryBuilder("SELECT COUNT(*) FROM logs").
+	qb := NewQueryBuilder("SELECT COUNT(*) FROM logs"+s.logsRangeIndexHint(logsTimeRangeIndex, filter)).
 		Where("time >= ?", since.UnixMilli()).
 		Where("time <= ?", until.UnixMilli())
 	return s.countLogs(ctx, qb, filter)
@@ -539,7 +552,7 @@ func (s *SQLStore) GetTodayChannelURLStats(ctx context.Context, dayStart time.Ti
 		WHERE time >= ?
 			AND channel_id > 0
 			AND base_url <> ''
-			AND log_source NOT IN ('jev', 'count_tokens')
+			AND log_source <> 'count_tokens'
 		GROUP BY channel_id, base_url
 		ORDER BY channel_id ASC, base_url ASC
 	`
@@ -607,7 +620,7 @@ func (s *SQLStore) ListLogsRangeWithCount(ctx context.Context, since, until time
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		qb := NewQueryBuilder(logListQuery).
+		qb := NewQueryBuilder(logListQuery+s.logsRangeIndexHint(logsTimeRangeIndex, filter)).
 			Where("time >= ?", sinceMs).
 			Where("time <= ?", untilMs)
 		applySharedConditions(qb)
@@ -636,7 +649,7 @@ func (s *SQLStore) ListLogsRangeWithCount(ctx context.Context, since, until time
 
 	go func() {
 		defer wg.Done()
-		qb := NewQueryBuilder(`SELECT COUNT(*) FROM logs`).
+		qb := NewQueryBuilder(`SELECT COUNT(*) FROM logs`+s.logsRangeIndexHint(logsTimeRangeIndex, filter)).
 			Where("time >= ?", sinceMs).
 			Where("time <= ?", untilMs)
 		applySharedConditions(qb)

@@ -43,7 +43,7 @@ function projectCustomPricingDefaults(pricing) {
 }
 
 const advancedSettingKeys = new Set([
-  'typesafe_enabled', 'typesafe_api_key', 'api_token_login_enabled', 'api_token_show_channels',
+  'api_token_login_enabled', 'api_token_show_channels',
   'auto_update_interval_hours', 'auto_update_channel',
   'auto_refresh_interval_seconds',
   'codex_map_429_to_503',
@@ -126,6 +126,8 @@ const numericSettingConstraints = new Map([
 
 function settingValueForDisplay(key, value) {
   const normalizedValue = String(value ?? '');
+  // 持久化 JSON 的格式与编辑器序列化不同，统一成编辑器形式避免误判为已修改。
+  if (key === 'reasoning_auto' && !validateReasoningAuto(normalizedValue)) return formatReasoningAuto(parseReasoningAuto(normalizedValue));
   if (!byteSettingKeys.has(key)) return normalizedValue;
 
   const bytes = Number(normalizedValue);
@@ -201,6 +203,8 @@ function validateSettingInput(setting, value) {
     return validateOptionalOAuthURLInput(normalizedValue);
   }
 
+  if (setting.key === 'reasoning_auto') return validateReasoningAuto(normalizedValue);
+
   if (setting.key === modelCustomPricingSettingKey) {
     return validateCustomPricingInput(normalizedValue);
   }
@@ -271,6 +275,259 @@ function validateCustomPricingInput(value) {
     if (!checkObjectFields(object, allowedFields) || !checkPrices(object)) return t('settings.validation.customPricingFields');
   }
   return '';
+}
+
+const reasoningAutoDefaults = { enabled: false, decision_channel_id: 0, decision_model: '', business_models: [], timeout_ms: 2000 };
+let reasoningAutoChannels = [];
+// 持久化值无效时编辑器锁定：控件只能显示默认值，任何编辑都会覆盖真实配置，只允许通过重置恢复。
+let reasoningAutoLocked = false;
+
+// 与后端 model.RoutingModelName 一致：只有尾部括号内是已知等级、特殊值或非负整数预算才算思考后缀，
+// 其余带括号的模型名（如上游真的叫 foo(bar)）是合法的精确名。
+function hasThinkingSuffix(name) {
+  const match = /^(.*)\(([^(]*)\)$/.exec(name);
+  if (!match || !match[1].trim()) return false;
+  return /^(none|auto|-1|minimal|low|medium|high|xhigh|max|\+?\d+)$/i.test(match[2].trim());
+}
+
+function parseReasoningAuto(value) {
+  return validateReasoningAuto(value) ? { ...reasoningAutoDefaults } : { ...reasoningAutoDefaults, ...JSON.parse(value) };
+}
+
+function formatReasoningAuto(config) {
+  const { enabled, decision_channel_id, decision_model, business_models, timeout_ms } = config;
+  return JSON.stringify({ enabled, decision_channel_id, decision_model, business_models, timeout_ms });
+}
+
+function validateReasoningAuto(value) {
+  let config;
+  try { config = JSON.parse(value); } catch (_) { return t('settings.reasoningAuto.invalid'); }
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return t('settings.reasoningAuto.invalid');
+  config = { ...reasoningAutoDefaults, ...config };
+  if (typeof config.enabled !== 'boolean'
+    || !Number.isSafeInteger(config.decision_channel_id) || config.decision_channel_id < 0
+    || typeof config.decision_model !== 'string'
+    || !Array.isArray(config.business_models)
+    || config.business_models.some(model => typeof model !== 'string' || !model.trim() || /[*?]/.test(model) || hasThinkingSuffix(model.trim()))
+    || new Set(config.business_models.map(model => model.trim())).size !== config.business_models.length
+    || !Number.isSafeInteger(config.timeout_ms) || config.timeout_ms < 100 || config.timeout_ms > 10000
+    || (config.enabled && (!config.decision_channel_id || !config.decision_model.trim() || !config.business_models.length))) {
+    return t('settings.reasoningAuto.invalid');
+  }
+  return '';
+}
+
+let reasoningAutoDraft = null;
+let reasoningAutoModels = [];
+let reasoningAutoPreviousFocus = null;
+
+function renderReasoningAutoEditor(value) {
+  reasoningAutoDraft = parseReasoningAuto(value);
+  reasoningAutoLocked = Boolean(validateReasoningAuto(value));
+  const config = reasoningAutoDraft;
+  const disabled = reasoningAutoLocked ? ' disabled' : '';
+  const label = key => `<span data-i18n="settings.reasoningAuto.${key}">${escapeHtml(t('settings.reasoningAuto.' + key))}</span>`;
+  document.getElementById('reasoningAutoContent').innerHTML = `<div id="reasoningAutoEditor">
+    ${reasoningAutoLocked ? `<p class="custom-rules-error" role="alert">${label('locked')} <code>${escapeHtml(value)}</code></p>` : ''}
+    <label class="channel-editor-switch reasoning-auto-switch">
+      <input type="checkbox" data-reasoning-field="enabled" ${config.enabled ? 'checked' : ''}${disabled}>
+      <span class="channel-editor-switch__track" aria-hidden="true"></span>
+      ${label('enabled')}
+    </label>
+    <div class="reasoning-auto-fields">
+      <div><label class="form-label" for="reasoningDecisionChannel">${label('channel')}</label>
+        <select class="form-input" id="reasoningDecisionChannel" data-reasoning-field="decision_channel_id"${disabled}></select>
+      </div>
+      <div><label class="form-label" for="reasoningDecisionModel">${label('model')}</label>
+        <select class="form-input" id="reasoningDecisionModel" data-reasoning-field="decision_model"${disabled}></select>
+      </div>
+      <div><label class="form-label" for="reasoningTimeout">${label('timeout')}</label>
+        <input class="form-input" id="reasoningTimeout" type="number" min="0.1" max="10" step="0.1" data-reasoning-field="timeout_ms" value="${config.timeout_ms / 1000}"${disabled}>
+      </div>
+    </div>
+    <div class="settings-dialog-toolbar">
+      <h3 id="reasoningBusinessModelsTitle" class="settings-dialog-section-title">${label('businessModels')}
+        <span id="reasoningModelsCount" class="settings-dialog-count"></span>
+      </h3>
+      <input type="search" id="reasoningModelSearch" class="form-input settings-dialog-search" data-i18n-placeholder="settings.reasoningAuto.search" placeholder="${escapeHtml(t('settings.reasoningAuto.search'))}" data-i18n-aria-label="settings.reasoningAuto.search" aria-label="${escapeHtml(t('settings.reasoningAuto.search'))}">
+    </div>
+    <div class="table-container reasoning-model-table-container">
+      <table class="modern-table reasoning-model-table" aria-labelledby="reasoningBusinessModelsTitle">
+        <thead><tr><th><input type="checkbox" id="reasoningModelsSelectAll" data-i18n-aria-label="common.selectAll" aria-label="${escapeHtml(t('common.selectAll'))}"></th><th data-i18n="common.model">${escapeHtml(t('common.model'))}</th></tr></thead>
+        <tbody id="reasoningBusinessModels"></tbody>
+      </table>
+      <p id="reasoningModelsEmpty" class="settings-dialog-empty" data-i18n="settings.reasoningAuto.empty" hidden>${escapeHtml(t('settings.reasoningAuto.empty'))}</p>
+    </div>
+    <p class="settings-dialog-note">${label('note')}</p>
+  </div>`;
+  refreshReasoningChannelOptions();
+  renderReasoningBusinessModels();
+}
+
+// 界面以秒输入，持久化契约仍为整数毫秒；取整消除 0.3 * 1000 这类浮点误差。
+function reasoningTimeoutMs(seconds) {
+  return Math.round(Number(seconds) * 1000);
+}
+
+function renderReasoningBusinessModels() {
+  const container = document.getElementById('reasoningBusinessModels');
+  if (!container || !reasoningAutoDraft) return;
+  const selected = new Set(reasoningAutoDraft.business_models);
+  const filter = (document.getElementById('reasoningModelSearch')?.value || '').trim().toLowerCase();
+  const models = [...new Set([...reasoningAutoModels, ...selected])].sort((a, b) => a.localeCompare(b))
+    .filter(model => model.toLowerCase().includes(filter));
+  container.innerHTML = models.map(model => `<tr><td><input type="checkbox" data-reasoning-model value="${escapeHtml(model)}" aria-label="${escapeHtml(model)}" ${selected.has(model) ? 'checked' : ''}${reasoningAutoLocked ? ' disabled' : ''}></td><td>${escapeHtml(model)}</td></tr>`).join('');
+  document.getElementById('reasoningModelsEmpty').hidden = models.length > 0;
+  updateReasoningModelsSelectAll();
+}
+
+function updateReasoningModelsSelectAll() {
+  const checkbox = document.getElementById('reasoningModelsSelectAll');
+  const rows = Array.from(document.getElementById('reasoningBusinessModels').querySelectorAll('[data-reasoning-model]'));
+  const count = rows.filter(row => row.checked).length;
+  checkbox.checked = rows.length > 0 && count === rows.length;
+  checkbox.indeterminate = count > 0 && count < rows.length;
+  checkbox.disabled = reasoningAutoLocked || rows.length === 0;
+  const counter = document.getElementById('reasoningModelsCount');
+  if (counter) counter.textContent = t('settings.reasoningAuto.selectedCount', { count: reasoningAutoDraft.business_models.length });
+}
+
+function refreshReasoningModelOptions(selected) {
+  const channel = reasoningAutoChannels.find(item => item.id === Number(document.getElementById('reasoningDecisionChannel')?.value));
+  const select = document.getElementById('reasoningDecisionModel');
+  if (!select) return;
+  const models = [...new Set((channel?.models || []).filter(item => !item.disabled).map(item => typeof item === 'string' ? item : item.model).filter(Boolean))];
+  if (selected && !models.includes(selected)) models.unshift(selected);
+  select.innerHTML = `<option value="">—</option>` + models.map(model => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('');
+  select.value = selected || '';
+}
+
+function refreshReasoningChannelOptions() {
+  const select = document.getElementById('reasoningDecisionChannel');
+  if (!select || !reasoningAutoDraft) return;
+  const selected = String(reasoningAutoDraft.decision_channel_id);
+  // 只有决策渠道（System One）够快，能在每个业务请求前完成判断。
+  const channels = reasoningAutoChannels.filter(channel => channel.auth_type === 'system_one' && (channel.enabled || String(channel.id) === selected));
+  select.innerHTML = '<option value="0">—</option>' + channels.map(channel => `<option value="${channel.id}">${escapeHtml(channel.name)}</option>`).join('');
+  if (selected !== '0' && !channels.some(channel => String(channel.id) === selected)) {
+    select.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(selected)}">${escapeHtml(selected)}</option>`);
+  }
+  select.value = selected;
+  refreshReasoningModelOptions(reasoningAutoDraft.decision_model);
+}
+
+function showReasoningAutoError(message) {
+  const error = document.getElementById('reasoningAutoError');
+  error.textContent = message || '';
+  error.hidden = !message;
+}
+
+async function loadReasoningAutoOptions() {
+  const draft = reasoningAutoDraft;
+  try {
+    const [channels, options] = await Promise.all([
+      fetchDataWithAuth('/admin/channels'),
+      fetchDataWithAuth('/admin/channels/filter-options?status=enabled')
+    ]);
+    if (reasoningAutoDraft !== draft) return;
+    reasoningAutoChannels = Array.isArray(channels) ? channels : [];
+    reasoningAutoModels = [...new Set([...reasoningAutoModels, ...(options?.models || [])])].filter(model => typeof model === 'string' && model.trim() && !/[*?]/.test(model) && !hasThinkingSuffix(model));
+    refreshReasoningChannelOptions();
+    renderReasoningBusinessModels();
+  } catch (error) {
+    if (reasoningAutoDraft === draft) showReasoningAutoError(t('settings.reasoningAuto.loadFailed') + ': ' + error.message);
+  }
+}
+
+function openReasoningAutoModal(trigger) {
+  const modal = document.getElementById('reasoningAutoModal');
+  const input = document.getElementById('reasoning_auto');
+  if (!modal || !input || !settingDefinitions.has('reasoning_auto')) return;
+  reasoningAutoPreviousFocus = trigger || document.activeElement;
+  reasoningAutoModels = [...parseReasoningAuto(input.value).business_models];
+  renderReasoningAutoEditor(input.value);
+  showReasoningAutoError(null);
+  document.querySelector('.app-container')?.setAttribute('inert', '');
+  modal.classList.add('show');
+  modal.setAttribute('aria-hidden', 'false');
+  modal.querySelector('.close-btn')?.focus();
+  loadReasoningAutoOptions();
+}
+
+function closeReasoningAutoModal() {
+  const modal = document.getElementById('reasoningAutoModal');
+  modal.classList.remove('show');
+  modal.setAttribute('aria-hidden', 'true');
+  document.querySelector('.app-container')?.removeAttribute('inert');
+  if (reasoningAutoPreviousFocus?.isConnected) reasoningAutoPreviousFocus.focus();
+  reasoningAutoPreviousFocus = null;
+  reasoningAutoDraft = null;
+}
+
+function applyReasoningAuto() {
+  if (!reasoningAutoDraft || reasoningAutoLocked) return;
+  const value = formatReasoningAuto(reasoningAutoDraft);
+  const error = validateReasoningAuto(value);
+  if (error) {
+    showReasoningAutoError(error);
+    return;
+  }
+  document.getElementById('reasoning_auto').value = value;
+  setSettingInvalid('reasoning_auto', false);
+  updateDirtyStatus();
+  closeReasoningAutoModal();
+}
+
+function bindReasoningAutoModal() {
+  const modal = document.getElementById('reasoningAutoModal');
+  if (!modal || modal.dataset.bound) return;
+  modal.dataset.bound = '1';
+  modal.addEventListener('click', event => {
+    const action = event.target.closest('[data-action]')?.dataset.action;
+    if (event.target === modal || action === 'close-reasoning-auto') closeReasoningAutoModal();
+    else if (action === 'apply-reasoning-auto') applyReasoningAuto();
+    else if (action === 'reset-reasoning-auto') {
+      renderReasoningAutoEditor(settingDefinitions.get('reasoning_auto')?.default_value || formatReasoningAuto(reasoningAutoDefaults));
+      showReasoningAutoError(null);
+      loadReasoningAutoOptions();
+    }
+  });
+  modal.addEventListener('input', event => {
+    if (event.target.id === 'reasoningModelSearch') renderReasoningBusinessModels();
+    else if (!reasoningAutoLocked && reasoningAutoDraft && event.target.id === 'reasoningTimeout') {
+      reasoningAutoDraft.timeout_ms = reasoningTimeoutMs(event.target.value);
+    }
+  });
+  modal.addEventListener('change', event => {
+    if (!reasoningAutoDraft || reasoningAutoLocked) return;
+    const input = event.target;
+    const field = input.dataset.reasoningField;
+    if (input.id === 'reasoningModelsSelectAll') {
+      const models = new Set(reasoningAutoDraft.business_models);
+      document.getElementById('reasoningBusinessModels').querySelectorAll('[data-reasoning-model]').forEach(row => {
+        row.checked = input.checked;
+        if (input.checked) models.add(row.value);
+        else models.delete(row.value);
+      });
+      reasoningAutoDraft.business_models = [...models];
+      updateReasoningModelsSelectAll();
+    } else if (input.hasAttribute('data-reasoning-model')) {
+      const models = new Set(reasoningAutoDraft.business_models);
+      if (input.checked) models.add(input.value);
+      else models.delete(input.value);
+      reasoningAutoDraft.business_models = [...models];
+      updateReasoningModelsSelectAll();
+    } else if (field === 'enabled') reasoningAutoDraft.enabled = input.checked;
+    else if (field === 'decision_channel_id') {
+      reasoningAutoDraft.decision_channel_id = Number(input.value);
+      reasoningAutoDraft.decision_model = '';
+      refreshReasoningModelOptions('');
+    } else if (field === 'decision_model') reasoningAutoDraft.decision_model = input.value;
+    else if (field === 'timeout_ms') reasoningAutoDraft.timeout_ms = reasoningTimeoutMs(input.value);
+  });
+  modal.addEventListener('keydown', event => {
+    if (event.key === 'Tab') trapModalFocus(modal, event);
+  });
 }
 
 const runtimeMetricDomains = [
@@ -402,6 +659,12 @@ function bindSettingsPageActions() {
     runtimeMetricsBtn.dataset.bound = '1';
   }
 
+  const reasoningAutoBtn = document.getElementById('reasoning-auto-btn');
+  if (reasoningAutoBtn && !reasoningAutoBtn.dataset.bound) {
+    reasoningAutoBtn.addEventListener('click', event => openReasoningAutoModal(event.currentTarget));
+    reasoningAutoBtn.dataset.bound = '1';
+  }
+
   const multimodalFallbackBtn = document.getElementById('model-multimodal-fallback-btn');
   if (multimodalFallbackBtn && !multimodalFallbackBtn.dataset.bound) {
     multimodalFallbackBtn.addEventListener('click', (event) => openMultimodalFallbackModal(event.currentTarget));
@@ -431,16 +694,32 @@ function bindSettingsPageActions() {
     modal.addEventListener('click', (event) => {
       if (event.target === modal) closeRuntimeMetricsModal();
     });
-    modal.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') closeRuntimeMetricsModal();
-    });
     modal.dataset.bound = '1';
   }
 
+  // Esc 挂在 document：点击弹窗空白处或聚焦元素被重渲染后焦点落到 body，弹窗自身收不到 keydown。
+  // 弹窗内下拉框处理 Esc 时会 preventDefault，此时只收起下拉、不关弹窗。
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    const close = settingsModalClosers.find(([id]) => document.getElementById(id)?.classList.contains('show'))?.[1];
+    if (!close) return;
+    event.preventDefault();
+    close();
+  });
+
+  bindReasoningAutoModal();
   bindGlobalCooldownRulesModal();
   bindMultimodalFallbackModal();
   bindCustomPricingModal();
 }
+
+const settingsModalClosers = [
+  ['runtimeMetricsModal', closeRuntimeMetricsModal],
+  ['reasoningAutoModal', closeReasoningAutoModal],
+  ['customRulesModal', closeGlobalCooldownRulesModal],
+  ['multimodalFallbackModal', closeMultimodalFallbackModal],
+  ['customPricingModal', closeCustomPricingModal]
+];
 
 function bindGlobalCooldownRulesModal() {
   const modal = document.getElementById('customRulesModal');
@@ -476,11 +755,6 @@ function bindGlobalCooldownRulesModal() {
     }
   });
   modal.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeGlobalCooldownRulesModal();
-      return;
-    }
     if (event.key === 'Tab') trapModalFocus(modal, event);
   });
   modal.dataset.bound = '1';
@@ -811,11 +1085,6 @@ function bindMultimodalFallbackModal() {
     }
   });
   modal.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeMultimodalFallbackModal();
-      return;
-    }
     if (event.key === 'Tab') trapModalFocus(modal, event);
   });
   modal.dataset.bound = '1';
@@ -869,6 +1138,12 @@ function customPricingNumberControl(field, value) {
     aria-label="${label}" title="${label}">`;
 }
 
+// 桌面端由表头标注列；移动端卡片布局没有表头，靠 data-mobile-label 显示字段名。
+function customPricingNumberCell(field, value) {
+  const label = escapeHtml(t(customPricingFieldLabelKeys[field] || field));
+  return `<td data-mobile-label="${label}">${customPricingNumberControl(field, value)}</td>`;
+}
+
 function renderCustomPricingModel(entry, modelIndex) {
   const pricing = entry.pricing || {};
   const highContextDescription = escapeHtml(t('settings.customPricing.highContextDescription'));
@@ -877,29 +1152,30 @@ function renderCustomPricingModel(entry, modelIndex) {
   // 关键：输入框必须落在真正的 <td> 里，列宽由表格列算法统一决定。
   // 用 grid/flex 容器会算出与列宽无关的宽度，两行输入框永远对不齐。
   const highContextCells = customPricingHighContextFields
-    .map((field) => `<td>${customPricingNumberControl(field, pricing[field])}</td>`)
+    .map((field) => customPricingNumberCell(field, pricing[field]))
     .join('');
+  // 高上下文价多数模型用不到：无值时折叠，有值时展开，避免每个模型都占两行空输入。
+  const highExpanded = customPricingHighContextFields.some((field) => typeof pricing[field] === 'number');
 
   return `
-    <tr class="custom-pricing-model-row" data-model-index="${modelIndex}">
-      <td>
+    <tr class="custom-pricing-model-row mobile-card-row" data-model-index="${modelIndex}">
+      <td class="mobile-card-no-label">
         <div class="custom-pricing-model-cell">
           <input type="text" class="form-input custom-pricing-model-id-input" data-cp-field="model_id" value="${escapeHtml(entry.model || '')}" spellcheck="false" required aria-label="${escapeHtml(t('settings.customPricing.modelId'))}" title="${escapeHtml(t('settings.customPricing.modelId'))}">
           <span class="custom-pricing-model-status" data-cp-status role="status" hidden></span>
+          <button type="button" class="custom-pricing-high-toggle" data-action="toggle-custom-pricing-high" aria-expanded="${highExpanded}" title="${highContextDescription}">${escapeHtml(t('settings.customPricing.highContextPricing'))}</button>
         </div>
       </td>
-      <td>${customPricingNumberControl('input_price', pricing.input_price)}</td>
-      <td>${customPricingNumberControl('output_price', pricing.output_price)}</td>
-      <td>${customPricingNumberControl('cache_read_price', pricing.cache_read_price)}</td>
-      <td>${customPricingNumberControl('cache_write_price', pricing.cache_write_price)}</td>
-      <td><button type="button" class="btn-icon" data-action="remove-custom-pricing-model" data-model-index="${modelIndex}" aria-label="${escapeHtml(t('settings.customPricing.removeModel'))}">&times;</button></td>
+      ${customPricingNumberCell('input_price', pricing.input_price)}
+      ${customPricingNumberCell('output_price', pricing.output_price)}
+      ${customPricingNumberCell('cache_read_price', pricing.cache_read_price)}
+      ${customPricingNumberCell('cache_write_price', pricing.cache_write_price)}
+      <td class="mobile-card-no-label"><button type="button" class="btn-icon" data-action="remove-custom-pricing-model" data-model-index="${modelIndex}" aria-label="${escapeHtml(t('settings.customPricing.removeModel'))}">&times;</button></td>
     </tr>
-    <tr class="custom-pricing-high-row" data-model-index="${modelIndex}">
-      <td>
-        <span class="custom-pricing-high-label" title="${highContextDescription}">${escapeHtml(t('settings.customPricing.highContextPricing'))}</span>
-      </td>
+    <tr class="custom-pricing-high-row mobile-card-row" data-model-index="${modelIndex}"${highExpanded ? '' : ' data-collapsed'}>
+      <td class="mobile-empty-cell"></td>
       ${highContextCells}
-      <td></td>
+      <td class="mobile-empty-cell"></td>
     </tr>`;
 }
 
@@ -922,6 +1198,15 @@ function customPricingHighRow(modelRow) {
     if (row.classList.contains('custom-pricing-high-row')) return row;
   }
   return null;
+}
+
+function toggleCustomPricingHighRow(button) {
+  const high = customPricingHighRow(button.closest('.custom-pricing-model-row'));
+  if (!high) return;
+  const expanded = button.getAttribute('aria-expanded') !== 'true';
+  button.setAttribute('aria-expanded', String(expanded));
+  high.toggleAttribute('data-collapsed', !expanded);
+  if (expanded) high.querySelector('input')?.focus();
 }
 
 function collectCustomPricingEntries() {
@@ -1188,6 +1473,7 @@ function bindCustomPricingModal() {
       case 'apply-custom-pricing': applyCustomPricing(); break;
       case 'add-custom-pricing-model': addCustomPricingModel(); break;
       case 'remove-custom-pricing-model': removeCustomPricingModel(button); break;
+      case 'toggle-custom-pricing-high': toggleCustomPricingHighRow(button); break;
     }
   });
   modal.addEventListener('input', (event) => {
@@ -1200,11 +1486,6 @@ function bindCustomPricingModal() {
     if (event.key === 'Enter' && event.target.matches('[data-cp-field="model_id"]')) {
       event.preventDefault();
       loadCustomPricingDefaults(event.target);
-      return;
-    }
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeCustomPricingModal();
       return;
     }
     if (event.key === 'Tab') trapModalFocus(modal, event);
@@ -1337,10 +1618,9 @@ function formatRuntimeMetric(metric, stats) {
 
 function renderRuntimeMetricCard(metric, stats) {
   return `
-    <div class="runtime-metric-card">
+    <div class="runtime-metric-card" title="${escapeHtml(metric.key)}">
       <span class="runtime-metric-label">${escapeHtml(t(metric.labelKey))}</span>
       <strong class="runtime-metric-value">${escapeHtml(formatRuntimeMetric(metric, stats))}</strong>
-      <code class="runtime-metric-key">${escapeHtml(metric.key)}</code>
     </div>`;
 }
 
@@ -1510,7 +1790,7 @@ function getSettingGroupInfo(key) {
 
   const defs = [
     { id: 'advanced', nameKey: 'settings.group.advanced', order: 70, match: () => advancedSettingKeys.has(k) },
-    { id: 'channel', nameKey: 'settings.group.channel', order: 10, match: () => k.startsWith('channel_') || k === 'max_key_retries' || k === 'enable_session_affinity' },
+    { id: 'channel', nameKey: 'settings.group.channel', order: 10, match: () => k.startsWith('channel_') || k === 'max_key_retries' || k === 'enable_session_affinity' || k === 'reasoning_auto' },
 
     { id: 'upstream-connection', nameKey: 'settings.group.upstreamConnection', order: 19, match: () => k === 'upstream_connection_reuse_limit_seconds' || oauthBaseURLSettingKeys.has(k) },
     { id: 'websocket', nameKey: 'settings.group.websocket', order: 25, match: () => k.startsWith('responses_ws_') },
@@ -1566,8 +1846,6 @@ function getSettingOrder(key) {
     auto_update_channel: 701,
     api_token_login_enabled: 702,
     api_token_show_channels: 703,
-    typesafe_enabled: 705,
-    typesafe_api_key: 706,
     model_custom_pricing: 710
   };
   const normalizedKey = String(key || '').toLowerCase();
@@ -1575,7 +1853,7 @@ function getSettingOrder(key) {
 }
 
 function isModalSettingKey(key) {
-  return hotReloadSettingKeys.has(key);
+  return key === 'reasoning_auto' || hotReloadSettingKeys.has(key);
 }
 
 function settingEffectMode(key) {
@@ -1716,7 +1994,7 @@ function renderSettings(settings) {
     const target = document.getElementById(s.key);
     if (target) target.value = displayValue;
     if (s.key === modelMultimodalFallbackSettingKey) updateMultimodalFallbackSummary(displayValue);
-    else updateCustomPricingSummary(displayValue);
+    else if (s.key === modelCustomPricingSettingKey) updateCustomPricingSummary(displayValue);
   }
 
   const groups = groupSettings(settings)
@@ -1766,11 +2044,6 @@ function initSettingsEventDelegation() {
       openGlobalCooldownRulesModal(editGlobalRulesBtn);
       return;
     }
-    const typeSafeTestBtn = e.target.closest('[data-action="test-typesafe"]');
-    if (typeSafeTestBtn) {
-      testTypeSafeKey(typeSafeTestBtn);
-      return;
-    }
     const updateCheckBtn = e.target.closest('[data-action="check-for-updates"]');
     if (updateCheckBtn) {
       checkForUpdates(updateCheckBtn);
@@ -1813,29 +2086,6 @@ async function checkForUpdates(button) {
   }
 }
 
-async function testTypeSafeKey(button) {
-  if (button.disabled) return;
-  const input = document.getElementById('TypeSafe_api_key');
-  const key = input.value.trim();
-  const payload = key || input.dataset.clearSecret === 'true' ? { api_key: key } : {};
-  button.disabled = true;
-  button.setAttribute?.('aria-busy', 'true');
-  button.textContent = t('settings.typeSafeTest.testing');
-  try {
-    const result = await fetchDataWithAuth('/admin/typesafe/test', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-    });
-    if (result.valid) showSuccess(t('settings.typeSafeTest.success'));
-    else showError(t('settings.typeSafeTest.failed') + ': ' + result.message);
-  } catch (err) {
-    showError(t('settings.typeSafeTest.failed') + ': ' + err.message);
-  } finally {
-    button.disabled = false;
-    button.removeAttribute?.('aria-busy');
-    button.textContent = t('settings.typeSafeTest.test');
-  }
-}
-
 function renderInput(setting) {
   const safeKey = escapeHtml(setting.key);
   const safeValue = escapeHtml(setting.value);
@@ -1856,14 +2106,6 @@ function renderInput(setting) {
           ${escapeHtml(t('settings.globalCooldownRules.ruleCount', { count }))}
         </span>
       </div>`;
-  }
-
-  if (setting.key === 'TypeSafe_api_key') {
-    const hint = t(setting.configured ? 'settings.secretConfigured' : 'settings.secretUnconfigured');
-    return `<div class="settings-typesafe-control">
-      <input type="text" id="${safeKey}" value="" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(hint)}" aria-label="TypeSafe API Key" class="settings-input settings-input--text">
-      <button type="button" class="btn btn-secondary" data-action="test-typesafe" title="${escapeHtml(t('settings.typeSafeTest.hint'))}">${escapeHtml(t('settings.typeSafeTest.test'))}</button>
-    </div>`;
   }
 
   const selectOptions = selectSettingOptions.get(setting.key);
@@ -1929,10 +2171,17 @@ function markChanged(input) {
   updateDirtyStatus();
 }
 
+// reasoning_auto 的值存放在 hidden input，错误标记与聚焦需落到可见的编辑器控件上。
+function reasoningAutoEditorControls() {
+  const editor = document.getElementById('reasoningAutoEditor');
+  return editor ? Array.from(editor.querySelectorAll('input, select')) : [];
+}
+
 function setSettingInvalid(key, invalid) {
   const control = getSettingControl(key);
   if (!control) return;
-  const inputs = control.radios ? Array.from(control.radios) : [control.input];
+  const editorControls = key === 'reasoning_auto' ? reasoningAutoEditorControls() : [];
+  const inputs = control.radios ? Array.from(control.radios) : [control.input, ...editorControls.filter(item => item !== control.input)];
   for (const input of inputs) {
     if (invalid) input.setAttribute?.('aria-invalid', 'true');
     else input.removeAttribute?.('aria-invalid');
@@ -1944,12 +2193,13 @@ function focusSettingControl(key) {
   const control = getSettingControl(key);
   if (!control?.input) return;
   control.row?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
-  control.input.focus?.({ preventScroll: true });
+  if (key === 'reasoning_auto') openReasoningAutoModal(document.getElementById('reasoning-auto-btn'));
+  const target = key === 'reasoning_auto' ? reasoningAutoEditorControls().find(item => item.type !== 'hidden' && !item.disabled) : null;
+  (target || control.input).focus?.({ preventScroll: true });
 }
 
 function isSettingChanged(key, control) {
-  return control.value !== originalSettings[key]
-    || (key === 'TypeSafe_api_key' && control.input.dataset.clearSecret === 'true');
+  return control.value !== originalSettings[key];
 }
 
 function changedSettingKeys() {
@@ -2016,11 +2266,6 @@ function setSettingControlValue(key, value) {
 }
 
 function syncSettingState(key, value) {
-  if (key === 'TypeSafe_api_key') {
-    const input = document.getElementById(key);
-    if (input) delete input.dataset.clearSecret;
-    value = '';
-  }
   const normalizedValue = settingValueForDisplay(key, value);
   const control = setSettingControlValue(key, value);
 
@@ -2122,11 +2367,6 @@ function resetSetting(key) {
   }
 
   const control = setSettingControlValue(key, setting.default_value ?? '');
-  if (key === 'TypeSafe_api_key' && control?.input) {
-    control.input.dataset.clearSecret = 'true';
-    const enabled = setSettingControlValue('TypeSafe_enabled', 'false');
-    if (enabled?.input) markChanged(enabled.input);
-  }
   if (control?.input) markChanged(control.input);
 }
 

@@ -42,6 +42,7 @@ func TestAdminAPI_ExportChannelsCSV(t *testing.T) {
 			},
 			Enabled:                 true,
 			RetryOtherKeysOnFailure: true,
+			SameChannelRetries:      3,
 		},
 		{
 			Name:     "Test-Export-2",
@@ -114,7 +115,7 @@ func TestAdminAPI_ExportChannelsCSV(t *testing.T) {
 		header[0] = strings.TrimPrefix(header[0], "\ufeff")
 	}
 
-	expectedHeaders := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "urls", "priority", "sort_override", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "scheduled_check_interval_minutes", "scheduled_check_start_time"}
+	expectedHeaders := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "urls", "priority", "sort_override", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "oauth_quota_passthrough", "scheduled_check_interval_minutes", "scheduled_check_start_time", "same_channel_retries"}
 	if len(header) != len(expectedHeaders) {
 		t.Fatalf("Header字段数量不匹配: 期望 %d, 实际: %d\nHeader: %v", len(expectedHeaders), len(header), header)
 	}
@@ -131,6 +132,10 @@ func TestAdminAPI_ExportChannelsCSV(t *testing.T) {
 	retryIndex := slices.Index(header, "retry_other_keys_on_failure")
 	if retryIndex < 0 || records[1][retryIndex] != "true" {
 		t.Errorf("retry_other_keys_on_failure 导出值错误: row=%v", records[1])
+	}
+	sameChannelRetriesIndex := slices.Index(header, "same_channel_retries")
+	if sameChannelRetriesIndex < 0 || records[1][sameChannelRetriesIndex] != "3" {
+		t.Errorf("same_channel_retries 导出值错误: row=%v", records[1])
 	}
 	allowedModelsIndex := slices.Index(header, "api_key_allowed_models")
 	if allowedModelsIndex < 0 || records[1][allowedModelsIndex] != `[["model-1"]]` {
@@ -361,7 +366,7 @@ func TestAdminAPI_CSVExportImportOAuthChannelWithFilters(t *testing.T) {
 	testChannels := []*model.Config{
 		{
 			Name: "Needle Codex", AuthType: model.AuthTypeCodexOAuth, OAuthCredential: desiredCredential,
-			URLs: model.ChannelURLs{{URL: "https://codex.example.com"}}, Enabled: true, Websockets: true,
+			URLs: model.ChannelURLs{{URL: "https://codex.example.com"}}, Enabled: true, Websockets: true, OAuthQuotaPassthrough: true,
 			ModelEntries: []model.ModelEntry{{Model: "grok-4.5"}},
 		},
 		{
@@ -470,6 +475,9 @@ func TestAdminAPI_CSVExportImportOAuthChannelWithFilters(t *testing.T) {
 	}
 	if restored.GetAuthType() != model.AuthTypeCodexOAuth || credential.AccessToken != "wanted-access" {
 		t.Fatal("restored OAuth channel lost its authentication state")
+	}
+	if !restored.OAuthQuotaPassthrough {
+		t.Fatal("restored OAuth channel lost quota passthrough setting")
 	}
 	if !restored.Websockets {
 		t.Fatal("restored OAuth channel lost its websockets setting")
@@ -963,12 +971,13 @@ func TestAdminAPI_ImportChannelsCSV_IgnoresIDAndMatchesByName(t *testing.T) {
 	}
 
 	nameMatch, err := server.store.CreateConfig(ctx, &model.Config{
-		Name:         "Import-Name-Match",
-		URLs:         model.ChannelURLs{{URL: "https://name-old.example.com"}},
-		Priority:     10,
-		Websockets:   true,
-		ModelEntries: []model.ModelEntry{{Model: "name-old-model"}},
-		Enabled:      true,
+		Name:                  "Import-Name-Match",
+		URLs:                  model.ChannelURLs{{URL: "https://name-old.example.com"}},
+		Priority:              10,
+		Websockets:            true,
+		OAuthQuotaPassthrough: true,
+		ModelEntries:          []model.ModelEntry{{Model: "name-old-model"}},
+		Enabled:               true,
 	})
 	if err != nil {
 		t.Fatalf("创建名称匹配渠道失败: %v", err)
@@ -986,20 +995,20 @@ func TestAdminAPI_ImportChannelsCSV_IgnoresIDAndMatchesByName(t *testing.T) {
 	csvWriter := csv.NewWriter(&csvContent)
 	if err := csvWriter.Write([]string{
 		"id", "name", "auth_type", "oauth_credential", "urls", "priority", "models",
-		"model_redirects", "enabled", "api_key", "key_strategy", "websockets",
+		"model_redirects", "enabled", "api_key", "key_strategy", "websockets", "oauth_quota_passthrough",
 	}); err != nil {
 		t.Fatalf("写入 CSV 表头失败: %v", err)
 	}
 	if err := csvWriter.Write([]string{
 		strconv.FormatInt(IDOwner.ID, 10), "Import-Name-Match", model.AuthTypeAPIKey, "",
-		`[{"url":"https://name-new.example.com"}]`, "20", "name-new-model", "{}", "true", "sk-name-new", model.KeyStrategySequential, "false",
+		`[{"url":"https://name-new.example.com"}]`, "20", "name-new-model", "{}", "true", "sk-name-new", model.KeyStrategySequential, "false", "false",
 	}); err != nil {
 		t.Fatalf("写入名称匹配行失败: %v", err)
 	}
 	if err := csvWriter.Write([]string{
 		strconv.FormatInt(nameMatch.ID, 10), "Import-New-Codex", model.AuthTypeCodexOAuth,
 		`{"type":"codex","access_token":"new-access","refresh_token":"new-refresh","expired":"2030-01-01T00:00:00Z"}`,
-		`[{"url":"https://codex-new.example.com"}]`, "5", "gpt-5.4", "{}", "true", "", model.KeyStrategySequential, "false",
+		`[{"url":"https://codex-new.example.com"}]`, "5", "gpt-5.4", "{}", "true", "", model.KeyStrategySequential, "false", "false",
 	}); err != nil {
 		t.Fatalf("写入 OAuth 新增行失败: %v", err)
 	}
@@ -1049,6 +1058,9 @@ func TestAdminAPI_ImportChannelsCSV_IgnoresIDAndMatchesByName(t *testing.T) {
 	}
 	if len(updated.ModelEntries) != 1 || updated.ModelEntries[0].Model != "name-new-model" {
 		t.Fatalf("期望按名称更新模型，实际为 %+v", updated.ModelEntries)
+	}
+	if updated.OAuthQuotaPassthrough {
+		t.Fatal("CSV explicit false must disable quota passthrough")
 	}
 	if updated.Websockets {
 		t.Fatal("CSV 中显式 websockets=false 应覆盖已有 true")
@@ -1108,9 +1120,11 @@ func TestAdminAPI_ImportChannelsCSV_MissingScheduledCheckColumnPreservesExisting
 		URLs:                          model.ChannelURLs{{URL: "https://old.example.com"}},
 		Priority:                      10,
 		Websockets:                    true,
+		OAuthQuotaPassthrough:         true,
 		ModelEntries:                  []model.ModelEntry{{Model: "old-model", RedirectModel: ""}},
 		Enabled:                       true,
 		RetryOtherKeysOnFailure:       true,
+		SameChannelRetries:            4,
 		ScheduledCheckEnabled:         true,
 		ScheduledCheckModel:           "old-model",
 		ScheduledCheckIntervalMinutes: 17,
@@ -1186,6 +1200,12 @@ Import-Preserve-Scheduled,"[{""url"":""https://new.example.com""}]",20,"old-mode
 	}
 	if !updated.RetryOtherKeysOnFailure {
 		t.Fatal("缺少 retry_other_keys_on_failure 列时应保留旧值 true")
+	}
+	if updated.SameChannelRetries != 4 {
+		t.Fatalf("缺少 same_channel_retries 列时应保留旧值 4，实际为 %d", updated.SameChannelRetries)
+	}
+	if !updated.OAuthQuotaPassthrough {
+		t.Fatal("missing quota passthrough column should preserve true")
 	}
 	if !updated.Websockets {
 		t.Fatal("缺少 websockets 列时应保留旧值 true")

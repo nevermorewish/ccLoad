@@ -25,6 +25,8 @@ const (
 	AuthTypeCursorOAuth      = "cursor_oauth"
 	AuthTypeZedOAuth         = "zed_oauth"
 	AuthTypeCodeBuddyOAuth   = "codebuddy_oauth"
+	// AuthTypeSystemOne is a decision-only channel authenticated by API keys.
+	AuthTypeSystemOne = "system_one"
 
 	// ProtocolTransformModeAuto tries the client protocol first, then falls back through
 	// Anthropic, OpenAI, Codex, Gemini while skipping the native protocol already attempted.
@@ -59,8 +61,21 @@ func NormalizeAuthType(value string) string {
 		return AuthTypeZedOAuth
 	case AuthTypeCodeBuddyOAuth:
 		return AuthTypeCodeBuddyOAuth
+	case AuthTypeSystemOne:
+		return AuthTypeSystemOne
 	default:
 		return ""
+	}
+}
+
+// UsesAPIKeyCredentials reports whether the auth type stores credentials as
+// api_keys rows rather than one channel-level OAuth credential.
+func UsesAPIKeyCredentials(authType string) bool {
+	switch NormalizeAuthType(authType) {
+	case AuthTypeAPIKey, AuthTypeSystemOne:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -79,9 +94,9 @@ func TracksQuotaCost(authType string) bool {
 }
 
 // CountsTowardQuotaWindows 判断日志的标准成本是否进入周期额度账本。
-func CountsTowardQuotaWindows(authType, logSource string, cost float64, codexHasCredits bool) bool {
+func CountsTowardQuotaWindows(authType string, cost float64, codexHasCredits bool) bool {
 	normalized := NormalizeAuthType(authType)
-	return TracksQuotaCost(normalized) && cost > 0 && logSource != LogSourceJev &&
+	return TracksQuotaCost(normalized) && cost > 0 &&
 		(!codexHasCredits || normalized != AuthTypeCodexOAuth)
 }
 
@@ -202,6 +217,25 @@ func (urls *ChannelURLs) Normalize() error {
 		seenURLs[runtimeURL] = i
 	}
 	return nil
+}
+
+// ValidateForAuthType rejects chat protocol declarations on System One channels,
+// whose native decision API is never negotiated or converted.
+func (urls ChannelURLs) ValidateForAuthType(authType string) error {
+	if NormalizeAuthType(authType) != AuthTypeSystemOne {
+		return nil
+	}
+	for i, entry := range urls {
+		if len(entry.Protocols) != 0 {
+			return fmt.Errorf("urls[%d]: System One channels cannot declare URL protocols", i)
+		}
+	}
+	return nil
+}
+
+// IsSystemOne reports whether the channel is dedicated to decision requests.
+func (c *Config) IsSystemOne() bool {
+	return c != nil && c.GetAuthType() == AuthTypeSystemOne
 }
 
 // Clone returns a deep copy of URL configuration.
@@ -611,9 +645,13 @@ func (r *CooldownDetectionRules) Clone() *CooldownDetectionRules {
 type ChannelInfo struct {
 	Name              string
 	Priority          int
+	AuthType          string
 	CostMultiplierMin float64
 	CostMultiplierMax float64
 }
+
+// MaxSameChannelRetries 是渠道级同渠道原地重试次数上限。
+const MaxSameChannelRetries = 10
 
 // Config 渠道配置
 type Config struct {
@@ -623,6 +661,7 @@ type Config struct {
 	Name                          string      `json:"name"`
 	AuthType                      string      `json:"auth_type"`
 	Websockets                    bool        `json:"websockets,omitempty"`
+	OAuthQuotaPassthrough         bool        `json:"oauth_quota_passthrough"`
 	ProtocolTransformMode         string      `json:"protocol_transform_mode"`
 	URLs                          ChannelURLs `json:"urls"`
 	Priority                      int         `json:"priority"`
@@ -668,6 +707,10 @@ type Config struct {
 	// 用于一个中转站下的 Key 实际对应不同上游服务商的场景；默认关闭，保持原有渠道/模型级切换语义。
 	RetryOtherKeysOnFailure bool `json:"retry_other_keys_on_failure"`
 
+	// 同渠道原地重试次数：上游网络错误或 5xx 时在同一渠道再试 N 次后才切换，
+	// 中间失败不累计冷却。0 表示不重试（默认）。
+	SameChannelRetries int `json:"same_channel_retries"`
+
 	// OAuthCredential is the private CLIProxy-compatible OAuth JSON stored in
 	// the channels table. It must never be serialized by an API response.
 	OAuthCredential        string    `json:"-"`
@@ -708,6 +751,7 @@ func (c *Config) Clone() *Config {
 		Name:                          c.Name,
 		AuthType:                      c.AuthType,
 		Websockets:                    c.Websockets,
+		OAuthQuotaPassthrough:         c.OAuthQuotaPassthrough,
 		ProtocolTransformMode:         c.ProtocolTransformMode,
 		URLs:                          c.URLs.Clone(),
 		Priority:                      c.Priority,
@@ -729,6 +773,7 @@ func (c *Config) Clone() *Config {
 		AvailableTimeStart:            c.AvailableTimeStart,
 		AvailableTimeEnd:              c.AvailableTimeEnd,
 		RetryOtherKeysOnFailure:       c.RetryOtherKeysOnFailure,
+		SameChannelRetries:            c.SameChannelRetries,
 		OAuthCredential:               c.OAuthCredential,
 		CodexAccessToken:              c.CodexAccessToken,
 		CodexAccountID:                c.CodexAccountID,
@@ -809,7 +854,7 @@ func (c *Config) UsesZedOAuth() bool {
 
 // UsesOAuth reports whether API keys are replaced by a private OAuth credential.
 func (c *Config) UsesOAuth() bool {
-	return c != nil && c.GetAuthType() != AuthTypeAPIKey
+	return c != nil && !UsesAPIKeyCredentials(c.GetAuthType())
 }
 
 // GetModels 获取所有已启用的模型名称列表
