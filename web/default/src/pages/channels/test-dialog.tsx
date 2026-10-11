@@ -3,7 +3,7 @@ import { Dialog } from '../../components/dialog'
 import { SearchableSelect } from '../../components/searchable-select'
 import { getJSON, postJSON } from '../../lib/api'
 import type { Channel } from '../../types'
-import { loadKeys, testChannel, type ChannelKeyRow } from './api'
+import { loadKeys, testChannel, channelTestPayload, type ChannelKeyRow } from './api'
 
 type TestResult = Record<string, unknown>
 type BatchRow = { keyIndex: number; masked: string; success: boolean; message: string }
@@ -47,7 +47,8 @@ export function TestDialog({ channel, initialModel, onClose }: { channel: Channe
     }).catch(() => undefined)
   }, [channel, initialModel, models])
 
-  const body = (index?: number) => ({ model, content, stream, client_protocol: protocol, ...(index == null ? {} : { key_index: index }) })
+  const isSystemOne = channel?.auth_type === 'system_one'
+  const body = (index?: number) => channelTestPayload(channel?.auth_type, { model, content, stream, client_protocol: protocol, ...(index == null ? {} : { key_index: index }) })
 
   const runSingle = async () => {
     if (!channel || !model) return
@@ -94,10 +95,10 @@ export function TestDialog({ channel, initialModel, onClose }: { channel: Channe
       </>}>
       <div className="toolbar">
         <SearchableSelect ariaLabel="测试模型" className="combobox-inline" allowCustomInput value={model} options={models.map((item) => ({ value: item, label: item }))} onChange={setModel} placeholder="模型" />
-        <SearchableSelect ariaLabel="客户端协议" className="combobox-inline" value={protocol} options={CLIENT_PROTOCOLS} onChange={setProtocol} />
+        {!isSystemOne && <SearchableSelect ariaLabel="客户端协议" className="combobox-inline" value={protocol} options={CLIENT_PROTOCOLS} onChange={setProtocol} />}
         {/* 单测 Key 只列前 10 个，与旧页一致；更多 Key 用批量测试。 */}
         <SearchableSelect ariaLabel="测试 Key" className="combobox-inline" value={keyIndex} options={[{ value: '', label: '自动选择 Key' }, ...keys.slice(0, 10).map((key, index) => ({ value: String(index), label: `#${index + 1} ${mask(key.api_key)}` }))]} onChange={setKeyIndex} />
-        <label><input type="checkbox" checked={stream} onChange={(event) => setStream(event.target.checked)} /> 流式</label>
+        {!isSystemOne && <label><input type="checkbox" checked={stream} onChange={(event) => setStream(event.target.checked)} /> 流式</label>}
         {keys.length > 1 && <label className="muted">并发<input className="input compact" type="number" min={1} max={50} value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))} /></label>}
       </div>
       {keys.length > 10 && <p className="muted">还有 {keys.length - 10} 个 Key 未在单测列表中显示，可使用批量测试。</p>}

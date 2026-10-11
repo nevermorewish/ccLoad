@@ -13,7 +13,7 @@ type TokenRow = {
   success_count?: number; failure_count?: number; stream_avg_ttfb?: number; non_stream_avg_rt?: number; stream_count?: number; non_stream_count?: number
   prompt_tokens_total?: number; completion_tokens_total?: number; cache_read_tokens_total?: number; cache_creation_tokens_total?: number
   total_cost_usd?: number; effective_cost_usd?: number; cost_used_usd?: number; cost_limit_usd?: number; cost_daily_used_usd?: number; cost_daily_limit_usd?: number; cost_monthly_used_usd?: number; cost_monthly_limit_usd?: number
-  peak_rpm?: number; avg_rpm?: number; recent_rpm?: number; allowed_models?: string[]; allowed_channel_ids?: number[]; channel_restriction_mode?: string; max_concurrency?: number
+  peak_rpm?: number; avg_rpm?: number; recent_rpm?: number; allowed_models?: string[]; allowed_channel_ids?: number[]; channel_restriction_mode?: string; max_concurrency?: number; rpm_limit?: number
 }
 type ChannelOption = { id: number; name: string; auth_type?: string; urls?: Array<{ protocols?: string[] }>; models?: Array<string | { model?: string }> }
 
@@ -25,27 +25,29 @@ const EXPIRY_PRESETS = [
 const MODES = [{ value: 'allow', label: '白名单（仅允许所选渠道）' }, { value: 'deny', label: '黑名单（排除所选渠道）' }]
 
 type Draft = {
-  description: string; expiry: string; customExpiry: string; isActive: boolean; daily: string; monthly: string; total: string; concurrency: string
+  description: string; expiry: string; customExpiry: string; isActive: boolean; daily: string; monthly: string; total: string; concurrency: string; rpm: string
   models: string[]; channels: string[]; mode: string
 }
-const emptyDraft = (): Draft => ({ description: '', expiry: 'never', customExpiry: '', isActive: true, daily: '0', monthly: '0', total: '0', concurrency: '0', models: [], channels: [], mode: 'allow' })
+export const emptyDraft = (): Draft => ({ description: '', expiry: 'never', customExpiry: '', isActive: true, daily: '0', monthly: '0', total: '0', concurrency: '0', rpm: '0', models: [], channels: [], mode: 'allow' })
 
 const toLocalInput = (ms?: number | null) => { if (!ms) return ''; const d = new Date(ms); const pad = (n: number) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}` }
 const modelOf = (entry: string | { model?: string }) => typeof entry === 'string' ? entry : String(entry.model ?? '')
 const maskToken = (value?: string) => !value ? '-' : value.length <= 12 ? value : `${value.slice(0, 6)}…${value.slice(-4)}`
 
 /** 把草稿转为请求体；返回错误文案时阻止提交。expiryTouched=false 时不发 expires_at，避免编辑时改写原过期时间。 */
-function buildPayload(draft: Draft, expiryTouched: boolean): { body?: Record<string, unknown>; error?: string } {
+export function buildPayload(draft: Draft, expiryTouched: boolean): { body?: Record<string, unknown>; error?: string } {
   if (!draft.description.trim()) return { error: '请填写描述' }
   const limits = { cost_daily_limit_usd: Number(draft.daily || 0), cost_monthly_limit_usd: Number(draft.monthly || 0), cost_limit_usd: Number(draft.total || 0) }
   if (Object.values(limits).some((value) => !Number.isFinite(value) || value < 0)) return { error: '成本限额必须是非负数' }
   const concurrency = Number(draft.concurrency || 0)
+  const rpm = Number(draft.rpm || 0)
+  if (!Number.isSafeInteger(rpm) || rpm < 0) return { error: 'RPM 上限必须是非负整数' }
   // 后端字段是 int，小数会导致 JSON 绑定失败。
   if (!Number.isInteger(concurrency) || concurrency < 0) return { error: '最大并发必须是非负整数' }
   // 设置了成本限额却不限并发，会被后端拒绝（auth_token.go:325）。
   if (Object.values(limits).some((value) => value > 0) && concurrency <= 0) return { error: '设置成本限额时必须同时设置最大并发（大于 0）' }
   const body: Record<string, unknown> = {
-    description: draft.description.trim(), is_active: draft.isActive, ...limits, max_concurrency: concurrency,
+    description: draft.description.trim(), is_active: draft.isActive, ...limits, max_concurrency: concurrency, rpm_limit: rpm,
     allowed_models: draft.models, allowed_channel_ids: draft.channels.map(Number), channel_restriction_mode: draft.mode,
   }
   if (expiryTouched) {
@@ -127,7 +129,7 @@ export function TokensPage() {
           <td>{[row.peak_rpm, row.avg_rpm, ...(isToday ? [row.recent_rpm] : [])].map((value) => Number(value ?? 0).toFixed(1)).join(' / ')}</td>
           <td className="cell-stack"><span>入 {formatCompact(row.prompt_tokens_total)} · 出 {formatCompact(row.completion_tokens_total)}</span><span className="table-note">缓读 {formatCompact(row.cache_read_tokens_total)} · 缓写 {formatCompact(row.cache_creation_tokens_total)}</span></td>
           <td>{formatCostPair(row.total_cost_usd, row.effective_cost_usd)}</td>
-          <td>{Number(row.max_concurrency ?? 0) || '∞'}</td>
+          <td>{Number(row.max_concurrency ?? 0) || '∞'}<span className="table-note">RPM 上限：{Number(row.rpm_limit ?? 0) || '∞'}</span></td>
           <td>{Number(row.stream_count ?? 0) ? formatSeconds(row.stream_avg_ttfb) : '-'}</td>
           <td>{Number(row.non_stream_count ?? 0) ? formatSeconds(row.non_stream_avg_rt) : '-'}</td>
           <td className="cell-stack">
@@ -172,7 +174,7 @@ function TokenEditor({ open, row, channels, onClose, onSaved }: { open: boolean;
     setError(''); setImportText(''); setExpiryTouched(!row)
     setDraft(row ? {
       description: row.description ?? '', expiry: row.expires_at ? 'custom' : 'never', customExpiry: toLocalInput(row.expires_at), isActive: row.is_active !== false,
-      daily: String(row.cost_daily_limit_usd ?? 0), monthly: String(row.cost_monthly_limit_usd ?? 0), total: String(row.cost_limit_usd ?? 0), concurrency: String(row.max_concurrency ?? 0),
+      daily: String(row.cost_daily_limit_usd ?? 0), monthly: String(row.cost_monthly_limit_usd ?? 0), total: String(row.cost_limit_usd ?? 0), concurrency: String(row.max_concurrency ?? 0), rpm: String(row.rpm_limit ?? 0),
       models: row.allowed_models ?? [], channels: (row.allowed_channel_ids ?? []).map(String), mode: row.channel_restriction_mode === 'deny' ? 'deny' : 'allow',
     } : emptyDraft())
   }, [open, row])
@@ -226,6 +228,7 @@ function TokenEditor({ open, row, channels, onClose, onSaved }: { open: boolean;
       <label className="cell-stack">月限额 ($)<input className="input compact" type="number" min={0} step="0.01" value={draft.monthly} onChange={(event) => patch({ monthly: event.target.value })} />{usage(row?.cost_monthly_used_usd)}</label>
       <label className="cell-stack">总限额 ($)<input className="input compact" type="number" min={0} step="0.01" value={draft.total} onChange={(event) => patch({ total: event.target.value })} />{usage(row?.cost_used_usd)}</label>
       <label className="cell-stack">最大并发<input className="input compact" type="number" min={0} step={1} value={draft.concurrency} onChange={(event) => patch({ concurrency: event.target.value })} /><span className="table-note">0 表示不限</span></label>
+      <label className="cell-stack">RPM 上限<input className="input compact" type="number" min={0} step={1} value={draft.rpm} onChange={(event) => patch({ rpm: event.target.value })} /><span className="table-note">每分钟请求数，0 表示不限</span></label>
     </div>
     <p className="muted">成本限额为 0 表示不限；设置任一成本限额时必须同时设置最大并发。</p>
 

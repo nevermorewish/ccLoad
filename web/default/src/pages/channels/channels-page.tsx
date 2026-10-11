@@ -9,7 +9,7 @@ import { OAuthCleanupPanel, OAuthImportPanel, OAuthLoginPanel } from '../oauth/o
 import {
   AUTH_TYPES, PROTOCOL_MODES, batchClearCooldowns, batchDelete, batchEnabled, batchPatch, batchPriority, batchSortOverride,
   codebuddyCheckin, codexQuotaReset, download, managementBalance, managementCheckin, oauthUsage,
-  refreshModelsBatch, removeChannel, uploadJSON, type ModelEntry,
+  refreshModelsBatch, removeChannel, uploadJSON, usesAPIKeyCredentials, type ModelEntry,
 } from './api'
 import { ChannelEditorDialog } from './channel-editor-dialog'
 import { ChannelSortDialog, ConfirmDialog, ModelImportDialog, SortOverrideDialog } from './dialogs'
@@ -29,7 +29,7 @@ type BatchRefreshState = { done: number; total: number; current: string; results
 const readJSON = <T,>(key: string, fallback: T): T => { try { const raw = localStorage.getItem(key); return raw ? { ...fallback, ...JSON.parse(raw) as T } : fallback } catch { return fallback } }
 const clampPageSize = (value: unknown) => { const parsed = Math.trunc(Number(value)); return Number.isFinite(parsed) && parsed >= 1 ? Math.min(parsed, 1000) : 20 }
 const authLabel = (value: unknown) => AUTH_TYPES.find((item) => item.value === String(value || 'api_key'))?.label ?? String(value)
-const isOAuthRow = (row: Row) => String(row.auth_type || 'api_key') !== 'api_key'
+const isOAuthRow = (row: Row) => !usesAPIKeyCredentials(row.auth_type)
 const modelNames = (row: Row) => (Array.isArray(row.models) ? row.models : []).map((entry) => typeof entry === 'string' ? entry : String((entry as ModelEntry).model ?? '')).filter(Boolean)
 const errorMessage = (cause: unknown, fallback: string) => cause instanceof Error ? cause.message : fallback
 // 指标列高亮：阈值与旧版一致（首字 5s/15s，耗时 15s/30s，成功率 95%/80%）。
@@ -78,7 +78,7 @@ export function ChannelsPage() {
   const [priorityDrafts, setPriorityDrafts] = useState<Record<number, string>>({})
   const [overrideDrafts, setOverrideDrafts] = useState<Record<number, string>>({})
   // 弹窗
-  const [editor, setEditor] = useState<{ open: boolean; channel: Channel | null; duplicate: boolean }>({ open: false, channel: null, duplicate: false })
+  const [editor, setEditor] = useState<{ open: boolean; channel: Channel | null; duplicate: boolean; authType?: 'api_key' | 'system_one' }>({ open: false, channel: null, duplicate: false })
   const [testTarget, setTestTarget] = useState<{ channel: Channel; model?: string } | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Row | 'batch' | null>(null)
   const [sortOpen, setSortOpen] = useState(false)
@@ -381,6 +381,7 @@ export function ChannelsPage() {
           <button className="btn" onClick={() => setSortOpen(true)}>排序</button>
           <button className="btn" onClick={() => setSortOverrideOpen(true)}>惩罚排序覆盖</button>
           <button className="btn btn-primary" onClick={() => setEditor({ open: true, channel: null, duplicate: false })}>+ 添加渠道</button>
+          <button className="btn" onClick={() => setEditor({ open: true, channel: null, duplicate: false, authType: 'system_one' })}>+ 添加决策渠道</button>
         </>}
       </div>
     </header>
@@ -548,7 +549,7 @@ export function ChannelsPage() {
     </div>
 
     {/* ---------------- 弹窗 ---------------- */}
-    <ChannelEditorDialog open={editor.open} editing={editor.duplicate ? null : editor.channel} duplicateOf={editor.duplicate ? editor.channel : null}
+    <ChannelEditorDialog open={editor.open} editing={editor.duplicate ? null : editor.channel} duplicateOf={editor.duplicate ? editor.channel : null} createAuthType={editor.authType}
       onClose={() => setEditor({ open: false, channel: null, duplicate: false })}
       onSaved={() => { notify('success', '渠道已保存'); void refresh() }}
       onNotice={(value) => notify('info', '操作结果', value)}

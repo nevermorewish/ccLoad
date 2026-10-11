@@ -2,6 +2,7 @@
   "name": "ccload-web",
   "private": true,
   "scripts": {
+    "web:test": "node --test web/default/tests/*.test.cjs",
     "web:dev": "npm --prefix web/default run dev",
     "web:build": "npm --prefix web/default run build",
     "web:build:check": "npm --prefix web/default run build:check",

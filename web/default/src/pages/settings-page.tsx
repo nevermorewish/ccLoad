@@ -3,6 +3,7 @@ import { Dialog } from '../components/dialog'
 import { SearchableSelect } from '../components/searchable-select'
 import { getJSON, postJSON } from '../lib/api'
 import { formatDateTime } from '../lib/format'
+import { ReasoningSettingsDialog, parseReasoningConfig } from './reasoning-settings-dialog'
 import { CooldownRulesPanel, advancedFromChannel, advancedToPayload, emptyAdvanced, validateAdvanced, type CooldownRuleDraft } from './channels/advanced-settings-dialog'
 
 type Setting = { key: string; value: string; value_type?: string; default_value?: string; description?: string; editable?: boolean; disabled_reason?: string; configured?: boolean }
@@ -11,7 +12,8 @@ const COOLDOWN_RULES_KEY = 'global_cooldown_detection_rules'
 const FALLBACK_KEY = 'model_multimodal_fallback'
 const PRICING_KEY = 'model_custom_pricing'
 const TYPESAFE_KEY = 'TypeSafe_api_key'
-const MODAL_KEYS = new Set([FALLBACK_KEY, PRICING_KEY])
+const REASONING_KEY = 'reasoning_auto'
+const MODAL_KEYS = new Set([FALLBACK_KEY, PRICING_KEY, REASONING_KEY])
 const BYTE_KEYS = new Set(['max_body_bytes', 'max_image_body_bytes', 'responses_ws_max_transcript_bytes'])
 const OAUTH_URL_KEYS = new Set(['codex_base_url', 'xai_base_url', 'antigravity_url', 'anthropic_base_url'])
 const OAUTH_PLACEHOLDERS: Record<string, string> = { codex_base_url: 'https://chatgpt.com/backend-api/codex/responses', xai_base_url: 'https://cli-chat-proxy.grok.com/v1', antigravity_url: 'https://daily-cloudcode-pa.googleapis.com', anthropic_base_url: 'https://api.anthropic.com' }
@@ -67,6 +69,9 @@ const constraintOf = (setting: Setting) => CONSTRAINTS[setting.key] ?? (setting.
 
 /** 前端校验（旧版 settings.js:validateSettingInput）；返回空串表示通过。值为展示值（字节类为 MiB）。 */
 function validateSetting(setting: Setting, value: string): string {
+  if (setting.key === REASONING_KEY) {
+    try { parseReasoningConfig(value); return '' } catch (cause) { return cause instanceof Error ? cause.message : '动态思考配置无效' }
+  }
   if (SELECT_OPTIONS[setting.key]) return SELECT_OPTIONS[setting.key].some((option) => option.value === value) ? '' : '请从列表中选择'
   if (setting.key === 'channel_test_content' && !value.trim()) return '测试内容不能为空'
   if (OAUTH_URL_KEYS.has(setting.key.toLowerCase())) {
@@ -98,7 +103,7 @@ export function SettingsPage() {
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | null>(null)
-  const [dialog, setDialog] = useState<null | 'runtime' | 'cooldown' | 'fallback' | 'pricing'>(null)
+  const [dialog, setDialog] = useState<null | 'runtime' | 'cooldown' | 'fallback' | 'pricing' | 'reasoning'>(null)
   const [saving, setSaving] = useState(false)
   const [busyAction, setBusyAction] = useState('')
 
@@ -211,6 +216,7 @@ export function SettingsPage() {
         <button className="btn" onClick={() => setDialog('runtime')}>运行状态</button>
         <button className="btn" onClick={() => setDialog('pricing')}>自定义模型价格</button>
         <button className="btn" onClick={() => setDialog('fallback')}>多模态回退</button>
+        <button className="btn" disabled={!byKey.has(REASONING_KEY) || byKey.get(REASONING_KEY)?.editable === false} onClick={() => setDialog('reasoning')}>动态思考等级{dirtyKeys.includes(REASONING_KEY) ? '（待保存）' : ''}</button>
         <button className="btn" disabled={loading} onClick={() => void load()}>刷新</button>
         <button className="btn btn-primary" disabled={saving || !dirtyKeys.length} onClick={() => void saveAll()}>{saving ? '保存中…' : `保存${dirtyKeys.length ? `（${dirtyKeys.length}）` : ''}`}</button>
       </div>
@@ -236,6 +242,7 @@ export function SettingsPage() {
     </section>)}
 
     <RuntimeMetricsDialog open={dialog === 'runtime'} onClose={() => setDialog(null)} />
+    <ReasoningSettingsDialog open={dialog === 'reasoning'} value={drafts[REASONING_KEY] ?? byKey.get(REASONING_KEY)?.value ?? '{}'} onClose={() => setDialog(null)} onApply={(value) => { const setting = byKey.get(REASONING_KEY); if (setting) update(setting, value) }} />
     <GlobalCooldownDialog open={dialog === 'cooldown'} value={drafts[COOLDOWN_RULES_KEY] ?? byKey.get(COOLDOWN_RULES_KEY)?.value ?? '{}'} onClose={() => setDialog(null)} onApply={(value) => { const setting = byKey.get(COOLDOWN_RULES_KEY); if (setting) update(setting, value) }} />
     <FallbackDialog open={dialog === 'fallback'} value={byKey.get(FALLBACK_KEY)?.value ?? '{}'} onClose={() => setDialog(null)} onSaved={(text) => { setNotice({ kind: 'success', text }); void load() }} />
     <PricingDialog open={dialog === 'pricing'} value={byKey.get(PRICING_KEY)?.value ?? '{}'} onClose={() => setDialog(null)} onSaved={(text) => { setNotice({ kind: 'success', text }); void load() }} />

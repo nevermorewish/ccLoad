@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Dialog } from '../../components/dialog'
 import { SearchableSelect } from '../../components/searchable-select'
-import { cooldownDetectionTest, refreshCredential, sub2apiLogin, CREDENTIAL_RESOURCE } from './api'
+import { cooldownDetectionTest, refreshCredential, sub2apiLogin, CREDENTIAL_RESOURCE, usesAPIKeyCredentials } from './api'
 
 // ---------------------------------------------------------------- 草稿类型
 
@@ -183,7 +183,7 @@ type Props = {
 }
 
 export function AdvancedSettingsDialog({ open, draft: initial, channelId, authType, urls, models, oauthCredential, oauthCredentialInfo, onClose, onApply }: Props) {
-  const isOAuth = authType !== 'api_key'
+  const isOAuth = !usesAPIKeyCredentials(authType)
   const [draft, setDraft] = useState<AdvancedDraft>(initial)
   const [tab, setTab] = useState<Tab>('custom')
   const [customTab, setCustomTab] = useState<'headers' | 'body'>('headers')
@@ -262,10 +262,10 @@ export function AdvancedSettingsDialog({ open, draft: initial, channelId, authTy
         <p className="muted">HH:MM；留空表示全天可用，支持跨午夜时段，例如 22:00–08:00。</p>
         <label><input type="checkbox" checked={draft.retry_other_keys_on_failure} onChange={(event) => patch({ retry_other_keys_on_failure: event.target.checked })} /> 渠道故障时优先换 Key 重试</label>
         {/* 检测间隔与检测模型是全局的（/web/monitor 统一设置），渠道只决定是否参与。 */}
-        <label><input type="checkbox" checked={draft.scheduled_check_enabled} onChange={(event) => patch({ scheduled_check_enabled: event.target.checked })} /> 参与定时检测</label>
+        {authType !== 'system_one' && <label><input type="checkbox" checked={draft.scheduled_check_enabled} onChange={(event) => patch({ scheduled_check_enabled: event.target.checked })} /> 参与定时检测</label>}
         <p className="muted">检测间隔与检测模型在「渠道监控」页统一设置；此处只决定该渠道是否参与。</p>
 
-        {!isOAuth && <fieldset className="card">
+        {authType === 'api_key' && <fieldset className="card">
           <legend>管理账户</legend>
           <SearchableSelect ariaLabel="面板类型" className="combobox-inline" value={draft.management.profile} options={PROFILES} onChange={(profile) => patchAccount({ profile })} />
           <p className="muted">选择上游面板类型后可刷新额度，New API 与 Sub2API Pro 还支持签到。</p>

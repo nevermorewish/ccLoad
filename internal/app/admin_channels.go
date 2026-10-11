@@ -1313,6 +1313,10 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 	if !req.oauthQuotaPassthroughSet {
 		req.OAuthQuotaPassthrough = existing.OAuthQuotaPassthrough
 	}
+	// Older editors do not submit this setting; omission must not disable retries.
+	if _, submitted := rawReq["same_channel_retries"]; !submitted {
+		req.SameChannelRetries = existing.SameChannelRetries
+	}
 	rawAuthType := strings.TrimSpace(req.AuthType)
 	if rawAuthType == "" {
 		req.AuthType = existing.GetAuthType()

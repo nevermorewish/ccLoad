@@ -6,7 +6,7 @@ import type { Channel, ChannelURLStat } from '../../types'
 import {
   AUTH_TYPES, URL_PROTOCOLS, checkDuplicate, createChannel, fetchChannelModels, fetchKeyRate, fetchModelsPreview,
   formFromEditor, formToPayload, loadEditor, loadKeys, mergeModelEntries, normalizeModelEntries,
-  runtimeURL, testChannelURL, toggleKey, toggleURL, updateChannel, websocketProbe,
+  runtimeURL, testChannelURL, toggleKey, toggleURL, updateChannel, websocketProbe, usesAPIKeyCredentials,
   type ChannelEditorData, type ChannelForm, type ChannelKeyRow, type ModelEntry,
 } from './api'
 import { AdvancedSettingsDialog, advancedFromChannel, advancedToPayload, emptyAdvanced, validateAdvanced, type AdvancedDraft } from './advanced-settings-dialog'
@@ -17,6 +17,7 @@ type Props = {
   editing: Channel | null
   /** 复制：载入源渠道内容，以新建方式保存，不复制管理账户凭据 */
   duplicateOf?: Channel | null
+  createAuthType?: 'api_key' | 'system_one'
   onClose: () => void
   onSaved: () => void
   onNotice: (value: unknown) => void
@@ -28,11 +29,11 @@ const VIRTUAL_THRESHOLD = 50
 const VIRTUAL_ROW_HEIGHT = 52
 const VIRTUAL_BUFFER = 5
 
-const blankForm = (): ChannelForm => ({ name: '', auth_type: 'api_key', urls: [{ url: '' }], priority: 0, enabled: true, models: [], api_keys: [{ api_key: '', cost_multiplier: 1, priority: 0 }], protocol_transform_mode: 'auto', key_strategy: 'sequential' })
+const blankForm = (authType = 'api_key'): ChannelForm => ({ name: '', auth_type: authType, urls: [{ url: '' }], priority: 0, enabled: true, models: [], api_keys: [{ api_key: '', cost_multiplier: 1, priority: 0 }], protocol_transform_mode: 'auto', key_strategy: 'sequential', same_channel_retries: 0 })
 const keyCooling = (row: ChannelKeyRow) => Number(row.cooldown_until ?? 0) * 1000 > Date.now()
 
-export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSaved, onNotice, onTestModel }: Props) {
-  const [form, setForm] = useState<ChannelForm>(blankForm)
+export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType = 'api_key', onClose, onSaved, onNotice, onTestModel }: Props) {
+  const [form, setForm] = useState<ChannelForm>(() => blankForm(createAuthType))
   const [advanced, setAdvanced] = useState<AdvancedDraft>(emptyAdvanced)
   const [editorData, setEditorData] = useState<ChannelEditorData>({})
   const [urlStats, setUrlStats] = useState<ChannelURLStat[]>([])
@@ -58,7 +59,8 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
 
   const source = duplicateOf ?? editing
   const isCreate = !editing || Boolean(duplicateOf)
-  const isOAuth = form.auth_type !== 'api_key'
+  const isOAuth = !usesAPIKeyCredentials(form.auth_type)
+  const isSystemOne = form.auth_type === 'system_one'
   const keyRows = form.api_keys ?? []
 
   const update = <K extends keyof ChannelForm>(key: K, value: ChannelForm[K]) => { setForm((current) => ({ ...current, [key]: value })); setDirty(true) }
@@ -71,7 +73,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
     if (!open) return
     setError(''); setDirty(false); setSelectedKeys([]); setSelectedModels([]); setSelectedURLs([]); setModelKeyword(''); setKeyFilter('all'); setDuplicateHint([]); setDialog(null)
     if (!source) {
-      setForm(blankForm()); setAdvanced(emptyAdvanced()); setEditorData({}); setUrlStats([])
+      setForm(blankForm(createAuthType)); setAdvanced(emptyAdvanced()); setEditorData({}); setUrlStats([])
       return
     }
     let cancelled = false
@@ -91,7 +93,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
     }).catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : '编辑器加载失败') })
       .finally(() => { if (!cancelled) setBusy(false) })
     return () => { cancelled = true }
-  }, [open, source, duplicateOf])
+  }, [open, source, duplicateOf, createAuthType])
 
   // 新建时 URL 输入 350ms 防抖预览重复渠道。
   useEffect(() => {
@@ -112,6 +114,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
     if (!form.urls.some((item) => item.url.trim())) { setError('请至少填写一个上游 URL'); return }
     if (!isOAuth && !keyRows.some((row) => row.api_key.trim())) { setError('请至少填写一个 API Key'); return }
     if (!form.models.length) { setError('请至少配置一个模型'); return }
+    if (!Number.isInteger(form.same_channel_retries ?? 0) || Number(form.same_channel_retries) < 0 || Number(form.same_channel_retries) > 10) { setError('同渠道重试次数必须为 0–10 的整数'); return }
     const problem = validateAdvanced(advanced)
     if (problem) { setError(`高级设置：${problem.message}`); setDialog('advanced'); return }
     if (isCreate) {
@@ -119,8 +122,8 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
       const duplicates = (await checkDuplicate(urls).catch(() => ({ duplicates: [] }))).duplicates ?? []
       if (duplicates.length && !window.confirm(`以下渠道已使用相同 URL：${duplicates.map((item) => item.name).join('、')}。仍要保存吗？`)) return
     }
-    const extra = advancedToPayload(advanced, isOAuth)
-    const payload = { ...formToPayload(form, isOAuth, { customRules: extra.custom_request_rules, cooldownRules: extra.cooldown_detection_rules, management: extra.management_account }), ...extra }
+    const extra = advancedToPayload(advanced, form.auth_type !== 'api_key')
+    const payload = formToPayload({ ...form, ...extra }, { customRules: extra.custom_request_rules, cooldownRules: extra.cooldown_detection_rules, management: extra.management_account })
     setBusy(true)
     try {
       if (editing && !duplicateOf) await updateChannel(editing.id, payload)
@@ -144,7 +147,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
       const usable = keyRows.map((row, index) => ({ row, index })).filter(({ row }) => row.api_key.trim() && !row.disabled && !keyCooling(row))
       if (!urls.length || !usable.length) { setError('需要至少一个 URL 与一个可用 Key'); return }
       const apiKeys = keyRows.map((row, index) => usable.some((item) => item.index === index) ? row.api_key.trim() : '')
-      const result = await fetchModelsPreview({ urls, api_keys: apiKeys, per_key: true, proxy_url: advanced.proxy_url.trim() || undefined })
+      const result = await fetchModelsPreview({ auth_type: form.auth_type, urls, api_keys: apiKeys, per_key: true, proxy_url: advanced.proxy_url.trim() || undefined })
       const merged = mergeModelEntries(form.models, toEntries(result.models))
       const perKey = (result.key_models ?? []).filter((item) => !item.error && item.models?.length)
       // 多 Key 时询问是否把探测结果写回各 Key 的模型范围；单 Key 不写。
@@ -227,7 +230,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
     if (!editing || duplicateOf) return
     const model = form.models[0]?.model
     if (!model) { setError('请先配置模型'); return }
-    try { onNotice(await testChannelURL(editing.id, { model, stream: true, content: 'test', client_protocol: 'anthropic', key_index: 0, base_url: runtimeURL(form.urls[index]) })) }
+    try { onNotice(await testChannelURL(editing.id, { model, stream: !isSystemOne, content: 'test', ...(isSystemOne ? {} : { client_protocol: 'anthropic' }), key_index: 0, base_url: runtimeURL(form.urls[index]) })) }
     catch (cause) { setError(cause instanceof Error ? cause.message : '测试失败') }
   }
   const probeWebsocket = async () => {
@@ -257,8 +260,8 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
       title={duplicateOf ? '复制渠道' : editing ? `编辑渠道：${editing.name}` : '添加渠道'}
       description={isOAuth ? 'OAuth 渠道的认证方式与凭证由登录/导入流程管理，此处只调整路由、限制与倍率' : undefined}
       footer={<>
-        <label><input type="checkbox" checked={Boolean(form.websockets)} onChange={(event) => update('websockets', event.target.checked)} /> 支持 WS</label>
-        <button className="btn" disabled={wsProbing} onClick={() => void probeWebsocket()}>{wsProbing ? '检测中…' : '检测'}</button>
+        {!isSystemOne && <><label><input type="checkbox" checked={Boolean(form.websockets)} onChange={(event) => update('websockets', event.target.checked)} /> 支持 WS</label>
+        <button className="btn" disabled={wsProbing} onClick={() => void probeWebsocket()}>{wsProbing ? '检测中…' : '检测'}</button></>}
         <label className="muted">优先级<input className="input compact" type="number" min={-99999} max={9999999} value={form.priority} onChange={(event) => update('priority', Number(event.target.value))} /></label>
         <label className="muted">RPM<input className="input compact" type="number" min={0} value={Number(form.rpm_limit ?? 0)} onChange={(event) => update('rpm_limit', Number(event.target.value))} /></label>
         <label className="muted">并发<input className="input compact" type="number" min={0} value={Number(form.max_concurrency ?? 0)} onChange={(event) => update('max_concurrency', Number(event.target.value))} /></label>
@@ -273,9 +276,10 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
       <div className="toolbar">
         <input className="input wide" value={form.name} onChange={(event) => update('name', event.target.value)} placeholder="渠道名称" aria-label="渠道名称" />
         {isCreate && <button className="btn" title="从 JSON、环境变量或 URL/Key 文本一键填充" onClick={() => setDialog('quickAdd')}>✨ 一键填充</button>}
-        {/* 新建只允许 API Key：后端拒绝以 OAuth 类型创建渠道（admin_channels.go:handleCreateChannel）。 */}
+        {/* 类型由创建入口决定；保存后保持认证类型不变。 */}
         <SearchableSelect ariaLabel="认证类型" className="combobox-inline" value={form.auth_type} disabled options={AUTH_TYPES} onChange={() => undefined} />
-        <SearchableSelect ariaLabel="协议处理" className="combobox-inline" value={String(form.protocol_transform_mode ?? 'auto')} options={[{ value: 'auto', label: '协议处理：自动（原生优先）' }, { value: 'upstream', label: '协议处理：上游直通' }, { value: 'local', label: '协议处理：ccLoad 转换' }]} onChange={(value) => update('protocol_transform_mode', value)} />
+        {!isSystemOne && <SearchableSelect ariaLabel="协议处理" className="combobox-inline" value={String(form.protocol_transform_mode ?? 'auto')} options={[{ value: 'auto', label: '协议处理：自动（原生优先）' }, { value: 'upstream', label: '协议处理：上游直通' }, { value: 'local', label: '协议处理：ccLoad 转换' }]} onChange={(value) => update('protocol_transform_mode', value)} />}
+        <label className="muted">同渠道重试<input className="input compact" type="number" min={0} max={10} step={1} value={Number(form.same_channel_retries ?? 0)} onChange={(event) => update('same_channel_retries', Number(event.target.value))} /></label>
       </div>
 
       {/* ---------------- URL ---------------- */}
@@ -296,7 +300,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
             return <tr key={index}>
               <td><input type="checkbox" checked={selectedURLs.includes(index)} onChange={(event) => setSelectedURLs((current) => event.target.checked ? [...current, index] : current.filter((item) => item !== index))} /></td>
               <td><input className="input wide" value={entry.url} onChange={(event) => setURL(index, { url: event.target.value })} placeholder="https://api.example.com" /></td>
-              <td><SearchableSelect ariaLabel="URL 协议" className="combobox-inline" value={entry.protocols?.[0] ?? ''} options={URL_PROTOCOLS} onChange={(value) => setURL(index, { protocols: value ? [value] : [] })} /></td>
+              <td>{isSystemOne ? <span className="muted">System One</span> : <SearchableSelect ariaLabel="URL 协议" className="combobox-inline" value={entry.protocols?.[0] ?? ''} options={URL_PROTOCOLS} onChange={(value) => setURL(index, { protocols: value ? [value] : [] })} />}</td>
               <td><input type="checkbox" title="使用原样 URL，不追加路径" checked={Boolean(entry.exact)} onChange={(event) => setURL(index, { exact: event.target.checked })} /></td>
               <td>{!stat ? <span className="badge badge-muted">未知</span> : stat.disabled ? <span className="badge badge-bad">已禁用</span> : stat.cooled_down ? <span className="badge badge-warn">冷却 {Math.ceil(Number(stat.cooldown_remain_ms ?? 0) / 1000)}s</span> : <span className="badge badge-good">正常</span>}</td>
               <td>{latency == null || latency < 0 ? '-' : `${Math.round(latency)}ms`}</td>
@@ -417,7 +421,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, onClose, onSav
       <ConfirmDialog open={dialog === 'deleteKeys'} title="删除 API Key" danger message={`确定删除选中的 ${selectedKeys.length} 个 Key 吗？保存渠道后生效。`} onClose={() => setDialog(null)} onConfirm={() => { removeKeys(selectedKeys); setDialog(null) }} />
       <ConfirmDialog open={dialog === 'deleteModels'} title="删除模型" danger message={`确定删除选中的 ${selectedModels.length} 个模型吗？保存渠道后生效。`} onClose={() => setDialog(null)} onConfirm={() => { const drop = new Set(selectedModels); update('models', form.models.filter((_, index) => !drop.has(index))); setSelectedModels([]); setDialog(null) }} />
       <ModelPricingDialog open={pricingIndex !== null} entry={pricingIndex === null ? null : form.models[pricingIndex] ?? null} onClose={() => setPricingIndex(null)} onApply={(pricing) => { if (pricingIndex !== null) setModel(pricingIndex, { pricing }) }} />
-      <KeyScopeDialog open={scopeKeyIndex !== null} row={scopeKeyIndex === null ? null : keyRows[scopeKeyIndex] ?? null} options={modelOptions} urls={form.urls} proxyURL={advanced.proxy_url} onClose={() => setScopeKeyIndex(null)} onApply={(patch) => { if (scopeKeyIndex !== null) setKey(scopeKeyIndex, patch) }} />
+      <KeyScopeDialog open={scopeKeyIndex !== null} row={scopeKeyIndex === null ? null : keyRows[scopeKeyIndex] ?? null} options={modelOptions} urls={form.urls} authType={form.auth_type} proxyURL={advanced.proxy_url} onClose={() => setScopeKeyIndex(null)} onApply={(patch) => { if (scopeKeyIndex !== null) setKey(scopeKeyIndex, patch) }} />
     </Dialog>
   )
 }
@@ -429,7 +433,7 @@ function toEntries(models: Array<string | ModelEntry> | undefined): ModelEntry[]
 // ---------------------------------------------------------------- Key 模型范围
 
 /** Key 模型范围：允许全部 / 指定模型（可搜索多选）；探测会用该 Key 实际拉取模型并勾选命中项。 */
-function KeyScopeDialog({ open, row, options, urls, proxyURL, onClose, onApply }: { open: boolean; row: ChannelKeyRow | null; options: Array<{ value: string; label: string }>; urls: ChannelForm['urls']; proxyURL: string; onClose: () => void; onApply: (patch: Partial<ChannelKeyRow>) => void }) {
+function KeyScopeDialog({ open, row, options, urls, authType, proxyURL, onClose, onApply }: { open: boolean; row: ChannelKeyRow | null; options: Array<{ value: string; label: string }>; urls: ChannelForm['urls']; authType: string; proxyURL: string; onClose: () => void; onApply: (patch: Partial<ChannelKeyRow>) => void }) {
   const [allowAll, setAllowAll] = useState(true)
   const [values, setValues] = useState<string[]>([])
   const [detected, setDetected] = useState<string[] | undefined>(undefined)
@@ -448,7 +452,7 @@ function KeyScopeDialog({ open, row, options, urls, proxyURL, onClose, onApply }
     if (!targets.length) { setStatus('请先填写 URL'); return }
     setBusy(true); setStatus('探测中…')
     try {
-      const result = await fetchModelsPreview({ urls: targets, api_keys: [row.api_key.trim()], per_key: true, proxy_url: proxyURL.trim() || undefined })
+      const result = await fetchModelsPreview({ auth_type: authType, urls: targets, api_keys: [row.api_key.trim()], per_key: true, proxy_url: proxyURL.trim() || undefined })
       const upstream = new Set((result.key_models?.[0]?.models ?? toEntries(result.models)).flatMap((entry) => [entry.model, entry.redirect_model].filter(Boolean).map((name) => String(name).toLowerCase())))
       const hits = options.filter((item) => upstream.has(item.value.toLowerCase())).map((item) => item.value)
       if (!hits.length) { setStatus('该 Key 未探测到任何已配置模型'); return }

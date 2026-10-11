@@ -76,6 +76,7 @@ docker-build:
 
 web-test: www-setup
 	@node --test web/assets/js/*.test.js www/build.test.mjs
+	@npm run web:test
 
 web-build:
 	@npm ci && npm --prefix web/default ci && npm run web:build

@@ -6,6 +6,8 @@ import { getSession, getToken } from '../lib/auth'
 import { formatCompact, formatSeconds, formatUSD } from '../lib/format'
 import type { Channel, Session } from '../types'
 import { ChannelEditorDialog } from './channels/channel-editor-dialog'
+import { channelTestPayload } from './channels/api'
+import { RoutePreviewDialog } from './route-preview-dialog'
 
 type Entry = { model: string; redirect_model?: string; disabled?: boolean }
 type TestMode = 'channel' | 'model' | 'chat' | 'image'
@@ -97,6 +99,7 @@ export function ModelTestPage() {
   const [modelSelected, setModelSelected] = useState<string[]>([])
   const [editor, setEditor] = useState<{ id: number; name: string } | null>(null)
   const [upstream, setUpstream] = useState<Record<string, unknown> | null>(null)
+  const [previewOpen, setPreviewOpen] = useState(false)
   // 聊天
   const [chat, setChat] = useState<ChatMessage[]>(savedChat.messages)
   const [sessionId, setSessionId] = useState(savedChat.sessionId)
@@ -176,12 +179,13 @@ export function ModelTestPage() {
   const runSingle = async () => {
     if (!channelId || !model) { setError('请选择渠道与模型'); return }
     setBusy(true); setError(''); setResult(null)
-    try { setResult(await postJSON(`/admin/channels/${channelId}/test`, body(model))) }
+    try { setResult(await postJSON(`/admin/channels/${channelId}/test`, channelTestPayload(current?.auth_type, body(model)))) }
     catch (cause) { setError(cause instanceof Error ? cause.message : '测试失败') }
     finally { setBusy(false) }
   }
   const runChat = async () => {
     if (!channelId || !model) { setError('请选择渠道与模型'); return }
+    if (current?.auth_type === 'system_one') { setError('决策渠道请使用按渠道测试，不支持聊天'); return }
     const text = chatInput.trim()
     if (!text && !pendingImages.length) return
     const userContent: string | ChatBlock[] = pendingImages.length ? [...(text ? [{ type: 'text' as const, text }] : []), ...pendingImages.map((item) => ({ type: 'image_url' as const, image_url: { url: item.dataUrl } }))] : text
@@ -235,6 +239,7 @@ export function ModelTestPage() {
   }
   const runImage = async () => {
     if (!channelId || !model) { setError('请选择渠道与模型'); return }
+    if (current?.auth_type === 'system_one') { setError('决策渠道不支持生图'); return }
     if (!prompt.trim()) { setError('请填写提示词'); return }
     setBusy(true); setError(''); setResult(null)
     try {
@@ -270,7 +275,7 @@ export function ModelTestPage() {
         try {
           const targetKeys = await getJSON<Key[]>(`/admin/channels/${target.channelId}/keys`).catch(() => [])
           const usable = targetKeys.find((item) => !item.disabled)?.key_index
-          const payload = { ...body(target.model, false), ...(usable == null ? {} : { key_index: usable }) }
+          const payload = channelTestPayload(channelRows.find((channel) => channel.id === target.channelId)?.auth_type, { ...body(target.model, false), ...(usable == null ? {} : { key_index: usable }) })
           const value = await postJSON<Record<string, unknown>>(`/admin/channels/${target.channelId}/test`, payload)
           update({ status: value?.success === false ? 'failed' : 'done', result: value, error: value?.success === false ? String(value?.error ?? value?.message ?? '') : undefined })
         } catch (cause) { update({ status: 'failed', error: cause instanceof Error ? cause.message : '测试失败' }) }
@@ -324,7 +329,7 @@ export function ModelTestPage() {
   return <>
     <header className="page-header">
       <div><h1>模型测试</h1><p className="muted">按渠道或按模型批量测试连通性、对话与生图</p></div>
-      <div className="toolbar" style={{ marginBottom: 0 }}><button className="btn" onClick={() => setAdvancedOpen(true)}>高级参数</button></div>
+      <div className="toolbar" style={{ marginBottom: 0 }}><button className="btn" onClick={() => setPreviewOpen(true)}>路由预演</button><button className="btn" onClick={() => setAdvancedOpen(true)}>高级参数</button></div>
     </header>
 
     <div className="toolbar" role="tablist">
@@ -336,9 +341,9 @@ export function ModelTestPage() {
     <div className="toolbar">
       <SearchableSelect ariaLabel="渠道" className="combobox-inline" value={channelId === '' ? '' : String(channelId)} options={[{ value: '', label: '选择渠道' }, ...channelRows.map((row) => ({ value: String(row.id), label: `${row.name}${row.enabled === false ? '（已停用）' : ''}` }))]} onChange={(value) => { setChannelId(value === '' ? '' : Number(value)); setModel('') }} />
       {mode !== 'model' && <SearchableSelect ariaLabel="模型" className="combobox-inline" options={configuredModels.map((name) => ({ value: name, label: name }))} value={model} onChange={setModel} placeholder={configuredModels.length ? '选择模型' : '该渠道暂无模型'} />}
-      <SearchableSelect ariaLabel="请求协议" className="combobox-inline" value={protocol} options={CLIENT_PROTOCOLS} onChange={setProtocol} />
+      {current?.auth_type !== 'system_one' && <SearchableSelect ariaLabel="请求协议" className="combobox-inline" value={protocol} options={CLIENT_PROTOCOLS} onChange={setProtocol} />}
       <SearchableSelect ariaLabel="API Key" className="combobox-inline" value={keyIndex} options={[{ value: '', label: '自动选择 Key' }, ...keys.slice(0, 10).map((key) => ({ value: String(key.key_index), label: `#${Number(key.key_index) + 1} ${maskKey(key.api_key)}${key.note ? `（${key.note}）` : ''}×${key.cost_multiplier ?? 1}` }))]} onChange={setKeyIndex} />
-      <label><input type="checkbox" checked={stream} onChange={(event) => setStream(event.target.checked)} /> 流式</label>
+      {current?.auth_type !== 'system_one' && <label><input type="checkbox" checked={stream} onChange={(event) => setStream(event.target.checked)} /> 流式</label>}
       {mode === 'image' && <button className="btn btn-primary" disabled={busy || !channelId || !model} onClick={() => void runImage()}>{busy ? '生成中…' : '生成图片'}</button>}
     </div>
     {error && <div className="card error-text" role="alert">{error}</div>}
@@ -442,6 +447,7 @@ export function ModelTestPage() {
     {result != null && mode !== 'image' && <section className="card"><div className="job-summary" style={{ marginTop: 0 }}><strong>最近结果</strong><button className="link-button" onClick={() => setResult(null)}>关闭</button></div><pre className="result-pre">{JSON.stringify(result, null, 2)}</pre></section>}
 
     <AdvancedDialog open={advancedOpen} value={advanced} onClose={() => setAdvancedOpen(false)} onApply={(next) => { setAdvanced(next); setAdvancedOpen(false) }} />
+    <RoutePreviewDialog open={previewOpen} channels={channelRows} onClose={() => setPreviewOpen(false)} onEditChannel={(channel) => { setPreviewOpen(false); setEditor(channel) }} />
     <ChannelEditorDialog open={editor !== null} editing={editor} onClose={() => setEditor(null)} onSaved={() => { void getJSON<Channel[]>('/admin/channels').then((value) => setChannelRows(Array.isArray(value) ? value : [])) }} onNotice={(value) => setError(typeof value === 'object' && value && 'error' in value ? String((value as { error: unknown }).error) : '')} onTestModel={() => undefined} />
     <UpstreamDialog open={upstream !== null} data={upstream} onClose={() => setUpstream(null)} />
   </>

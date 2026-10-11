@@ -44,6 +44,7 @@ export type ChannelForm = {
   websockets?: boolean
   protocol_transform_mode?: string
   retry_other_keys_on_failure?: boolean
+  same_channel_retries?: number
   daily_cost_limit?: number
   scheduled_check_enabled?: boolean
   scheduled_check_model?: string
@@ -58,6 +59,7 @@ export type ChannelForm = {
 
 export const AUTH_TYPES = [
   { value: 'api_key', label: 'API Key' },
+  { value: 'system_one', label: '决策渠道（System One）' },
   { value: 'codex_oauth', label: 'Codex OAuth' },
   { value: 'anthropic_oauth', label: 'Anthropic OAuth' },
   { value: 'antigravity_oauth', label: 'Antigravity OAuth' },
@@ -67,6 +69,15 @@ export const AUTH_TYPES = [
   { value: 'zed_oauth', label: 'Zed OAuth' },
   { value: 'cursor_oauth', label: 'Cursor OAuth' },
 ]
+
+export const usesAPIKeyCredentials = (authType?: string) => !authType || authType === 'api_key' || authType === 'system_one'
+
+/** System One tests must omit the chat protocol, including when testing a URL or a batch. */
+export function channelTestPayload(authType: string | undefined, body: Record<string, unknown>): Record<string, unknown> {
+  if (authType !== 'system_one') return body
+  const { client_protocol: _protocol, ...rest } = body
+  return { ...rest, stream: false }
+}
 
 /** 协议转换模式只接受 auto/upstream/local（internal/model/config.go:NormalizeProtocolTransformMode）。 */
 export const PROTOCOL_MODES = [
@@ -131,6 +142,7 @@ export function formFromEditor(data: ChannelEditorData, fallback: Channel): Chan
     websockets: Boolean(raw.websockets),
     protocol_transform_mode: String(raw.protocol_transform_mode ?? 'auto'),
     retry_other_keys_on_failure: Boolean(raw.retry_other_keys_on_failure),
+    same_channel_retries: Number(raw.same_channel_retries ?? 0),
     daily_cost_limit: Number(raw.daily_cost_limit ?? 0),
     scheduled_check_enabled: Boolean(raw.scheduled_check_enabled),
     scheduled_check_model: String(raw.scheduled_check_model ?? ''),
@@ -149,7 +161,7 @@ export function formFromEditor(data: ChannelEditorData, fallback: Channel): Chan
  *   仅用于回传倍率。
  * - API Key 渠道：携带完整 Key 元数据与 management_account。
  */
-export function formToPayload(form: ChannelForm, isOAuth: boolean, extras: { customRules: unknown; cooldownRules: unknown; management: unknown }): Record<string, unknown> {
+export function formToPayload(form: ChannelForm, extras: { customRules: unknown; cooldownRules: unknown; management: unknown }): Record<string, unknown> {
   const models = form.models.map((entry) => ({ ...entry, model: String(entry.model ?? '').trim() })).filter((entry) => entry.model)
   const keys = (form.api_keys ?? []).map((entry) => ({ ...entry, api_key: String(entry.api_key ?? '').trim() })).filter((entry) => entry.api_key)
   const { key_strategy: keyStrategy, management_account: _managementAccount, custom_request_rules: _customRules, cooldown_detection_rules: _cooldownRules, ...rest } = form
@@ -160,7 +172,7 @@ export function formToPayload(form: ChannelForm, isOAuth: boolean, extras: { cus
     custom_request_rules: extras.customRules ?? null,
     cooldown_detection_rules: extras.cooldownRules ?? null,
   }
-  if (isOAuth) {
+  if (!usesAPIKeyCredentials(form.auth_type)) {
     const synthetic = keys.slice(0, 1).map((entry) => ({ api_key: entry.api_key, cost_multiplier: entry.cost_multiplier }))
     payload.api_keys = synthetic
     payload.api_key = synthetic.map((entry) => entry.api_key).join(',')
@@ -169,7 +181,12 @@ export function formToPayload(form: ChannelForm, isOAuth: boolean, extras: { cus
   payload.api_keys = keys.map(({ cooldown_until: _cooldownUntil, cooldown_remaining_ms: _cooldownRemaining, key_index: _keyIndex, disabled: _disabled, ...entry }) => entry)
   payload.api_key = keys.map((entry) => entry.api_key).join(',')
   payload.key_strategy = keyStrategy || 'sequential'
-  payload.management_account = extras.management ?? { profile: '' }
+  if (form.auth_type === 'api_key') payload.management_account = extras.management ?? { profile: '' }
+  if (form.auth_type === 'system_one') {
+    payload.urls = form.urls.map(({ protocols: _protocols, ...url }) => url)
+    payload.websockets = false
+    payload.scheduled_check_enabled = false
+  }
   return payload
 }
 

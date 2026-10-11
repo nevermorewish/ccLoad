@@ -115,8 +115,14 @@ jobs:
         with:
           node-version: '26'
 
+      - name: Install frontend test dependencies
+        run: npm ci && npm --prefix web/default ci
+
       - name: Verify web assets
         run: make verify-web
+
+      - name: Check React types and production build
+        run: npm run web:build:check
 
   lint:
     name: Lint
