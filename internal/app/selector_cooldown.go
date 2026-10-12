@@ -490,7 +490,7 @@ func (s *Server) modelRowApplicable(cfg *modelpkg.Config, selected modelRoutingS
 	if cfg.AntigravityCredits {
 		return antigravityClaudeModel(geminiModel) && quotaUntil.After(now)
 	}
-	return cfg.CooldownFallback || !quotaUntil.After(now)
+	return !s.autoCooldownEnabled() || cfg.CooldownFallback || !quotaUntil.After(now)
 }
 
 // modelRowWithKeysReadyAt evaluates complete protocol/Key combinations. A
@@ -508,7 +508,7 @@ func (s *Server) modelRowWithKeysReadiness(cfg *modelpkg.Config, selected modelR
 	for _, upstream := range protocols {
 		actual := s.resolveFinalUpstreamModel(cfg, selected, string(upstream))
 		modelUntil := cooldowns[actual]
-		if !modelUntil.After(now) {
+		if !s.autoCooldownEnabled() || !modelUntil.After(now) {
 			modelUntil = time.Time{}
 		}
 		if keys == nil {
@@ -525,7 +525,7 @@ func (s *Server) modelRowWithKeysReadiness(cfg *modelpkg.Config, selected modelR
 			}
 			readyAt := modelUntil
 			combinationReason := "model_cooldown"
-			if key.IsCoolingDown(now) {
+			if s.autoCooldownEnabled() && key.IsCoolingDown(now) {
 				if until := time.Unix(key.CooldownUntil, 0); until.After(readyAt) {
 					readyAt = until
 					combinationReason = "all_keys_cooling"
@@ -543,7 +543,7 @@ func (s *Server) modelRowWithKeysReadiness(cfg *modelpkg.Config, selected modelR
 			found = true
 		}
 	}
-	if found && !cfg.AntigravityCredits && !cfg.CooldownFallback {
+	if found && s.autoCooldownEnabled() && !cfg.AntigravityCredits && !cfg.CooldownFallback {
 		actual := s.resolveFinalUpstreamModel(cfg, selected, string(protocol.Gemini))
 		if until := s.antigravityCredentials.standardQuotaUntil(cfg, actual); until.After(now) && until.After(earliest) {
 			earliest = until

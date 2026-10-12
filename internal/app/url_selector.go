@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ccLoad/internal/model"
@@ -41,18 +42,25 @@ type urlRequestCount struct {
 
 // URLSelector 基于EWMA延迟和冷却状态选择最优URL
 type URLSelector struct {
-	mu           sync.RWMutex
-	latencies    map[urlKey]*ewmaValue
-	cooldowns    map[urlKey]urlCooldownState
-	requests     map[urlKey]*urlRequestCount
-	disabled     map[urlKey]bool // 手动禁用的URL（启动时从 channel_url_states 回填）
-	alpha        float64         // EWMA权重因子
-	cooldownBase time.Duration   // 基础冷却时间
-	cooldownMax  time.Duration   // 最大冷却时间
+	autoCooldownDisabled atomic.Bool
+	mu                   sync.RWMutex
+	latencies            map[urlKey]*ewmaValue
+	cooldowns            map[urlKey]urlCooldownState
+	requests             map[urlKey]*urlRequestCount
+	disabled             map[urlKey]bool // 手动禁用的URL（启动时从 channel_url_states 回填）
+	alpha                float64         // EWMA权重因子
+	cooldownBase         time.Duration   // 基础冷却时间
+	cooldownMax          time.Duration   // 最大冷却时间
 	// 低频清理调度，避免 map 长期只增不减。
 	cleanupInterval time.Duration
 	latencyMaxAge   time.Duration
 	nextCleanup     time.Time
+}
+
+// SetAutoCooldownEnabled leaves latency, failure counters and manually disabled
+// URLs intact. Existing cooldowns are ignored while the policy is disabled.
+func (s *URLSelector) SetAutoCooldownEnabled(enabled bool) {
+	s.autoCooldownDisabled.Store(!enabled)
 }
 
 func normalizeLatencyMS(ttfb time.Duration) float64 {
@@ -212,7 +220,7 @@ func (s *URLSelector) SelectURL(channelID int64, urls []string) (string, int) {
 		if e, ok := s.latencies[key]; ok {
 			c.latency = e.value
 		}
-		if cd, ok := s.cooldowns[key]; ok && now.Before(cd.until) {
+		if cd, ok := s.cooldowns[key]; !s.autoCooldownDisabled.Load() && ok && now.Before(cd.until) {
 			c.cooled = true
 		}
 		candidates = append(candidates, c)
@@ -358,6 +366,9 @@ func (s *URLSelector) LoadPersistedStats(stats []model.ChannelURLLogStat) {
 
 // CooldownURL 对URL施加指数退避冷却
 func (s *URLSelector) CooldownURL(channelID int64, url string) {
+	if s.autoCooldownDisabled.Load() {
+		return
+	}
 	key := urlKey{channelID: channelID, url: url}
 
 	s.mu.Lock()
@@ -398,7 +409,7 @@ func (s *URLSelector) IsCooledDown(channelID int64, url string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cd, ok := s.cooldowns[key]
-	return ok && time.Now().Before(cd.until)
+	return !s.autoCooldownDisabled.Load() && ok && time.Now().Before(cd.until)
 }
 
 // URLStat 单个URL的运行时状态快照
@@ -429,7 +440,7 @@ func (s *URLSelector) GetURLStats(channelID int64, urls []string) []URLStat {
 		if e, ok := s.latencies[key]; ok {
 			st.LatencyMs = e.value
 		}
-		if cd, ok := s.cooldowns[key]; ok && now.Before(cd.until) {
+		if cd, ok := s.cooldowns[key]; !s.autoCooldownDisabled.Load() && ok && now.Before(cd.until) {
 			st.CooledDown = true
 			st.CooldownRemainMs = cd.until.Sub(now).Milliseconds()
 		}
@@ -479,7 +490,7 @@ func (s *URLSelector) SortURLs(channelID int64, urls []string) []sortedURL {
 		if e, ok := s.latencies[key]; ok {
 			c.latency = e.value
 		}
-		if cd, ok := s.cooldowns[key]; ok && now.Before(cd.until) {
+		if cd, ok := s.cooldowns[key]; !s.autoCooldownDisabled.Load() && ok && now.Before(cd.until) {
 			c.cooled = true
 		}
 		candidates = append(candidates, c)

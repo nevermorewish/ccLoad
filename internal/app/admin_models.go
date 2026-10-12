@@ -893,6 +893,7 @@ func (s *Server) fetchModelsForChannel(
 	}
 
 	keys, err := s.store.GetAPIKeys(ctx, cfg.ID)
+	keys = s.keysWithEffectiveCooldowns(keys)
 	if err != nil {
 		return nil, fmt.Errorf("该渠道没有可用的API Key")
 	}

@@ -74,6 +74,7 @@ These settings live in the database and are managed from `/web/settings.html`. S
 | `http_read_timeout_seconds` | `0` | Downstream request read timeout in seconds; `0` uses the built-in 120-second default. It covers the complete request header/body read, returns 408 on timeout, and is independent of body-size limits. |
 | `max_body_bytes` | `33554432` | Max request body bytes, 32MB by default |
 | `max_image_body_bytes` | `20971520` | Max Images API request body bytes, 20MB by default |
+| `cooldown_enabled` | `true` | Master switch for automatic channel, model, Key and URL cooldowns. When disabled, no new cooldowns are recorded and existing cooldowns are ignored; request retries, failover and manual disablement still apply. Saving uses the normal settings restart flow. Stored cooldowns are retained and unexpired ones apply again after re-enabling |
 | `cooldown_auth_seconds` | `300` | Auth error (401/402/403) initial cooldown in seconds |
 | `cooldown_server_seconds` | `120` | Server error (5xx) initial cooldown in seconds |
 | `cooldown_timeout_seconds` | `60` | Timeout error (597/598) initial cooldown in seconds |

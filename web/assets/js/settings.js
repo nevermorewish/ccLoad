@@ -1834,6 +1834,7 @@ function getSettingOrder(key) {
     max_body_bytes: 201,
     max_image_body_bytes: 202,
     http_read_timeout_seconds: 203,
+    cooldown_enabled: 299,
     cooldown_fallback_enabled: 300,
     cooldown_auth_seconds: 301,
     cooldown_server_seconds: 302,

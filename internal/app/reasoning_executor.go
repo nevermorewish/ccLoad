@@ -80,7 +80,7 @@ func (s *Server) executeReasoningDecision(parent context.Context, transcript, pr
 		return result, errors.New("reasoning decision capacity reached")
 	}
 	channel, err := s.store.GetConfig(ctx, s.reasoningAuto.DecisionChannelID)
-	if err != nil || channel == nil || !channel.Enabled || channel.IsCoolingDown(time.Now()) {
+	if err != nil || channel == nil || !channel.Enabled || (s.autoCooldownEnabled() && channel.IsCoolingDown(time.Now())) {
 		return result, errors.New("reasoning decision channel unavailable")
 	}
 	if channel.DailyCostLimit > 0 && s.costCache != nil && s.costCache.Get(channel.ID) >= channel.DailyCostLimit {

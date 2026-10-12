@@ -205,14 +205,16 @@ func (s *Server) handleAntigravityQuotaFailure(ctx context.Context, cfg *model.C
 	}
 	reason, delay := antigravityLimitDetails(res.Body)
 	if reason == "RATE_LIMIT_EXCEEDED" && delay > 0 {
-		writeCtx, cancel := cooldownWriteContext(ctx)
-		defer cancel()
-		// The existing cooldown store has second precision. Round up, never release early.
-		until := time.Now().Add(delay).Truncate(time.Second).Add(time.Second)
-		if err := s.store.SetModelCooldown(writeCtx, cfg.ID, modelName, until); err != nil {
-			log.Printf("[WARN] Antigravity rate cooldown persistence failed: channel_id=%d err=%v", cfg.ID, err)
+		if s.autoCooldownEnabled() {
+			writeCtx, cancel := cooldownWriteContext(ctx)
+			defer cancel()
+			// The existing cooldown store has second precision. Round up, never release early.
+			until := time.Now().Add(delay).Truncate(time.Second).Add(time.Second)
+			if err := s.store.SetModelCooldown(writeCtx, cfg.ID, modelName, until); err != nil {
+				log.Printf("[WARN] Antigravity rate cooldown persistence failed: channel_id=%d err=%v", cfg.ID, err)
+			}
+			s.invalidateChannelRelatedCache(cfg.ID)
 		}
-		s.invalidateChannelRelatedCache(cfg.ID)
 	} else {
 		if reason != "QUOTA_EXHAUSTED" && (!cfg.AntigravityCredits || reason != "INSUFFICIENT_G1_CREDITS_BALANCE") {
 			return nil, false

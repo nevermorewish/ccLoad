@@ -76,6 +76,7 @@ export CCLOAD_ENABLE_SQLITE_REPLICA=1
 | `http_read_timeout_seconds` | `0` | 下游请求读取超时（秒）；`0` 使用内建 120 秒。覆盖请求头和请求体的完整读取，超时返回 408，与请求体大小限制独立。 |
 | `max_body_bytes` | `33554432` | 请求体最大字节数，默认 32MB |
 | `max_image_body_bytes` | `20971520` | Images API 请求体最大字节数，默认 20MB |
+| `cooldown_enabled` | `true` | 自动冷却总开关。关闭后停止产生渠道、模型、Key 和 URL 冷却，并忽略已有冷却；请求内错误重试、故障切换以及手动禁用仍生效。保存后按系统设置流程自动重启生效；已有记录不删除，再开启后未过期记录恢复生效 |
 | `cooldown_auth_seconds` | `300` | 认证错误（401/402/403）初始冷却时间（秒） |
 | `cooldown_server_seconds` | `120` | 服务器错误（5xx）初始冷却时间（秒） |
 | `cooldown_timeout_seconds` | `60` | 超时错误（597/598）初始冷却时间（秒） |

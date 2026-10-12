@@ -593,7 +593,8 @@ func initDefaultSettings(ctx context.Context, db *sql.DB, dialect Dialect) error
 		{"ttfb_penalty_weight", strconv.FormatFloat(healthDefaults.TTFBPenaltyWeight, 'f', -1, 64), "float", "首字惩罚权重(>=0;相对中位慢1倍时全置信惩罚值)", strconv.FormatFloat(healthDefaults.TTFBPenaltyWeight, 'f', -1, 64)},
 		{"ttfb_max_slow_ratio", strconv.FormatFloat(healthDefaults.TTFBMaxSlowRatio, 'f', -1, 64), "float", "首字相对慢速比(s-1)上限(>=0)", strconv.FormatFloat(healthDefaults.TTFBMaxSlowRatio, 'f', -1, 64)},
 		{"ttfb_min_confident_sample", strconv.Itoa(healthDefaults.TTFBMinConfidentSample), "int", "首字置信样本量阈值(>=1)", strconv.Itoa(healthDefaults.TTFBMinConfidentSample)},
-		// 冷却兜底配置
+		// 自动冷却总开关与冷却兜底配置
+		{"cooldown_enabled", "true", "bool", "自动冷却总开关：关闭后不再产生渠道、模型、Key 和 URL 冷却，并忽略已有冷却；错误重试仍保留", "true"},
 		{"cooldown_fallback_enabled", "true", "bool", "所有渠道冷却时选最优渠道兜底(关闭则直接拒绝请求)", "true"},
 		// Debug日志配置
 		{"debug_log_enabled", "false", "bool", "启用Debug日志(记录上游请求/响应原始数据)", "false"},

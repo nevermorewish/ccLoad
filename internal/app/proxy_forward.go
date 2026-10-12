@@ -4604,6 +4604,9 @@ func sameOAuthTokens(a, b string) bool {
 }
 
 func (s *Server) cooldownRejectedOAuthCredential(ctx context.Context, cfg *model.Config, provider string) {
+	if !s.autoCooldownEnabled() {
+		return
+	}
 	cooldownCtx, cancel := cooldownWriteContext(ctx)
 	defer cancel()
 

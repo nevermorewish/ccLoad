@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"ccLoad/internal/model"
@@ -57,8 +58,15 @@ type ConfigGetter interface {
 // 统一管理 Key、模型和渠道冷却逻辑
 // 遵循SRP原则：专注于冷却决策和执行
 type Manager struct {
-	store        storage.Store
-	configGetter ConfigGetter // 可选：优先使用缓存层（性能提升~60%）
+	store                storage.Store
+	configGetter         ConfigGetter // 可选：优先使用缓存层（性能提升~60%）
+	autoCooldownDisabled atomic.Bool
+}
+
+// SetAutoCooldownEnabled controls persistence, while preserving error
+// classification and request-local key/channel failover. Enabled by default.
+func (m *Manager) SetAutoCooldownEnabled(enabled bool) {
+	m.autoCooldownDisabled.Store(!enabled)
 }
 
 type cooldownDecision struct {
@@ -299,6 +307,9 @@ func canFallbackToOtherKey(in ErrorInput, decision cooldownDecision) bool {
 }
 
 func (m *Manager) handleErrorDecision(ctx context.Context, in ErrorInput, decision cooldownDecision) Action {
+	if m.autoCooldownDisabled.Load() {
+		return decision.action
+	}
 	channelID := in.ChannelID
 	keyIndex := in.KeyIndex
 	statusCode := in.StatusCode
@@ -407,6 +418,9 @@ func (m *Manager) handleErrorDecision(ctx context.Context, in ErrorInput, decisi
 }
 
 func (m *Manager) handleKeyFallback(ctx context.Context, in ErrorInput, decision cooldownDecision) Action {
+	if m.autoCooldownDisabled.Load() {
+		return ActionRetryKey
+	}
 	if decision.hasModelCooldownUntil {
 		if err := m.store.SetKeyCooldown(ctx, in.ChannelID, in.KeyIndex, decision.modelCooldownUntil); err != nil {
 			log.Printf("[WARN] 渠道故障换Key时按模型重置时间设置 Key 冷却失败 (channel=%d, key=%d, until=%v): %v",

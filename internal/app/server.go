@@ -437,6 +437,7 @@ func newServer(store storage.Store, logBatchTimeout time.Duration) *Server {
 	// 初始化冷却管理器（统一管理渠道级和Key级冷却）
 	// 传入Server作为configGetter，利用缓存层查询渠道配置
 	s.cooldownManager = cooldown.NewManager(store, s)
+	s.cooldownManager.SetAutoCooldownEnabled(s.autoCooldownEnabled())
 
 	// 初始化Key选择器（移除store依赖，避免重复查询）
 	s.keySelector = NewKeySelector()
@@ -446,6 +447,7 @@ func newServer(store storage.Store, logBatchTimeout time.Duration) *Server {
 
 	// 初始化URL选择器（多URL场景：EWMA延迟追踪+URL级冷却）
 	s.urlSelector = NewURLSelector()
+	s.urlSelector.SetAutoCooldownEnabled(s.autoCooldownEnabled())
 
 	// 初始化健康度缓存（启动时读取配置，修改后重启生效）
 	healthConfig := loadHealthScoreConfig(configService)
@@ -1564,7 +1566,7 @@ func (s *Server) getEnabledChannelsSnapshotByModel(ctx context.Context, modelNam
 }
 
 func (s *Server) getAPIKeysSnapshot(ctx context.Context, channelID int64) ([]*model.APIKey, error) {
-	return readThroughChannelCache(
+	keys, err := readThroughChannelCache(
 		s,
 		func(cache *storage.ChannelCache) ([]*model.APIKey, error) {
 			return cache.GetAPIKeysSnapshot(ctx, channelID)
@@ -1573,10 +1575,11 @@ func (s *Server) getAPIKeysSnapshot(ctx context.Context, channelID int64) ([]*mo
 			return s.store.GetAPIKeys(ctx, channelID)
 		},
 	)
+	return s.keysWithEffectiveCooldowns(keys), err
 }
 
 func (s *Server) getAPIKeys(ctx context.Context, channelID int64) ([]*model.APIKey, error) {
-	return readThroughChannelCache(
+	keys, err := readThroughChannelCache(
 		s,
 		func(cache *storage.ChannelCache) ([]*model.APIKey, error) {
 			return cache.GetAPIKeys(ctx, channelID)
@@ -1585,9 +1588,13 @@ func (s *Server) getAPIKeys(ctx context.Context, channelID int64) ([]*model.APIK
 			return s.store.GetAPIKeys(ctx, channelID)
 		},
 	)
+	return s.keysWithEffectiveCooldowns(keys), err
 }
 
 func (s *Server) getAllChannelCooldowns(ctx context.Context) (map[int64]time.Time, error) {
+	if !s.autoCooldownEnabled() {
+		return nil, nil
+	}
 	return readThroughChannelCache(
 		s,
 		func(cache *storage.ChannelCache) (map[int64]time.Time, error) {
@@ -1600,6 +1607,9 @@ func (s *Server) getAllChannelCooldowns(ctx context.Context) (map[int64]time.Tim
 }
 
 func (s *Server) getAllKeyCooldowns(ctx context.Context) (map[int64]map[int]time.Time, error) {
+	if !s.autoCooldownEnabled() {
+		return nil, nil
+	}
 	return readThroughChannelCache(
 		s,
 		func(cache *storage.ChannelCache) (map[int64]map[int]time.Time, error) {
@@ -1612,6 +1622,9 @@ func (s *Server) getAllKeyCooldowns(ctx context.Context) (map[int64]map[int]time
 }
 
 func (s *Server) getAllModelCooldowns(ctx context.Context) (map[int64]map[string]time.Time, error) {
+	if !s.autoCooldownEnabled() {
+		return nil, nil
+	}
 	return readThroughChannelCache(
 		s,
 		func(cache *storage.ChannelCache) (map[int64]map[string]time.Time, error) {
@@ -1855,9 +1868,9 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		admin.POST("/cursor/credentials/import", s.HandleImportCursorCredential)
 		admin.POST("/channels/:id/cursor-credential/refresh", s.HandleRefreshCursorCredential)
 		admin.POST("/channels/check-duplicate", s.HandleCheckDuplicateChannel)
-		admin.POST("/channels/batch-priority", s.HandleBatchUpdatePriority) // 批量更新渠道优先级
+		admin.POST("/channels/batch-priority", s.HandleBatchUpdatePriority)          // 批量更新渠道优先级
 		admin.POST("/channels/batch-sort-override", s.HandleBatchUpdateSortOverride) // 批量设置手动排序覆盖
-		admin.POST("/channels/batch-enabled", s.HandleBatchSetEnabled)      // 批量启用/禁用渠道
+		admin.POST("/channels/batch-enabled", s.HandleBatchSetEnabled)               // 批量启用/禁用渠道
 		admin.POST("/channels/batch-clear-cooldowns", s.HandleBatchClearCooldowns)
 		admin.POST("/channels/batch-advanced", s.HandleBatchPatchChannels)
 		admin.POST("/channels/batch-delete", s.HandleBatchDeleteChannels) // 批量删除渠道

@@ -58,7 +58,7 @@ const ORDER: Record<string, number> = {
   upstream_first_byte_timeout: 100, stream_timeout: 101, stream_idle_timeout: 102, non_stream_timeout: 102, anthropic_first_byte_timeout: 110, anthropic_non_stream_timeout: 111, anthropic_stream_idle_timeout: 112,
   codex_first_byte_timeout: 120, codex_non_stream_timeout: 121, openai_first_byte_timeout: 130, openai_non_stream_timeout: 131, gemini_first_byte_timeout: 140, gemini_non_stream_timeout: 141,
   max_concurrency: 200, max_body_bytes: 201, max_image_body_bytes: 202, http_read_timeout_seconds: 203,
-  cooldown_fallback_enabled: 300, cooldown_auth_seconds: 301, cooldown_server_seconds: 302, cooldown_timeout_seconds: 303, cooldown_rate_limit_seconds: 304, cooldown_min_seconds: 305, cooldown_max_seconds: 306, global_cooldown_detection_rules: 307,
+  cooldown_enabled: 299, cooldown_fallback_enabled: 300, cooldown_auth_seconds: 301, cooldown_server_seconds: 302, cooldown_timeout_seconds: 303, cooldown_rate_limit_seconds: 304, cooldown_min_seconds: 305, cooldown_max_seconds: 306, global_cooldown_detection_rules: 307,
   auto_update_interval_hours: 700, auto_update_channel: 701, api_token_login_enabled: 702, api_token_show_channels: 703, typesafe_enabled: 705, typesafe_api_key: 706, model_custom_pricing: 710,
 }
 const groupOf = (key: string) => GROUPS.find((group) => group.match(key.toLowerCase())) ?? GROUPS[0]

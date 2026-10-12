@@ -115,6 +115,7 @@ func (s *Server) runScheduledChannelCheck(ctx context.Context, cfg *model.Config
 }
 
 func (s *Server) runChannelMonitorCheck(ctx context.Context, cfg *model.Config, apiKeys []*model.APIKey, content, source string) {
+	apiKeys = s.keysWithEffectiveCooldowns(apiKeys)
 	modelName, skipReason := selectScheduledCheckModel(cfg)
 	if skipReason != "" {
 		log.Printf("[WARN] [channel-check] 跳过渠道 #%d %s：%s", cfg.ID, cfg.Name, skipReason)
