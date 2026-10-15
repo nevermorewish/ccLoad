@@ -98,7 +98,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
   // 新建时 URL 输入 350ms 防抖预览重复渠道。
   useEffect(() => {
     if (!open || !isCreate) return
-    const urls = form.urls.filter((entry) => entry.url.trim()).map((entry) => ({ url: entry.url.trim(), exact: Boolean(entry.exact), protocols: entry.protocols ?? [] }))
+    const urls = form.urls.filter((entry) => entry.url.trim()).map((entry) => ({ ...entry, url: entry.url.trim(), exact: Boolean(entry.exact), protocols: entry.protocols ?? [] }))
     if (!urls.length) { setDuplicateHint([]); return }
     const timer = window.setTimeout(() => { checkDuplicate(urls).then((result) => setDuplicateHint(result.duplicates ?? [])).catch(() => setDuplicateHint([])) }, 350)
     return () => window.clearTimeout(timer)
@@ -118,7 +118,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
     const problem = validateAdvanced(advanced)
     if (problem) { setError(`高级设置：${problem.message}`); setDialog('advanced'); return }
     if (isCreate) {
-      const urls = form.urls.filter((entry) => entry.url.trim()).map((entry) => ({ url: entry.url.trim(), exact: Boolean(entry.exact), protocols: entry.protocols ?? [] }))
+      const urls = form.urls.filter((entry) => entry.url.trim()).map((entry) => ({ ...entry, url: entry.url.trim(), exact: Boolean(entry.exact), protocols: entry.protocols ?? [] }))
       const duplicates = (await checkDuplicate(urls).catch(() => ({ duplicates: [] }))).duplicates ?? []
       if (duplicates.length && !window.confirm(`以下渠道已使用相同 URL：${duplicates.map((item) => item.name).join('、')}。仍要保存吗？`)) return
     }
@@ -143,7 +143,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
         return
       }
       // API Key 渠道：用当前草稿（含未保存的 URL/Key）逐 Key 探测，只用未停用、未冷却的 Key。
-      const urls = form.urls.filter((entry) => entry.url.trim()).map((entry) => ({ url: entry.url.trim(), exact: Boolean(entry.exact), protocols: entry.protocols ?? [] }))
+      const urls = form.urls.filter((entry) => entry.url.trim()).map((entry) => ({ ...entry, url: entry.url.trim(), exact: Boolean(entry.exact), protocols: entry.protocols ?? [] }))
       const usable = keyRows.map((row, index) => ({ row, index })).filter(({ row }) => row.api_key.trim() && !row.disabled && !keyCooling(row))
       if (!urls.length || !usable.length) { setError('需要至少一个 URL 与一个可用 Key'); return }
       const apiKeys = keyRows.map((row, index) => usable.some((item) => item.index === index) ? row.api_key.trim() : '')
@@ -292,7 +292,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
         {duplicateHint.length > 0 && <p className="error-text">以下渠道已使用相同 URL：{duplicateHint.map((item) => item.name).join('、')}</p>}
         <div className="table-wrap"><table><thead><tr>
           <th><input type="checkbox" aria-label="全选 URL" checked={form.urls.length > 0 && selectedURLs.length === form.urls.length} onChange={(event) => setSelectedURLs(event.target.checked ? form.urls.map((_, index) => index) : [])} /></th>
-          <th>URL</th><th>支持协议</th><th>完整 URL</th><th>状态</th><th>延迟</th><th>请求/失败</th><th>操作</th>
+          <th>URL</th><th>支持协议</th><th>完整 URL</th><th>Anthropic 输入含缓存</th><th>状态</th><th>延迟</th><th>请求/失败</th><th>操作</th>
         </tr></thead><tbody>
           {form.urls.map((entry, index) => {
             const stat = statFor(entry)
@@ -302,6 +302,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
               <td><input className="input wide" value={entry.url} onChange={(event) => setURL(index, { url: event.target.value })} placeholder="https://api.example.com" /></td>
               <td>{isSystemOne ? <span className="muted">System One</span> : <SearchableSelect ariaLabel="URL 协议" className="combobox-inline" value={entry.protocols?.[0] ?? ''} options={URL_PROTOCOLS} onChange={(value) => setURL(index, { protocols: value ? [value] : [] })} />}</td>
               <td><input type="checkbox" title="使用原样 URL，不追加路径" checked={Boolean(entry.exact)} onChange={(event) => setURL(index, { exact: event.target.checked })} /></td>
+              <td><input type="checkbox" aria-label="Anthropic 输入含缓存" title="仅当此上游的 Anthropic input_tokens 包含缓存读写时启用；标准 Anthropic 保持关闭" disabled={isSystemOne} checked={Boolean(entry.anthropic_input_tokens_include_cache)} onChange={(event) => setURL(index, { anthropic_input_tokens_include_cache: event.target.checked })} /></td>
               <td>{!stat ? <span className="badge badge-muted">未知</span> : stat.disabled ? <span className="badge badge-bad">已禁用</span> : stat.cooled_down ? <span className="badge badge-warn">冷却 {Math.ceil(Number(stat.cooldown_remain_ms ?? 0) / 1000)}s</span> : <span className="badge badge-good">正常</span>}</td>
               <td>{latency == null || latency < 0 ? '-' : `${Math.round(latency)}ms`}</td>
               <td>{stat ? `${Number(stat.requests ?? 0)}/${Number(stat.failures ?? 0)}` : '-'}</td>
@@ -448,7 +449,7 @@ function KeyScopeDialog({ open, row, options, urls, authType, proxyURL, onClose,
   const merged = useMemo(() => { const set = new Map(options.map((item) => [item.value, item])); for (const value of values) if (!set.has(value)) set.set(value, { value, label: value }); return [...set.values()] }, [options, values])
   const detect = async () => {
     if (!row?.api_key.trim()) return
-    const targets = urls.filter((entry) => entry.url.trim()).map((entry) => ({ url: entry.url.trim(), exact: Boolean(entry.exact), protocols: entry.protocols ?? [] }))
+    const targets = urls.filter((entry) => entry.url.trim()).map((entry) => ({ ...entry, url: entry.url.trim(), exact: Boolean(entry.exact), protocols: entry.protocols ?? [] }))
     if (!targets.length) { setStatus('请先填写 URL'); return }
     setBusy(true); setStatus('探测中…')
     try {

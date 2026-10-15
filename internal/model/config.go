@@ -143,6 +143,8 @@ type ChannelURL struct {
 	URL       string   `json:"url"`
 	Exact     bool     `json:"exact,omitempty"`
 	Protocols []string `json:"protocols,omitempty"`
+	// Opt-in for nonstandard Anthropic endpoints whose input_tokens includes cache reads/writes.
+	AnthropicInputTokensIncludeCache bool `json:"anthropic_input_tokens_include_cache,omitempty"`
 }
 
 // ChannelURLs is the persisted ordered URL configuration.

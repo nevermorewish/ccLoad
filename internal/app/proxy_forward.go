@@ -1943,7 +1943,7 @@ func attachFirstByteDetector(
 	readStats *streamReadStats,
 	observer *ForwardObserver,
 ) {
-	resp.Body = &firstByteDetector{
+	detector := &firstByteDetector{
 		ReadCloser: resp.Body,
 		stats:      readStats,
 		requestStart: func() time.Time {
@@ -1974,6 +1974,15 @@ func attachFirstByteDetector(
 				observer.OnBytesRead(n)
 			}
 		},
+	}
+	if normalizer, ok := resp.Body.(*anthropicCacheBody); ok {
+		// Observe raw bytes before buffering so normalization cannot inflate
+		// non-stream first-byte latency or hide stream activity.
+		detector.ReadCloser = normalizer.ReadCloser
+		normalizer.ReadCloser = detector
+		normalizer.reader.Reset(detector)
+	} else {
+		resp.Body = detector
 	}
 }
 
@@ -2604,6 +2613,7 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 	}
 
 	tagCodexTurnStateHeader(resp.Header, codexAccountIdentityNamespace(cfg))
+	cacheNormalization := normalizeAnthropicCacheResponse(resp, cfg, baseURL, reqCtx.upstreamProtocol)
 
 	// 4. 处理响应(传递upstreamProtocol用于精确识别usage格式,传递渠道信息用于日志记录,传递观测回调)
 	var res *fwResult
@@ -2615,6 +2625,11 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 		responseWriter = dc.wrapTranslatedResponseWriter(cancelableWriter)
 	}
 	res, duration, err = s.handleResponse(reqCtx, resp, responseWriter, string(reqCtx.upstreamProtocol), cfg, apiKey, observer)
+	if res != nil && cacheNormalization != nil && cacheNormalization.hasInput {
+		// The general usage parser ignores zero placeholders. A normalized zero
+		// is authoritative (100% cached), including a late cache-only snapshot.
+		res.InputTokens = cacheNormalization.inputTokens()
+	}
 	if res != nil {
 		res.RetryStrategy = reqCtx.anthropicThinkingOmitStrategy
 	}

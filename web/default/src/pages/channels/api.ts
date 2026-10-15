@@ -32,7 +32,7 @@ export type ChannelEditorData = {
 export type ChannelForm = {
   name: string
   auth_type: string
-  urls: Array<{ url: string; exact?: boolean; protocols?: string[] }>
+  urls: Array<{ url: string; exact?: boolean; protocols?: string[]; anthropic_input_tokens_include_cache?: boolean }>
   priority: number
   enabled: boolean
   models: ModelEntry[]

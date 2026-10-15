@@ -31,6 +31,7 @@ function normalizeInlineURLConfig(value) {
   return {
     url: String(source.url || '').trim(),
     exact: Boolean(source.exact),
+    ...(source.anthropic_input_tokens_include_cache ? { anthropic_input_tokens_include_cache: true } : {}),
     protocols: selectedProtocol ? [selectedProtocol] : []
   };
 }
