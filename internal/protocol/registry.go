@@ -72,6 +72,9 @@ func (r *Registry) TranslateRequest(from, to Protocol, model string, rawJSON []b
 	if from == to {
 		return rawJSON, nil
 	}
+	if err := ValidateRequestSemantics(from, to, rawJSON); err != nil {
+		return nil, &RequestTranslationError{From: from, To: to, Err: err}
+	}
 	fn, ok := r.requests[pair{from: from, to: to}]
 	if !ok {
 		return nil, fmt.Errorf("no request transform registered: %s -> %s", from, to)

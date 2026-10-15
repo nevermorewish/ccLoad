@@ -34,6 +34,9 @@ func responsesRetryBodyForMissingRequiredParameter(
 	if !ok {
 		return nil, "", false
 	}
+	if gjson.GetBytes(plan.TranslatedBody, fmt.Sprintf("input.%d.type", index)).String() == "configuration_update" {
+		return nil, "", false
+	}
 	retryBody, ok := responsesBodyWithoutInputIndex(plan.TranslatedBody, index)
 	if !ok {
 		return nil, "", false

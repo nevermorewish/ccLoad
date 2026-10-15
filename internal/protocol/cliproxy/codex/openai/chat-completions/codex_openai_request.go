@@ -7,6 +7,7 @@
 package chat_completions
 
 import (
+	"ccLoad/internal/protocol"
 	"strconv"
 	"strings"
 
@@ -30,6 +31,9 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI Responses API format
 func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	if err := protocol.ValidateRequestSemantics(protocol.OpenAI, protocol.Codex, inputRawJSON); err != nil {
+		return nil, err
+	}
 	return convertOpenAIRequestToCodex(modelName, inputRawJSON, stream)
 
 }
@@ -49,39 +53,35 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// Stream must be set to true
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	// Codex not support temperature, top_p, top_k, max_output_tokens, so comment them
-	// if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "temperature", v.Value())
-	// }
-	// if v := gjson.GetBytes(rawJSON, "top_p"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "top_p", v.Value())
-	// }
-	// if v := gjson.GetBytes(rawJSON, "top_k"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "top_k", v.Value())
-	// }
-
-	// Map token limits
-	// if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
-	// }
-	// if v := gjson.GetBytes(rawJSON, "max_completion_tokens"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
-	// }
+	// Preserve explicit controls; model/provider validation belongs to the upstream.
+	for _, name := range []string{"temperature", "top_p", "metadata", "prompt_cache_key", "prompt_cache_retention", "parallel_tool_calls"} {
+		if value := root.Get(name); value.Exists() {
+			out, _ = sjson.SetRawBytes(out, name, []byte(value.Raw))
+		}
+	}
+	for _, name := range []string{"max_tokens", "max_completion_tokens"} {
+		if value := root.Get(name); value.Exists() {
+			out, _ = sjson.SetRawBytes(out, "max_output_tokens", []byte(value.Raw))
+		}
+	}
+	if value := root.Get("verbosity"); value.Exists() {
+		out, _ = sjson.SetRawBytes(out, "text.verbosity", []byte(value.Raw))
+	}
 
 	// Map reasoning effort
 	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
 		out, _ = sjson.SetBytes(out, "reasoning.effort", v.Value())
-	} else {
-		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
 	}
 	if serviceTier := normalizeCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
 		out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
 	}
-	out, _ = sjson.SetBytes(out, "parallel_tool_calls", true)
+	if !root.Get("parallel_tool_calls").Exists() {
+		out, _ = sjson.SetBytes(out, "parallel_tool_calls", true)
+	}
 	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
 	// reasoning.summary to the source request's canonical summary intent instead
 	// of coupling it to reasoning effort.
-	out, _ = sjson.SetBytes(out, "include", []string{"reasoning.encrypted_content"})
+	out, _ = sjson.SetBytes(out, "include.-1", "reasoning.encrypted_content")
 
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -582,6 +582,9 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	}
 
 	out, _ = sjson.SetBytes(out, "store", false)
+	if value := root.Get("store"); value.Exists() {
+		out, _ = sjson.SetRawBytes(out, "store", []byte(value.Raw))
+	}
 	if input := gjson.GetBytes(out, "input"); input.IsArray() && len(input.Array()) == 0 {
 		out, _ = sjson.DeleteBytes(out, "input")
 	}

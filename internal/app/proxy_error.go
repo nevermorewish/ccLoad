@@ -839,6 +839,15 @@ func (s *Server) handleProxyErrorResponse(
 		return failure, cooldown.ActionReturnClient
 	}
 
+	// 上游拒绝的是调用方显式设置的参数/取值：与渠道健康无关，不冷却；换渠道只允许原生协议，
+	// 否则跨协议转换会删掉被拒绝的字段后返回 200（如 Responses logprobs、prompt_cache_options）。
+	if errorBody, errorStatus := forwardResultErrorPayload(res); (errorStatus == http.StatusBadRequest || errorStatus == util.StatusSSEError) &&
+		util.ClassifyRequestRejection(errorBody) == util.RequestRejectionNativeOnly {
+		reqCtx.nativeProtocolOnly = true
+		failure.nextAction = cooldown.ActionRetryChannel
+		return failure, cooldown.ActionRetryChannel
+	}
+
 	if modelCapacityRateLimited {
 		// The original 503 already installed the model cooldown before URL retry.
 		// Only decide where to continue; applying this converted 429 again would

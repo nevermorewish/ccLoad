@@ -61,13 +61,27 @@ func writeResponseWithHeaders(w http.ResponseWriter, status int, hdr http.Header
 }
 
 // writeLocalProxyError 写网关自身产生的错误：Anthropic 客户端按官方错误体
-// 返回，便于 SDK 按 error.type 分支；其他协议保持既有 {"error": "..."} 形状。
+// 返回，便于 SDK 按 error.type 分支；其他协议使用 OpenAI 错误对象。
 func writeLocalProxyError(c *gin.Context, status int, message string) {
 	if clientProtocol, _ := clientRequestMetadata(c); clientProtocol == protocol.Anthropic {
 		c.JSON(status, anthropicErrorBody(status, message))
 		return
 	}
-	c.JSON(status, gin.H{"error": message})
+	c.JSON(status, openAIErrorBody(status, message))
+}
+
+func openAIErrorBody(status int, message string) gin.H {
+	typ, code := "invalid_request_error", "invalid_request"
+	if status >= 500 {
+		typ, code = "server_error", "upstream_error"
+	} else if status == http.StatusTooManyRequests {
+		typ, code = "rate_limit_error", "rate_limit_exceeded"
+	} else if status == http.StatusUnauthorized {
+		typ, code = "authentication_error", "invalid_api_key"
+	} else if status == http.StatusForbidden {
+		typ, code = "permission_error", "permission_denied"
+	}
+	return gin.H{"error": gin.H{"message": message, "type": typ, "code": code, "param": nil}}
 }
 
 func anthropicErrorBody(status int, message string) gin.H {
@@ -131,6 +145,26 @@ func anthropicLocalFailureBody(status int, body []byte) []byte {
 		message = http.StatusText(status)
 	}
 	encoded, err := json.Marshal(anthropicErrorBody(status, message))
+	if err != nil {
+		return body
+	}
+	return encoded
+}
+
+// localFailureJSONBody preserves structured upstream errors and wraps local text
+// or legacy string errors in an OpenAI-compatible error object.
+func localFailureJSONBody(status int, body []byte) []byte {
+	if gjson.ValidBytes(body) && gjson.GetBytes(body, "error").Type != gjson.String {
+		return body
+	}
+	message := strings.TrimSpace(string(body))
+	if value := gjson.GetBytes(body, "error"); value.Type == gjson.String {
+		message = value.String()
+	}
+	if message == "" {
+		message = http.StatusText(status)
+	}
+	encoded, err := json.Marshal(openAIErrorBody(status, message))
 	if err != nil {
 		return body
 	}
@@ -280,6 +314,9 @@ type proxyRequestContext struct {
 	sessionAffinity         sessionAffinityTarget      // 请求开始时的会话绑定，channelID=0 表示无
 	nativeCodexWS           *codexUpstreamWebsocketSession
 	nativeCodexBody         []byte
+	// nativeProtocolOnly 在上游拒绝了调用方显式设置的参数后置位：后续候选只能是原生协议，
+	// 跨协议转换会改写或删掉被拒绝的字段后返回成功（util.RequestRejectionNativeOnly）。
+	nativeProtocolOnly bool
 }
 
 // countTokens reports the auxiliary count_tokens request: it is never billed,

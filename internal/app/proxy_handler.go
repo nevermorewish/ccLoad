@@ -890,6 +890,8 @@ func (s *Server) runProxyAttemptLoopWithFailureBoundary(
 	}
 	cands = ordered
 	operatorSkipped := make(map[int64]bool)
+	// 最近一次真实上游响应的失败，用于 finalFailure 选择最终错误。
+	var lastUpstreamFailure *proxyResult
 	for index, cfg := range cands {
 		if operatorSkipped[cfg.ID] {
 			continue
@@ -954,6 +956,9 @@ func (s *Server) runProxyAttemptLoopWithFailureBoundary(
 			}
 
 			lastResult = result
+			if result.header != nil {
+				lastUpstreamFailure = result
+			}
 			if result.operatorAborted {
 				operatorSkipped[cfg.ID] = true
 			}
@@ -980,7 +985,17 @@ func (s *Server) runProxyAttemptLoopWithFailureBoundary(
 		return &proxyResult{status: http.StatusOK, succeeded: true, nextAction: cooldown.ActionReturnClient}, true
 	}
 
-	return lastResult, false
+	return finalFailure(lastResult, lastUpstreamFailure), false
+}
+
+// finalFailure 选出所有候选都失败后返回给客户端的结果。本地转换无法表示请求、或原生协议
+// 限定下已无可用候选，都是本地兜底而不是失败原因：此前有上游真实响应时返回上游的错误，
+// 否则（例如没有任何候选能表示请求）才返回本地结果。
+func finalFailure(lastResult, lastUpstreamFailure *proxyResult) *proxyResult {
+	if lastResult != nil && lastResult.header == nil && lastResult.protocolCapabilityMissing && lastUpstreamFailure != nil {
+		return lastUpstreamFailure
+	}
+	return lastResult
 }
 
 // pendingSameChannelCooldowns 收集同渠道重试期间暂缓落库的冷却输入。
@@ -1125,9 +1140,13 @@ func (s *Server) writeFinalProxyResponse(
 
 	if lastResult != nil && lastResult.status != 0 {
 		body := lastResult.body
-		// 无响应头即网关本地失败（网络错误、凭证不可用等），不是上游原文，需按客户端协议成形。
-		if lastResult.header == nil && reqCtx.clientProtocol == protocol.Anthropic {
-			body = anthropicLocalFailureBody(finalStatus, body)
+		// 无响应头即网关本地失败（网络错误、凭证不可用、转换无法表示请求等），不是上游原文，需按客户端协议成形。
+		if lastResult.header == nil {
+			if reqCtx.clientProtocol == protocol.Anthropic {
+				body = anthropicLocalFailureBody(finalStatus, body)
+			} else {
+				body = localFailureJSONBody(finalStatus, body)
+			}
 		}
 		// 透明代理原则：透传所有上游响应（状态码+header+body）
 		writeResponseWithHeaders(c.Writer, finalStatus, lastResult.header, body)

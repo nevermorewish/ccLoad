@@ -108,6 +108,12 @@ func TestProxyOpenCodeResponsesNamespaceRoundTrip(t *testing.T) {
 				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(bytes.NewReader(payload))}, nil
 			})}
 			got := doProxyRequest(t, env.engine, "/v1/responses", request, nil)
+			if tc.retry {
+				if got.Code != 400 || attempts != 1 || gjson.GetBytes(got.Body.Bytes(), "error.param").String() != "reasoning" {
+					t.Fatalf("explicit reasoning rejection must survive: status=%d attempts=%d body=%s", got.Code, attempts, got.Body.String())
+				}
+				return
+			}
 			if got.Code != 200 {
 				t.Fatalf("status=%d body=%s", got.Code, got.Body.String())
 			}

@@ -1044,8 +1044,8 @@ func convertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(originalRequ
 	resp, _ = sjson.SetBytes(resp, "created_at", created)
 
 	// Echo request fields when available (aligns with streaming path behavior)
-	if len(requestRawJSON) > 0 {
-		req := gjson.ParseBytes(requestRawJSON)
+	if len(requestForNamespace) > 0 {
+		req := gjson.ParseBytes(requestForNamespace)
 		if v := req.Get("instructions"); v.Exists() {
 			resp, _ = sjson.SetBytes(resp, "instructions", v.String())
 		}

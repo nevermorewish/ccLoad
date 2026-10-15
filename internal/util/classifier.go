@@ -381,7 +381,8 @@ func ClassifyHTTPStatus(statusCode int) ErrorLevel {
 // 分类策略：
 //   - 401/403 做语义分析：默认 Key 级，只在明确账户级不可逆错误时升级为 Channel 级
 //   - 400/413 默认按模型级处理，避免一个模型的请求约束误伤整个渠道；Anthropic 账号终态
-//     （组织禁用/余额耗尽/需身份验证）的 400 例外，按 Key 级处理；
+//     （组织禁用/余额耗尽/需身份验证）的 400 例外，按 Key 级处理；内容安全拦截与确定性的
+//     请求结构错误（见 ClassifyRequestRejection）按客户端错误直接返回；
 //     413 不能当客户端直返：同一份 Claude Code 历史在 Anthropic 能过、在别的网关会 RequestTooLarge，
 //     直返会打断已经开始的渠道 failover
 //   - 429 做限流范围分析：默认 Key 级，只有明确长时间/全局限流特征才升级为 Channel 级
@@ -482,6 +483,12 @@ func classifyHTTPResponseWithMetaAt(statusCode int, headers map[string][]string,
 	// SSE 路径使用 597 承载 HTTP 200 中的错误事件；普通 Codex 错误使用 400/413。
 	if (statusCode == StatusSSEError || statusCode == http.StatusBadRequest || statusCode == http.StatusRequestEntityTooLarge) &&
 		IsContextLengthExceededError(responseBody) {
+		return HTTPResponseClassification{Level: ErrorLevelClient}
+	}
+
+	// 内容安全拦截与确定性的请求结构错误换哪个上游都不该“成功”：直接返回客户端，不冷却。
+	if (statusCode == StatusSSEError || statusCode == http.StatusBadRequest) &&
+		ClassifyRequestRejection(responseBody) == RequestRejectionFinal {
 		return HTTPResponseClassification{Level: ErrorLevelClient}
 	}
 

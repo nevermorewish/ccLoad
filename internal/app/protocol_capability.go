@@ -90,6 +90,17 @@ func prioritizeProtocolCandidate(candidates []protocol.Protocol, preferred proto
 	return candidates
 }
 
+// nativeProtocolCandidates 只保留不需要协议转换的候选；见 proxyRequestContext.nativeProtocolOnly。
+func nativeProtocolCandidates(candidates []protocol.Protocol, clientProtocol protocol.Protocol) []protocol.Protocol {
+	native := make([]protocol.Protocol, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == clientProtocol {
+			native = append(native, candidate)
+		}
+	}
+	return native
+}
+
 func protocolCandidatesForURL(
 	entry model.ChannelURL,
 	transformMode string,

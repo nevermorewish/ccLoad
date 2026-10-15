@@ -3289,9 +3289,17 @@ func (s *Server) forwardAttempt(
 				reqCtx, cfg, actualModel, selectedKey, http.StatusBadRequest,
 				duration, res, err.Error(),
 			)
+			failureBody := []byte(translationErr.Error())
+			var parameterErr *protocol.RequestParameterError
+			if errors.As(translationErr, &parameterErr) {
+				failureBody, _ = sonic.Marshal(map[string]any{"error": map[string]any{
+					"message": translationErr.Error(), "type": "invalid_request_error", "code": "unsupported_parameter", "param": parameterErr.Param,
+				}})
+			}
 			return &proxyResult{
-				status:                    http.StatusBadRequest,
-				body:                      []byte(err.Error()),
+				status: http.StatusBadRequest,
+				// 日志保留渠道编号；返回给客户端的正文不暴露内部渠道。
+				body:                      failureBody,
 				channelID:                 &cfg.ID,
 				succeeded:                 false,
 				nextAction:                cooldown.ActionRetryChannel,
@@ -3500,12 +3508,41 @@ func codexRetryBodyFor400(
 			return retryBody, "strip_codex_encrypted_content", true
 		}
 	}
-	if shouldRetryCodexUnsupportedThinking(upstreamProtocol, res) {
+	if !hasExplicitReasoningIntent(plan.OriginalBody) && shouldRetryCodexUnsupportedThinking(upstreamProtocol, res) {
 		if retryBody, ok := codexBodyWithoutThinking(plan.TranslatedBody); ok {
 			return retryBody, "strip_codex_thinking", true
 		}
 	}
 	return nil, "", false
+}
+
+// Only translator-generated reasoning defaults may be removed on retry.
+// User reasoning controls and reasoning history must survive an upstream rejection.
+func hasExplicitReasoningIntent(body []byte) bool {
+	if hasExplicitThinkingSuffix(gjson.GetBytes(body, "model").String()) {
+		return true
+	}
+	for _, field := range []string{"reasoning", "reasoning_effort", "thinking", "include"} {
+		if gjson.GetBytes(body, field).Exists() {
+			return true
+		}
+	}
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		if item.Get("type").String() == "reasoning" {
+			return true
+		}
+	}
+	for _, message := range gjson.GetBytes(body, "messages").Array() {
+		if message.Get("reasoning_content").Exists() || message.Get("reasoning").Exists() {
+			return true
+		}
+		for _, part := range message.Get("content").Array() {
+			if kind := part.Get("type").String(); kind == "thinking" || kind == "redacted_thinking" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // modelCapacityRetryStrategy 与其余重试策略保持同一形状：英文 snake_case 标识符，
@@ -3558,8 +3595,17 @@ func isUnsupportedThinkingError(body []byte) bool {
 	param := strings.ToLower(strings.TrimSpace(payload.Error.Param))
 	typ := strings.ToLower(strings.TrimSpace(payload.Error.Type))
 
-	mentionsThinking := strings.Contains(message, "reasoning") ||
-		strings.Contains(message, "thinking") ||
+	// 上游接受 reasoning 参数、只是不接受这个取值（如 gpt-6.1-sol 的 effort=minimal）：
+	// 删掉整个 reasoning 重发会静默改按默认等级执行，属于请求错误，交给客户端。
+	if code == "unsupported_value" || code == "invalid_value" ||
+		strings.HasPrefix(message, "unsupported value:") || strings.HasPrefix(message, "invalid value:") {
+		return false
+	}
+	// “… not supported with reasoning models” 拒绝的是别的参数（如 logprobs），不是 reasoning 本身。
+	subject := strings.NewReplacer("reasoning models", "", "reasoning model", "").Replace(message)
+
+	mentionsThinking := strings.Contains(subject, "reasoning") ||
+		strings.Contains(subject, "thinking") ||
 		strings.Contains(param, "reasoning") ||
 		strings.Contains(param, "thinking")
 	if !mentionsThinking {
@@ -4073,6 +4119,9 @@ func (s *Server) attemptKeyAcrossURLs(
 				continue
 			}
 			protocolCandidates = eligible
+		}
+		if reqCtx.nativeProtocolOnly {
+			protocolCandidates = nativeProtocolCandidates(protocolCandidates, clientProtocol)
 		}
 		if len(protocolCandidates) == 0 {
 			urlLastFailure = &proxyResult{

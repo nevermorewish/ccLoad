@@ -72,8 +72,8 @@ func TestToolSearchRequestRejectsMissingHistoryEvenWithPreviousResponse(t *testi
 		"input":[{"type":"tool_search_output","execution":"client","call_id":"ts_1","status":"completed","tools":[{"type":"function","name":"get_eta","parameters":{"type":"object"}}]}]
 	}`)
 	_, err := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
-	if err == nil || !strings.Contains(err.Error(), "matching tool_search_call") {
-		t.Fatalf("expected missing history error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "previous_response_id") {
+		t.Fatalf("expected native continuation requirement, got %v", err)
 	}
 }
 

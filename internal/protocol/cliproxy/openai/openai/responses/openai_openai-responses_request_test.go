@@ -1017,7 +1017,7 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OmitsToolSettingsW
 		t.Run(tt.name, func(t *testing.T) {
 			out, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("grok-4.5", tt.raw, false)
 
-			for _, field := range []string{"tools", "tool_choice", "parallel_tool_calls"} {
+			for _, field := range []string{"tools", "tool_choice"} {
 				if got := gjson.GetBytes(out, field); got.Exists() {
 					t.Fatalf("%s should be omitted without tools; output=%s", field, out)
 				}

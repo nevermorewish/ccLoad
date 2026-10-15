@@ -11935,7 +11935,7 @@ func TestProxy_CodexSSEInvalidEncryptedContentRetriesWithoutEncryptedInputItems(
 	}
 }
 
-func TestProxy_Codex400RetriesWithoutThinkingAndLogsStrategy(t *testing.T) {
+func TestProxy_Codex400PreservesExplicitThinkingAndUpstreamError(t *testing.T) {
 	t.Parallel()
 
 	const unsupportedThinkingBody = `{"error":{"message":"unsupported parameter: reasoning","type":"invalid_request_error","param":"reasoning","code":"unsupported_parameter"}}`
@@ -11978,46 +11978,15 @@ func TestProxy_Codex400RetriesWithoutThinkingAndLogsStrategy(t *testing.T) {
 		"include":   []string{"reasoning.encrypted_content"},
 	}, nil)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected retry success, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest || attempts.Load() != 1 || len(bodies) != 1 {
+		t.Fatalf("explicit reasoning must not be stripped: status=%d attempts=%d body=%s", w.Code, attempts.Load(), w.Body.String())
 	}
-	if attempts.Load() != 2 {
-		t.Fatalf("attempts=%d, want 2", attempts.Load())
+	if !bytes.Contains(bodies[0], []byte(`"reasoning"`)) || !bytes.Contains(bodies[0], []byte(`"include"`)) {
+		t.Fatalf("explicit controls lost: %s", bodies[0])
 	}
-	if len(bodies) != 2 {
-		t.Fatalf("captured bodies=%d, want 2", len(bodies))
+	if gjson.GetBytes(w.Body.Bytes(), "error.code").String() != "unsupported_parameter" {
+		t.Fatalf("upstream error lost: %s", w.Body.String())
 	}
-	if !bytes.Contains(bodies[0], []byte(`"reasoning"`)) ||
-		!bytes.Contains(bodies[0], []byte(`"include"`)) {
-		t.Fatalf("first request should include thinking controls, got %s", bodies[0])
-	}
-	if bytes.Contains(bodies[1], []byte(`"reasoning"`)) ||
-		bytes.Contains(bodies[1], []byte(`"include"`)) {
-		t.Fatalf("retry request should strip thinking controls, got %s", bodies[1])
-	}
-	if !bytes.Contains(bodies[1], []byte(`"type":"message"`)) {
-		t.Fatalf("retry request should keep message input, got %s", bodies[1])
-	}
-
-	ctx := context.Background()
-	since := time.Now().Add(-time.Minute)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		logs, err := env.store.ListLogs(ctx, since, 20, 0, &model.LogFilter{LogSource: model.LogSourceProxy})
-		if err != nil {
-			t.Fatalf("ListLogs failed: %v", err)
-		}
-		for _, entry := range logs {
-			if entry.StatusCode == http.StatusOK && entry.ChannelID != 0 {
-				if !strings.Contains(entry.Message, "[strip_codex_thinking]") {
-					t.Fatalf("success log message=%q, want retry strategy", entry.Message)
-				}
-				return
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("expected successful proxy log with retry strategy within deadline")
 }
 
 func TestProxy_CodexNormalizesToolSearchArgumentsBeforeForward(t *testing.T) {

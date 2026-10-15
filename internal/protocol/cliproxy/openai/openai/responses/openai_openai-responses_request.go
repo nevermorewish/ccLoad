@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"ccLoad/internal/protocol"
 	"strings"
 
 	translatorcommon "ccLoad/internal/protocol/cliproxy/common"
@@ -29,6 +30,9 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI chat completions format
 func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	if err := protocol.ValidateRequestSemantics(protocol.Codex, protocol.OpenAI, inputRawJSON); err != nil {
+		return nil, err
+	}
 	// ccLoad: reject tool-search modes Chat Completions cannot represent.
 	if err := validateOpenAIResponsesRequestForChat(inputRawJSON); err != nil {
 		return nil, err
@@ -46,6 +50,14 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	out := []byte(`{"model":"","messages":[],"stream":false}`)
 
 	root := gjson.ParseBytes(rawJSON)
+	for _, name := range []string{"temperature", "top_p", "metadata", "parallel_tool_calls", "service_tier", "prompt_cache_key", "prompt_cache_retention", "store"} {
+		if value := root.Get(name); value.Exists() {
+			out, _ = sjson.SetRawBytes(out, name, []byte(value.Raw))
+		}
+	}
+	if value := root.Get("text.verbosity"); value.Exists() {
+		out, _ = sjson.SetRawBytes(out, "verbosity", []byte(value.Raw))
+	}
 	toolIndex := newResponsesToolIndex(root)
 
 	messages := make([][]byte, 0)
@@ -256,12 +268,8 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "message", "":
 				// Handle regular message conversion
 				role := item.Get("role").String()
-				// Only a real user turn can be refused; developer text is sent as user text
-				// but never counts as the user's own turn.
+				// Preserve developer priority rather than demoting instructions to user text.
 				isUserTurn := role == "user"
-				if role == "developer" {
-					role = "user"
-				}
 				mergeableAssistantIndex = -1
 				if role != "assistant" {
 					appendPendingReasoningMessage()
