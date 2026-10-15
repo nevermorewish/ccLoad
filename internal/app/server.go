@@ -86,6 +86,7 @@ type Server struct {
 	restartMu                     sync.RWMutex
 	restartFunc                   func()
 	responsesExecutionSessions    *responsesExecutionSessionStore
+	responsesHTTPRoutes           responsesHTTPRouteStore
 	responsesWebsocketConnections *responsesWebsocketConnectionLimiter
 	codexOAuth                    *codexOAuthManager
 	codexService                  *codexauth.Service

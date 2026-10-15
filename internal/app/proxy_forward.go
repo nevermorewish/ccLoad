@@ -2963,6 +2963,10 @@ func (s *Server) forwardAttempt(
 	reqCtx.upstreamProtocol = upstreamProtocol
 	reqCtx.debugData = nil
 	actualModel, bodyToSend := s.prepareRequestBody(cfg, reqCtx, upstreamProtocol)
+	if route := reqCtx.responsesHTTPRoute; route != nil &&
+		(cfg.ID != route.channelID || baseURL != route.baseURL || codexWebsocketKeyHash(selectedKey) != route.keyHash || actualModel != route.model || upstreamProtocol != protocol.Codex) {
+		return &proxyResult{status: http.StatusConflict, body: []byte("previous_response_id upstream route or credential changed; resend the full conversation"), nextAction: cooldown.ActionReturnClient}, cooldown.ActionReturnClient, nil
+	}
 	if cfg.UsesAntigravityOAuth() && (wantsAntigravityWebSearch(reqCtx.body) || wantsAntigravityWebSearch(bodyToSend)) {
 		actualModel = antigravityWebSearchModel(actualModel)
 	}
@@ -3335,6 +3339,7 @@ func (s *Server) forwardAttempt(
 			return result, action, nil
 		}
 
+		s.rememberResponsesHTTPRoute(reqCtx, res, cfg.ID, baseURL, selectedKey, actualModel)
 		result, action := s.handleProxySuccess(ctx, cfg, keyIndex, actualModel, selectedKey, res, duration, reqCtx)
 		return result, action, nil
 	}
@@ -4006,6 +4011,15 @@ func (s *Server) attemptKeyAcrossURLs(
 	w http.ResponseWriter,
 ) (immediate *proxyResult, urlLastFailure *proxyResult, err error) {
 	sortedURLs := orderChannelAttemptURLs(selector, cfg, urls)
+	if route := reqCtx.responsesHTTPRoute; route != nil {
+		filtered := sortedURLs[:0]
+		for _, entry := range sortedURLs {
+			if entry.url == route.baseURL {
+				filtered = append(filtered, entry)
+			}
+		}
+		sortedURLs = filtered
+	}
 	if len(sortedURLs) == 0 {
 		return nil, nil, fmt.Errorf("no enabled URLs configured for channel %d", cfg.ID)
 	}
@@ -4393,6 +4407,18 @@ func (s *Server) tryChannelWithKeys(ctx context.Context, cfg *model.Config, reqC
 
 	channelModel := reqCtx.attemptModel.logicalModel
 	apiKeys, modelScoped := s.filterAPIKeysForModelRow(cfg, apiKeys, selectedModel, string(reqCtx.clientProtocol))
+	if route := reqCtx.responsesHTTPRoute; route != nil {
+		filtered := make([]*model.APIKey, 0, 1)
+		for _, key := range apiKeys {
+			if key != nil && codexWebsocketKeyHash(key.APIKey) == route.keyHash {
+				filtered = append(filtered, key)
+			}
+		}
+		apiKeys = filtered
+		if len(apiKeys) == 0 {
+			return &proxyResult{status: http.StatusConflict, body: []byte("previous_response_id credential is no longer available; resend the full conversation"), nextAction: cooldown.ActionReturnClient}, nil
+		}
+	}
 	if len(apiKeys) == 0 {
 		return nil, fmt.Errorf("%w: channel %d model %q", ErrNoAPIKeyForModel, cfg.ID, channelModel)
 	}

@@ -272,6 +272,7 @@ type ForwardObserver struct {
 
 // proxyRequestContext 代理请求上下文（封装请求信息，遵循DIP原则）
 type proxyRequestContext struct {
+	responsesHTTPRoute      *responsesHTTPRoute
 	abortChannel            context.CancelCauseFunc // 覆盖当前渠道所有 Key/URL 和重试等待
 	antigravityCreditsTried map[string]bool
 	antigravityRateRetried  map[string]bool

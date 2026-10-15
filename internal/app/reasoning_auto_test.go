@@ -957,6 +957,21 @@ func TestReasoningAutoFallbackBreaksDowngradeSequence(t *testing.T) {
 			headers := map[string]string{"Session-Id": "fallback-break"}
 			reasoningAutoRequest(t, env, path, makeBody("Complex unresolved migration."), headers)
 			reasoningAutoRequest(t, env, path, makeBody("The plan is ready."), headers)
+			if responsesContext {
+				// The upstream owns this response, but the local reasoning transcript
+				// has no corresponding history. Keep the context-fallback scenario
+				// independent of HTTP route ownership validation.
+				var owner responsesHTTPRouteKey
+				var route responsesHTTPRoute
+				for key, candidate := range env.server.responsesHTTPRoutes.entries {
+					owner, route = key, candidate
+					break
+				}
+				if owner.tokenHash == "" {
+					t.Fatal("missing upstream route")
+				}
+				env.server.responsesHTTPRoutes.put(owner.tokenHash, "unavailable-history", route)
+			}
 			body := makeBody("Continue.")
 			switch fallback {
 			case "incomplete_history":

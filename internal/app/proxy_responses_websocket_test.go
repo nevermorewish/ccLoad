@@ -4301,7 +4301,7 @@ func TestResponsesExecutionSessionSwitchesFromDownstreamWebsocketToHTTP(t *testi
 	}
 }
 
-func TestHTTPResponsesUnknownPreviousIDStaysOnHTTP(t *testing.T) {
+func TestHTTPResponsesUnknownPreviousIDRejectsBeforeUpstream(t *testing.T) {
 	t.Parallel()
 	var websocketCalls atomic.Int32
 	var httpCalls atomic.Int32
@@ -4330,11 +4330,11 @@ func TestHTTPResponsesUnknownPreviousIDStaysOnHTTP(t *testing.T) {
 		"previous_response_id": "resp-owned-by-upstream",
 		"input":                []any{map[string]any{"role": "user", "content": "continue"}},
 	}, nil)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "response.completed") {
+	if response.Code != http.StatusBadRequest || gjson.GetBytes(response.Body.Bytes(), "error.code").String() != "previous_response_not_found" {
 		t.Fatalf("unknown previous response status=%d body=%s", response.Code, response.Body.String())
 	}
-	if websocketCalls.Load() != 0 || httpCalls.Load() != 1 {
-		t.Fatalf("unknown previous calls websocket=%d http=%d, want 0/1", websocketCalls.Load(), httpCalls.Load())
+	if websocketCalls.Load() != 0 || httpCalls.Load() != 0 {
+		t.Fatalf("unknown previous calls websocket=%d http=%d, want 0/0", websocketCalls.Load(), httpCalls.Load())
 	}
 }
 

@@ -5642,8 +5642,8 @@ func TestProxy_XAIOAuthZeroKeyFinalizesWireAndReassemblesNonStream(t *testing.T)
 
 	response := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{
 		"model": "grok-4.5", "stream": false, "input": "hello",
-		"previous_response_id": "resp-old", "prompt_cache_retention": "24h",
-		"safety_identifier": "client", "stream_options": map[string]any{"include_usage": true},
+		"prompt_cache_retention": "24h",
+		"safety_identifier":      "client", "stream_options": map[string]any{"include_usage": true},
 	}, map[string]string{"Session-Id": "session", "Thread-Id": "parent"})
 	if response.Code != http.StatusOK || gjson.Get(response.Body.String(), "id").String() != "resp-xai" {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())

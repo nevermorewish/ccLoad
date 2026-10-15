@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tidwall/gjson"
 	"io"
 	"log"
 	"mime"
@@ -701,6 +702,17 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 	if routingSession != nil {
 		reqCtx.routingSession = routingSession
 	}
+	if clientProtocol == protocol.Codex && requestFamily == protocol.RequestFamilyResponses && routingSession == nil {
+		if previousID := strings.TrimSpace(gjson.GetBytes(all, "previous_response_id").String()); previousID != "" {
+			route, found := s.responsesHTTPRoutes.get(tokenHashStr, previousID)
+			if !found {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "previous_response_id is not available for this token on this ccLoad instance (unknown, expired, or restarted); resend the full conversation without previous_response_id", "type": "invalid_request_error", "code": "previous_response_not_found", "param": "previous_response_id"}})
+				return
+			}
+			reqCtx.responsesHTTPRoute = &route
+			reqCtx.nativeProtocolOnly = true
+		}
+	}
 	if executionSession != nil && nativeRequestBody != nil {
 		reqCtx.nativeCodexWS = executionSession.upstream
 		reqCtx.nativeCodexBody = nativeRequestBody
@@ -893,6 +905,9 @@ func (s *Server) runProxyAttemptLoopWithFailureBoundary(
 	// 最近一次真实上游响应的失败，用于 finalFailure 选择最终错误。
 	var lastUpstreamFailure *proxyResult
 	for index, cfg := range cands {
+		if route := reqCtx.responsesHTTPRoute; route != nil && cfg.ID != route.channelID {
+			continue
+		}
 		if operatorSkipped[cfg.ID] {
 			continue
 		}

@@ -81,10 +81,12 @@ type sseUsageParser struct {
 
 type jsonUsageParser struct {
 	usageAccumulator
-	buffer           bytes.Buffer
-	truncated        bool
-	upstreamProtocol string // 实际上游协议，用于精确平台判断。
-	hasBody          bool
+	responseID, responseObject, responseStatus string
+	scanDepth                                  int
+	buffer                                     bytes.Buffer
+	truncated                                  bool
+	upstreamProtocol                           string // 实际上游协议，用于精确平台判断。
+	hasBody                                    bool
 
 	scanInString       bool
 	scanEscape         bool
@@ -1063,6 +1065,11 @@ func (p *jsonUsageParser) scanJSONUsage(data []byte) {
 				continue
 			}
 			switch p.scanPendingKey {
+			case "id", "object", "status":
+				if p.upstreamProtocol == "codex" && p.scanDepth == 1 && b == '"' {
+					p.startJSONValueCapture(b)
+					continue
+				}
 			case "usage", "usageMetadata", "usage_metadata", "tool_usage":
 				if b == '{' {
 					p.startJSONValueCapture(b)
@@ -1095,6 +1102,10 @@ func (p *jsonUsageParser) scanJSONUsage(data []byte) {
 			p.scanEscape = false
 			p.scanStringBuf = p.scanStringBuf[:0]
 			p.scanStringTooLong = false
+		} else if b == '{' || b == '[' {
+			p.scanDepth++
+		} else if b == '}' || b == ']' {
+			p.scanDepth = max(0, p.scanDepth-1)
 		}
 	}
 }
@@ -1189,6 +1200,18 @@ func (p *jsonUsageParser) finishJSONValueCapture() {
 	discard := p.scanCaptureDiscard
 	if !discard && len(p.scanCaptureBuf) > 0 {
 		switch key {
+		case "id", "object", "status":
+			var value string
+			if json.Unmarshal(p.scanCaptureBuf, &value) == nil && len(value) <= 512 {
+				switch key {
+				case "id":
+					p.responseID = value
+				case "object":
+					p.responseObject = value
+				case "status":
+					p.responseStatus = value
+				}
+			}
 		case "usage", "usageMetadata", "usage_metadata":
 			var usage map[string]any
 			if err := json.Unmarshal(p.scanCaptureBuf, &usage); err == nil {
@@ -1326,7 +1349,20 @@ func (p *jsonUsageParser) HasResponsesMetadata() bool {
 }
 
 func (p *jsonUsageParser) GetResponsesTurnResult() (responsesWebsocketTurnResult, bool) {
-	return responsesWebsocketTurnResult{}, false
+	if p.upstreamProtocol != "codex" {
+		return responsesWebsocketTurnResult{}, false
+	}
+	if p.truncated {
+		if p.responseObject == "response" && p.responseStatus == "completed" && p.responseID != "" {
+			return responsesWebsocketTurnResult{completedResponseID: p.responseID}, true
+		}
+		return responsesWebsocketTurnResult{}, false
+	}
+	root := gjson.ParseBytes(p.buffer.Bytes())
+	if root.Get("object").String() != "response" || root.Get("status").String() != "completed" || root.Get("id").String() == "" {
+		return responsesWebsocketTurnResult{}, false
+	}
+	return responsesWebsocketTurnResult{completedResponseID: root.Get("id").String(), completedOutput: []byte(root.Get("output").Raw)}, true
 }
 
 func (u *usageAccumulator) applyToolUsageFromPayload(payload map[string]any) {
