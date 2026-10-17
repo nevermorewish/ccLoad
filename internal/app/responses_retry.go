@@ -22,7 +22,8 @@ const (
 
 // responsesRetryBodyForMissingRequiredParameter 在上游 HTTP 400 且
 // error.code=missing_required_parameter 时，按 param 指向的 input[N] 丢掉该项，
-// 供同渠道同 Key 重试一次。响应已提交则不能换 body。
+// 供同渠道同 Key 重试一次。缺少 status 时必须保留历史项，不得删项绕过校验。
+// 响应已提交则不能换 body。
 func responsesRetryBodyForMissingRequiredParameter(
 	plan protocol.TransformPlan,
 	res *fwResult,
@@ -37,6 +38,12 @@ func responsesRetryBodyForMissingRequiredParameter(
 	if gjson.GetBytes(plan.TranslatedBody, fmt.Sprintf("input.%d.type", index)).String() == "configuration_update" {
 		return nil, "", false
 	}
+	root := gjson.ParseBytes(res.Body)
+	param := firstNonEmptyJSONString(root.Get("error.param"), root.Get("param"))
+	message := firstNonEmptyJSONString(root.Get("error.message"), root.Get("message"))
+	if isResponsesInputStatusPath(param, true) || isResponsesInputStatusPath(message, false) {
+		return nil, "", false
+	}
 	retryBody, ok := responsesBodyWithoutInputIndex(plan.TranslatedBody, index)
 	if !ok {
 		return nil, "", false
@@ -45,7 +52,7 @@ func responsesRetryBodyForMissingRequiredParameter(
 }
 
 // responsesRetryBodyForUnknownParameter 在上游报 unknown/unsupported parameter 时，
-// 一次性剥离所有 input item 的 status 字段（与 HTTP 传输前置剥离同一逻辑），
+// 只剥离被拒绝的 input item 类型上的 status，保留其他类型的必需状态，
 // 供同渠道同 Key 重试一次。策略串是常量，重试循环按完整串去重，天然限 1 轮。
 // 只接受明确指向 input[N].status 的错误，避免因其他参数拒绝而重放 POST。
 // thinking/reasoning 相关错误交给 strip_codex_thinking 专门策略。响应已提交则不能换 body。
@@ -65,11 +72,28 @@ func responsesRetryBodyForUnknownParameter(
 	if !matchesUnknownInputStatusError(errorBody) {
 		return nil, "", false
 	}
-	retryBody := stripResponsesInputItemStatus(plan.TranslatedBody)
+	itemType := rejectedResponsesStatusItemType(plan.TranslatedBody, errorBody)
+	retryBody := stripResponsesInputItemStatus(plan.TranslatedBody, itemType)
 	if bytes.Equal(retryBody, plan.TranslatedBody) {
 		return nil, "", false
 	}
 	return retryBody, stripUnknownInputParameterStrategy, true
+}
+
+// The index belongs to the last wire body, not necessarily the original or
+// incremental transcript. Resolve the type before applying the retry to either.
+func rejectedResponsesStatusItemType(body, errorBody []byte) string {
+	root := gjson.ParseBytes(errorBody)
+	path := firstNonEmptyJSONString(root.Get("error.param"), root.Get("param"), root.Get("error.message"), root.Get("message"))
+	index, ok := parseResponsesInputIndex(path)
+	if !ok {
+		return ""
+	}
+	item := gjson.GetBytes(body, fmt.Sprintf("input.%d", index))
+	if !item.IsObject() || !item.Get("status").Exists() || item.Get("type").Type != gjson.String {
+		return ""
+	}
+	return item.Get("type").String()
 }
 
 // matchesUnknownInputStatusError only accepts errors that identify

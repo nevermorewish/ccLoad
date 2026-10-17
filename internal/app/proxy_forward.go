@@ -2709,19 +2709,15 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 }
 
 // responsesBodyForHTTPTransport 收尾 HTTP 传输边界的 Codex Responses 上游 body。
-// status 剥离不是 HTTP 独有契约：官方 Codex 后端在 HTTP 与原生 WebSocket 上是同一套
-// 校验，WS 侧的对应剥离在 doCodexWebsocketRequest 里。别把它挪进
-// prepareCodexResponsesBodyForUpstream——那里同时服务 WS transcript 的装配阶段，
-// 剥离必须留在两条传输的发送边界上。反过来 prepareCodexOAuthHTTPBody 才是真正的
-// HTTP 专有处理：它删掉 previous_response_id/stream_options，WS 增量请求依赖这两个
-// 字段续接，所以本函数整体不可被 WS 路径复用。
+// Preserve input status: some upstream item types require it. Only an explicit
+// unknown/unsupported-parameter response may trigger a type-scoped retry.
+// prepareCodexOAuthHTTPBody removes HTTP-only fields; WS continuation needs them.
 func responsesBodyForHTTPTransport(cfg *model.Config, plan protocol.TransformPlan, body []byte) []byte {
 	body = prepareCodexOAuthHTTPBody(cfg, plan.UpstreamProtocol, plan.UpstreamPath, body)
 	if plan.ClientProtocol != protocol.Codex || plan.UpstreamProtocol != protocol.Codex ||
 		plan.RequestFamily != protocol.RequestFamilyResponses {
 		return body
 	}
-	body = stripResponsesInputItemStatus(body)
 	if !gjson.GetBytes(body, "generate").Exists() {
 		return body
 	}
@@ -2732,22 +2728,27 @@ func responsesBodyForHTTPTransport(cfg *model.Config, plan protocol.TransformPla
 	return stripped
 }
 
-// stripResponsesInputItemStatus 剥离 Responses input item 的 status 字段。Codex HTTP
-// 上游不定义该字段（官方端点对 function_call 的 status 报 400 "Unknown parameter"），
-// 工具完成态由 call_id/function_call_output 配对重建，剥离不改变执行语义。
+// stripResponsesInputItemStatus removes status only from the item type rejected
+// by this upstream. Other item types may require status and must retain it.
 // 必须定点删除而不能整份 Unmarshal/Marshal：Go map 重编码会随机改变 transcript 字段
 // 顺序，破坏相邻请求共享的 prompt-cache 字节前缀。一次收集全部删除区间并压缩，
 // 避免逐字段 DeleteBytes 随历史 status 数量增长成 O(k·n)。
-func stripResponsesInputItemStatus(body []byte) []byte {
-	if !bytes.Contains(body, []byte(`"status"`)) {
+func stripResponsesInputItemStatus(body []byte, itemType string) []byte {
+	if itemType == "" || !bytes.Contains(body, []byte(`"status"`)) {
 		return body
 	}
 	if !gjson.ValidBytes(body) {
 		return body
 	}
-	statuses := gjson.GetBytes(body, "input.#.status")
-	values := statuses.Array()
-	if len(values) == 0 || len(values) != len(statuses.Indexes) {
+	var values []gjson.Result
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		if item.Get("type").String() == itemType {
+			if status := item.Get("status"); status.Exists() {
+				values = append(values, status)
+			}
+		}
+	}
+	if len(values) == 0 {
 		return body
 	}
 
@@ -2758,8 +2759,8 @@ func stripResponsesInputItemStatus(body []byte) []byte {
 	ranges := make([]deletionRange, 0, len(values))
 	deletedBytes := 0
 	previousEnd := 0
-	for i, value := range values {
-		start, end, ok := jsonObjectMemberDeletionRange(body, statuses.Indexes[i], len(value.Raw))
+	for _, value := range values {
+		start, end, ok := jsonObjectMemberDeletionRange(body, value.Index, len(value.Raw))
 		if !ok || start < previousEnd {
 			return body
 		}
@@ -3192,7 +3193,9 @@ func (s *Server) forwardAttempt(
 			incrementalRetryBody := retryBody
 			incrementalBodyRulesApplied := retryBodyRulesApplied
 			if retryStrategy == stripUnknownInputParameterStrategy {
-				incrementalRetryBody = stripResponsesInputItemStatus(nativeAttempt.incrementalBody)
+				errorBody, _ := forwardResultErrorPayload(res)
+				itemType := rejectedResponsesStatusItemType(retrySourcePlan.TranslatedBody, errorBody)
+				incrementalRetryBody = stripResponsesInputItemStatus(nativeAttempt.incrementalBody, itemType)
 				incrementalBodyRulesApplied = nativeAttempt.incrementalBodyRulesApplied
 			}
 			retryAttempt = &nativeCodexWebsocketAttempt{

@@ -7857,11 +7857,8 @@ func TestResponsesWebsocketBridgesToGeminiHTTPChannel(t *testing.T) {
 	}
 }
 
-// HTTP 渠道切换到原生 WS 渠道时重放的完整 transcript 会带 input item status，而官方
-// Codex 后端在 WebSocket 上同样以 unknown_parameter 拒绝它（线上表现为 HTTP 101 之后
-// 的 SSE error `[input[N].status]`）。发送边界必须在首帧就剥离，而不是撞 400 再靠重试
-// 自愈——自愈多一个 RTT，且在响应已提交时根本不可用。
-func TestNativeCodexWebsocketStripsInputItemStatusBeforeFirstSend(t *testing.T) {
+// Replayed history must retain status on the first WebSocket send.
+func TestNativeCodexWebsocketPreservesInputItemStatusBeforeFirstSend(t *testing.T) {
 	t.Parallel()
 	requests := make(chan []byte, 1)
 	var handshakes atomic.Int32
@@ -7922,8 +7919,8 @@ func TestNativeCodexWebsocketStripsInputItemStatusBeforeFirstSend(t *testing.T) 
 	}
 
 	sent := <-requests
-	if statuses := gjson.GetBytes(sent, "input.#.status").Array(); len(statuses) != 0 {
-		t.Fatalf("first websocket send kept %d input item status fields: %s", len(statuses), sent)
+	if statuses := gjson.GetBytes(sent, "input.#.status").Array(); len(statuses) != 2 {
+		t.Fatalf("first websocket send lost input item status fields: %s", sent)
 	}
 	if gjson.GetBytes(sent, "input.1.call_id").String() != "call_status_strip" {
 		t.Fatalf("status strip damaged the input transcript: %s", sent)

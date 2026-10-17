@@ -1838,7 +1838,7 @@ func TestDowngradeAnthropicThinkingBlocksRemovesEmptyOutputConfig(t *testing.T) 
 
 func TestRetryBodyForRejectedRequest_StripsUnknownInputStatus(t *testing.T) {
 	t.Parallel()
-	// 两个 item 都带 status：一次性剥离全部，而不是只删上游点名的单个路径。
+	// Strip the rejected type together; other input types retain their status.
 	body := []byte(`{"input":[{"type":"function_call","id":"fc_0","call_id":"call_0","name":"exec","arguments":"{}","status":"completed"},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":"{}","status":"completed"}]}`)
 	res := &fwResult{
 		Status: http.StatusBadRequest,
@@ -2016,33 +2016,15 @@ func TestResponsesRetryBodyForUnknownParameter_RequiresCodexResponsesScope(t *te
 	}
 }
 
-func TestResponsesBodyForHTTPTransport_StripsInputItemStatus(t *testing.T) {
+func TestResponsesBodyForHTTPTransportPreservesInputItemStatus(t *testing.T) {
 	t.Parallel()
-	body := []byte(`{"model":"gpt-5.6-sol","seed":9007199254740993,"input":[{"type":"function_call","call_id":"call_1","name":"exec","arguments":"{}","status":"completed"},{"type":"message","role":"user","content":[{"type":"input_text","text":"ok"}]}]}`)
-	want := []byte(`{"model":"gpt-5.6-sol","seed":9007199254740993,"input":[{"type":"function_call","call_id":"call_1","name":"exec","arguments":"{}"},{"type":"message","role":"user","content":[{"type":"input_text","text":"ok"}]}]}`)
-	plan := protocol.TransformPlan{
-		ClientProtocol:   protocol.Codex,
-		UpstreamProtocol: protocol.Codex,
-		RequestFamily:    protocol.RequestFamilyResponses,
-	}
-	got := responsesBodyForHTTPTransport(&model.Config{}, plan, body)
-	if gjson.GetBytes(got, "input.0.status").Exists() {
-		t.Fatalf("HTTP Codex body kept input status: %s", got)
-	}
-	if gjson.GetBytes(got, "input.0.call_id").String() != "call_1" {
-		t.Fatalf("HTTP Codex body lost function_call: %s", got)
-	}
-	if gjson.GetBytes(got, "seed").Raw != "9007199254740993" {
-		t.Fatalf("HTTP Codex body changed large integer: %s", got)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("HTTP Codex body changed unrelated serialized bytes:\n got: %s\nwant: %s", got, want)
-	}
-
-	plan.UpstreamProtocol = protocol.OpenAI
-	got = responsesBodyForHTTPTransport(&model.Config{}, plan, body)
-	if !gjson.GetBytes(got, "input.0.status").Exists() {
-		t.Fatalf("non-Codex upstream body lost input status: %s", got)
+	body := []byte(`{"model":"gpt-test","seed":9007199254740993,"input":[{"type":"function_call","call_id":"call_1","name":"exec","arguments":"{}","status":"completed"},{"type":"tool_search_call","status":"completed","execution":"client","call_id":"search_1","arguments":{}},{"type":"tool_search_output","status":"completed","call_id":"search_1","tools":[]},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}]}`)
+	for _, upstream := range []protocol.Protocol{protocol.Codex, protocol.OpenAI} {
+		plan := protocol.TransformPlan{ClientProtocol: protocol.Codex, UpstreamProtocol: upstream, RequestFamily: protocol.RequestFamilyResponses}
+		got := responsesBodyForHTTPTransport(&model.Config{}, plan, body)
+		if !bytes.Equal(got, body) {
+			t.Fatalf("upstream %s changed input status or serialized bytes: %s", upstream, got)
+		}
 	}
 }
 
@@ -2052,7 +2034,7 @@ func TestStripResponsesInputItemStatusPreservesTranscriptSerialization(t *testin
 	want := []byte(`{"model":"gpt-5.6-sol","input":[{"type":"function_call","id":"fc_0","call_id":"call_0","name":"exec","arguments":"{\"large\":9007199254740993}"},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":"{}"},{"type":"function_call","id":"fc_2","call_id":"call_2","name":"exec","arguments":"{}"},{"type":"message","role":"user","content":[{"type":"input_text","text":"keep"},{"type":"metadata","status":"nested-keep"}]}],"metadata":{"status":"top-level-keep"},"seed":9007199254740993}`)
 
 	for range 100 {
-		got := stripResponsesInputItemStatus(body)
+		got := stripResponsesInputItemStatus(body, "function_call")
 		if !bytes.Equal(got, want) {
 			t.Fatalf("status stripping changed the serialized transcript prefix:\n got: %s\nwant: %s", got, want)
 		}
@@ -2062,7 +2044,7 @@ func TestStripResponsesInputItemStatusPreservesTranscriptSerialization(t *testin
 func TestStripResponsesInputItemStatusLeavesInvalidJSONUntouched(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"input":[{"type":"function_call","status":"completed"}`)
-	if got := stripResponsesInputItemStatus(body); !bytes.Equal(got, body) {
+	if got := stripResponsesInputItemStatus(body, "function_call"); !bytes.Equal(got, body) {
 		t.Fatalf("invalid JSON changed: got %s", got)
 	}
 }
@@ -2070,8 +2052,8 @@ func TestStripResponsesInputItemStatusLeavesInvalidJSONUntouched(t *testing.T) {
 func TestStripResponsesInputItemStatusPreservesUnrelatedWhitespace(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"input":[{ "status" : "completed" , "type" : "function_call" },{"type":"function_call" , "status" : "completed" },{"status":null}]}`)
-	want := []byte(`{"input":[{  "type" : "function_call" },{"type":"function_call"  },{}]}`)
-	if got := stripResponsesInputItemStatus(body); !bytes.Equal(got, want) {
+	want := []byte(`{"input":[{  "type" : "function_call" },{"type":"function_call"  },{"status":null}]}`)
+	if got := stripResponsesInputItemStatus(body, "function_call"); !bytes.Equal(got, want) {
 		t.Fatalf("status stripping changed unrelated whitespace:\n got: %s\nwant: %s", got, want)
 	}
 }
@@ -2093,7 +2075,7 @@ func BenchmarkStripResponsesInputItemStatus(b *testing.B) {
 			b.ReportAllocs()
 			b.SetBytes(int64(len(payload)))
 			for b.Loop() {
-				if got := stripResponsesInputItemStatus(payload); len(got) >= len(payload) {
+				if got := stripResponsesInputItemStatus(payload, "function_call"); len(got) >= len(payload) {
 					b.Fatal("status fields were not removed")
 				}
 			}
