@@ -46,6 +46,8 @@
 
 ## 自定义状态码(改相关代码前先读语义)
 
+- **非流式 OpenAI 空完成**：同协议转发与跨协议响应转换均在提交下游前检查原始 Chat Completions JSON。只有全部 choice 均为 assistant、`finish_reason=stop` 且消息字段没有输出、usage 没有正数输出/推理 token 时，才按 `ErrUpstreamEmptyResponse` 进入模型级冷却与故障切换。保留原始响应供诊断；文本（含空白）、工具调用、拒绝、推理、多模态及未知非空扩展均保留，`length`/`content_filter` 等终态不按空故障重试。不把无 choices、未知结构或流式响应纳入此判定。
+
 - **499** 客户端取消:不计失败、不冷却,已提交流的部分 usage 照常计费([计费口径](billing.md));上游直接返回 499:模型级冷却
 - **管理员手动中断**(`admin_active_requests.go`,`POST /admin/active-requests/:request_id/abort`):`errOperatorAbort` 是独立控制信号,不伪装网络故障、不施加冷却。
   - **未提交响应**:立即终止当前上游,跳过当前渠道的剩余 Key/URL/协议及付费候选,保留下游并切下一渠道(包括 Responses WS 的跨传输切换);无候选则失败。日志记 502

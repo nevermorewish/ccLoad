@@ -1453,10 +1453,11 @@ func (s *Server) handleSuccessResponse(
 			}
 		}
 	} else if !deferredWriter.Committed() && streamErr == nil {
-		// Non-stream responses are atomic: any bytes read successfully are
-		// committed together. Empty-body validation is handled before this path
-		// by probeEmptyOKResponse; preserving the existing passthrough behavior
-		// here also covers providers that return non-standard SSE framing.
+		if result, duration, err := rejectEmptyNonStreamChatResponse(reqCtx, resp, hdrClone, readStats, upstreamProtocol, deferredWriter.buffer.Bytes()); err != nil {
+			return result, duration, err
+		}
+		// Non-stream responses are atomic: validate before committing any bytes
+		// so an empty completion can still fail over to another channel.
 		if commitErr := deferredWriter.Commit(); commitErr != nil {
 			streamErr = commitErr
 		}
@@ -1568,6 +1569,9 @@ func (s *Server) handleTranslatedNonStreamSuccessResponse(
 	}
 
 	parser := newJSONUsageParser(upstreamProtocol)
+	if result, duration, err := rejectEmptyNonStreamChatResponse(reqCtx, resp, hdrClone, readStats, upstreamProtocol, responseBody); err != nil {
+		return result, duration, err
+	}
 	if err := parser.Feed(responseBody); err != nil {
 		return &fwResult{
 			Status:         resp.StatusCode,

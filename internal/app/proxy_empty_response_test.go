@@ -1,0 +1,142 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"ccLoad/internal/model"
+	"ccLoad/internal/util"
+)
+
+const emptyChatCompletion = `{"choices":[{"finish_reason":"stop","index":0,"message":{"role":"assistant"}}],"id":"empty-chat","model":"gpt-6.1-sol","object":"chat.completion","usage":{"prompt_tokens":15,"completion_tokens":0,"total_tokens":15}}`
+
+func TestNonStreamChatOutputValidation(t *testing.T) {
+	t.Parallel()
+	chat := func(message, finish, usage string) string {
+		return fmt.Sprintf(`{"choices":[{"finish_reason":%q,"message":%s}],"usage":%s}`, finish, message, usage)
+	}
+	for _, tc := range []struct {
+		name  string
+		body  string
+		empty bool
+	}{
+		{"captured_empty", emptyChatCompletion, true},
+		{"null_content", chat(`{"role":"assistant","content":null}`, "stop", `{}`), true},
+		{"empty_text", chat(`{"role":"assistant","content":""}`, "stop", `{}`), true},
+		{"empty_fields", chat(`{"role":"assistant","content":[],"tool_calls":[],"function_call":{},"refusal":null,"reasoning_content":""}`, "stop", `{}`), true},
+		{"text", chat(`{"role":"assistant","content":"pong"}`, "stop", `{"completion_tokens":0}`), false},
+		{"whitespace", chat(`{"role":"assistant","content":" "}`, "stop", `{}`), false},
+		{"tools", chat(`{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}`, "stop", `{}`), false},
+		{"legacy_function", chat(`{"role":"assistant","function_call":{"name":"lookup","arguments":"{}"}}`, "stop", `{}`), false},
+		{"refusal", chat(`{"role":"assistant","refusal":"Cannot comply"}`, "stop", `{}`), false},
+		{"reasoning_content", chat(`{"role":"assistant","reasoning_content":"thinking"}`, "stop", `{}`), false},
+		{"reasoning", chat(`{"role":"assistant","reasoning":"thinking"}`, "stop", `{}`), false},
+		{"reasoning_details", chat(`{"role":"assistant","reasoning_details":[{"text":"thinking"}]}`, "stop", `{}`), false},
+		{"audio", chat(`{"role":"assistant","audio":{"data":"YQ=="}}`, "stop", `{}`), false},
+		{"multimodal_content", chat(`{"role":"assistant","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,YQ=="}}]}`, "stop", `{}`), false},
+		{"extension", chat(`{"role":"assistant","future_output":{"data":"x"}}`, "stop", `{}`), false},
+		{"truncated", chat(`{"role":"assistant"}`, "length", `{}`), false},
+		{"filtered", chat(`{"role":"assistant"}`, "content_filter", `{}`), false},
+		{"tool_finish", chat(`{"role":"assistant"}`, "tool_calls", `{}`), false},
+		{"no_finish", chat(`{"role":"assistant"}`, "", `{}`), false},
+		{"hidden_output", chat(`{"role":"assistant"}`, "stop", `{"completion_tokens":8}`), false},
+		{"hidden_output_alias", chat(`{"role":"assistant"}`, "stop", `{"output_tokens":8}`), false},
+		{"hidden_reasoning", chat(`{"role":"assistant"}`, "stop", `{"completion_tokens_details":{"reasoning_tokens":8}}`), false},
+		{"missing_message", chat(`null`, "stop", `{}`), false},
+		{"wrong_role", chat(`{"role":"user"}`, "stop", `{}`), false},
+		{"mixed_choices", `{"choices":[{"finish_reason":"stop","message":{"role":"assistant"}},{"finish_reason":"stop","message":{"role":"assistant","content":"pong"}}]}`, false},
+		{"no_choices", `{"choices":[],"usage":{"completion_tokens":0}}`, false},
+		{"other_protocol", `{"type":"message","content":[],"stop_reason":"end_turn"}`, false},
+		{"last_duplicate_wins_empty", chat(`{"role":"assistant","content":"pong","content":""}`, "stop", `{}`), true},
+		{"last_duplicate_wins_text", chat(`{"role":"assistant","content":"","content":"pong"}`, "stop", `{}`), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reqCtx := &requestContext{ctx: context.Background(), startTime: time.Now()}
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(tc.body))}
+			rec := newRecorder()
+			result, _, err := (&Server{}).handleResponse(reqCtx, resp, rec, "openai", &model.Config{ID: 1}, "test", nil)
+			if tc.empty {
+				if !errors.Is(err, util.ErrUpstreamEmptyResponse) || result == nil || result.ResponseCommitted || rec.Body.Len() != 0 {
+					t.Fatalf("expected uncommitted empty-response failure: result=%+v err=%v body=%s", result, err, rec.Body.String())
+				}
+				if string(result.Body) != tc.body {
+					t.Fatal("raw upstream body not preserved for diagnostics")
+				}
+			} else if err != nil || result == nil || !result.ResponseCommitted || rec.Body.String() != tc.body {
+				t.Fatalf("legitimate response changed: result=%+v err=%v body=%s", result, err, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestProxy_NonStreamingEmptyAssistant(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		path     string
+		fallback bool
+	}{
+		{"chat_fallback", "/v1/chat/completions", true},
+		{"messages_fallback", "/v1/messages", true},
+		{"chat_exhausted", "/v1/chat/completions", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var badCalls, goodCalls atomic.Int32
+			bad := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				badCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(emptyChatCompletion))
+			}))
+			defer bad.Close()
+			good := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				goodCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"fallback","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"pong"}}],"usage":{"prompt_tokens":15,"completion_tokens":1}}`))
+			}))
+			defer good.Close()
+			channels := []testChannel{{name: "bad", models: "gpt-6.1-sol", apiKey: "test-bad", priority: 100, upstreamProtocol: "openai", protocolTransformMode: model.ProtocolTransformModeLocal}}
+			urls := map[int]string{0: bad.URL}
+			if tc.fallback {
+				channels = append(channels, testChannel{name: "good", models: "gpt-6.1-sol", apiKey: "test-good", priority: 50, upstreamProtocol: "openai", protocolTransformMode: model.ProtocolTransformModeLocal})
+				urls[1] = good.URL
+			}
+			env := setupProxyTestEnv(t, channels, urls)
+			w := doProxyRequest(t, env.engine, tc.path, map[string]any{
+				"model": "gpt-6.1-sol", "stream": false, "max_tokens": 16,
+				"messages": []map[string]string{{"role": "user", "content": "Reply with the single word: pong"}},
+			}, nil)
+			if tc.fallback {
+				if w.Code != http.StatusOK || goodCalls.Load() != 1 || !strings.Contains(w.Body.String(), "pong") {
+					t.Fatalf("expected healthy fallback: status=%d calls=%d body=%s", w.Code, goodCalls.Load(), w.Body.String())
+				}
+			} else if w.Code < 500 {
+				t.Fatalf("expected upstream failure when exhausted: status=%d body=%s", w.Code, w.Body.String())
+			}
+			if badCalls.Load() != 1 || strings.Contains(w.Body.String(), "empty-chat") {
+				t.Fatalf("empty response leaked or was retried: calls=%d body=%s", badCalls.Load(), w.Body.String())
+			}
+			configs, err := env.store.ListConfigs(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			cooldowns, err := env.store.GetAllModelCooldowns(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, cfg := range configs {
+				if cfg.Name == "bad" && !cooldowns[cfg.ID]["gpt-6.1-sol"].After(time.Now()) {
+					t.Fatal("empty assistant did not trigger model cooldown")
+				}
+			}
+		})
+	}
+}

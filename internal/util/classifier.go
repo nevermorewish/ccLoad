@@ -23,7 +23,7 @@ var ErrUpstreamFirstByteTimeout = errors.New("upstream first byte timeout")
 // ErrUpstreamStreamTimeout 是上游流式请求总超时的统一错误标识。
 var ErrUpstreamStreamTimeout = errors.New("upstream stream timeout")
 
-// ErrUpstreamEmptyResponse 是上游 200 但无响应体的统一错误标识。
+// ErrUpstreamEmptyResponse 是上游 200 但无响应体或无有效输出的统一错误标识。
 var ErrUpstreamEmptyResponse = errors.New("upstream returned empty response")
 
 // ErrUpstreamInvalidResponse 是上游返回 2xx 但正文不是 API 响应的统一错误标识。
