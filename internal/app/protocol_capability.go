@@ -101,6 +101,26 @@ func nativeProtocolCandidates(candidates []protocol.Protocol, clientProtocol pro
 	return native
 }
 
+// Chat and Responses copy temperature/top_p verbatim in both directions.
+// Other converters may normalize or omit them, so are not safe fallbacks here.
+func samplingProtocolCandidates(candidates []protocol.Protocol, client protocol.Protocol, cfg *model.Config) []protocol.Protocol {
+	if client != protocol.OpenAI && client != protocol.Codex {
+		return nativeProtocolCandidates(candidates, client)
+	}
+	allowed := make([]protocol.Protocol, 0, len(candidates))
+	for _, candidate := range candidates {
+		// Codex OAuth wire preparation removes these controls even when the
+		// protocol converter retained them.
+		if candidate == protocol.Codex && cfg.UsesCodexOAuth() {
+			continue
+		}
+		if candidate == protocol.OpenAI || candidate == protocol.Codex {
+			allowed = append(allowed, candidate)
+		}
+	}
+	return allowed
+}
+
 func protocolCandidatesForURL(
 	entry model.ChannelURL,
 	transformMode string,

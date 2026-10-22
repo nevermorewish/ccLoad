@@ -17,7 +17,7 @@ func ValidateRequestSemantics(from, to Protocol, raw []byte) error {
 		return &RequestParameterError{Param: path, Message: fmt.Sprintf("parameter %q cannot be represented by %s -> %s conversion; use a native %s upstream", path, from, to, from)}
 	}
 	if from == Codex {
-		if root.Get("top_logprobs").Exists() {
+		if root.Get("top_logprobs").Type != gjson.Null {
 			return reject("top_logprobs")
 		}
 		for _, value := range root.Get("include").Array() {
@@ -38,7 +38,7 @@ func ValidateRequestSemantics(from, to Protocol, raw []byte) error {
 		}
 		if to != OpenAI {
 			for _, path := range []string{"metadata"} {
-				if root.Get(path).Exists() {
+				if root.Get(path).Type != gjson.Null {
 					return reject(path)
 				}
 			}
@@ -62,14 +62,14 @@ func ValidateRequestSemantics(from, to Protocol, raw []byte) error {
 		}
 		if to == Codex {
 			paths = append(paths, "stop", "seed", "frequency_penalty", "presence_penalty", "logit_bias", "functions", "function_call")
-			if v := root.Get("n"); v.Exists() && v.Int() != 1 {
+			if v := root.Get("n"); v.Type != gjson.Null && v.Int() != 1 {
 				return reject("n")
 			}
 		} else {
 			paths = append(paths, "metadata")
 		}
 		for _, path := range paths {
-			if root.Get(path).Exists() {
+			if root.Get(path).Type != gjson.Null {
 				return reject(path)
 			}
 		}

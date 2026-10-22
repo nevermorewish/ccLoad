@@ -14,8 +14,7 @@ const (
 	RequestRejectionNone RequestRejection = iota
 	// RequestRejectionNativeOnly 上游拒绝了调用方显式设置的顶层参数或取值、模型不支持的取值，
 	// 或找不到 previous_response_id 指向的响应。另一家同协议上游可能支持，允许继续切换；
-	// 但跨协议转换只能改写或删掉被拒绝的字段（或丢掉续接状态）后“成功”，等于静默改写请求，
-	// 所以后续候选只能原样接收请求。与渠道健康无关，不冷却。
+	// 默认只允许原生协议；调用方可为已验证能无损保留参数的转换放行。与渠道健康无关，不冷却。
 	RequestRejectionNativeOnly
 	// RequestRejectionFinal 不应通过换上游绕过的拒绝：内容安全拦截与确定性的请求结构错误。
 	// 直接返回客户端，不冷却。
@@ -62,6 +61,29 @@ func ClassifyRequestRejection(responseBody []byte) RequestRejection {
 		}
 	}
 	return RequestRejectionNone
+}
+
+// IsSamplingParameterRejection identifies errors whose only rejected controls are
+// temperature/top_p. Callers must still verify the target converter preserves
+// both controls. Ambiguous or mixed errors retain the native-only restriction.
+func IsSamplingParameterRejection(body []byte) bool {
+	errs := parseUpstreamRequestErrors(body)
+	if len(errs) == 0 {
+		return false
+	}
+	for _, e := range errs {
+		if !isNativeOnlyRequestRejection(e) || isFinalRequestRejection(e) {
+			return false
+		}
+		param := strings.TrimPrefix(e.param, "$.")
+		if param == "" {
+			param, _ = quotedParameterAfter(e.message, "unsupported parameter: '")
+		}
+		if param != "temperature" && param != "top_p" {
+			return false
+		}
+	}
+	return true
 }
 
 func isFinalRequestRejection(e upstreamRequestError) bool {

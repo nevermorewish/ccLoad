@@ -18,6 +18,7 @@ func TestProxyCompatibilityRejectionCannotBecomeConvertedSuccess(t *testing.T) {
 		request   map[string]any
 		rejection string
 	}{
+		{"explicit_cache", map[string]any{"input": "hi", "prompt_cache_options": map[string]any{"mode": "explicit", "ttl": "30m"}}, `{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"prompt_cache_options","message":"explicit caching unsupported"}}`},
 		{"logprobs", map[string]any{"input": "hi", "top_logprobs": 2}, `{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"top_logprobs","message":"logprobs are not supported with reasoning models"}}`},
 		{"reasoning", map[string]any{"input": "hi", "reasoning": map[string]any{"effort": "minimal"}}, `{"error":{"type":"invalid_request_error","code":"unsupported_value","param":"reasoning.effort","message":"minimal is not supported"}}`},
 		{"configuration", map[string]any{"input": []any{map[string]any{"type": "configuration_update", "reasoning": map[string]any{"mode": "pro"}}}}, `{"error":{"type":"invalid_request_error","code":"invalid_configuration","param":"input[0]","message":"configuration_update is not available for this model"}}`},

@@ -315,9 +315,12 @@ type proxyRequestContext struct {
 	sessionAffinity         sessionAffinityTarget      // 请求开始时的会话绑定，channelID=0 表示无
 	nativeCodexWS           *codexUpstreamWebsocketSession
 	nativeCodexBody         []byte
-	// nativeProtocolOnly 在上游拒绝了调用方显式设置的参数后置位：后续候选只能是原生协议，
-	// 跨协议转换会改写或删掉被拒绝的字段后返回成功（util.RequestRejectionNativeOnly）。
+	// nativeProtocolOnly protects continuation state and controls without a
+	// verified lossless conversion. It takes precedence over sampling fallback.
 	nativeProtocolOnly bool
+	// preserveSamplingParameters restricts fallback to converters known to retain
+	// temperature/top_p after an upstream rejects either control.
+	preserveSamplingParameters bool
 }
 
 // countTokens reports the auxiliary count_tokens request: it is never billed,

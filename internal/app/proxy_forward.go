@@ -4035,6 +4035,12 @@ func (s *Server) attemptKeyAcrossURLs(
 	reqCtx *proxyRequestContext,
 	w http.ResponseWriter,
 ) (immediate *proxyResult, urlLastFailure *proxyResult, err error) {
+	// Preserve a real upstream failure across later URL/protocol capability
+	// misses, before the outer channel loop has a chance to observe it.
+	var lastUpstreamFailure *proxyResult
+	defer func() {
+		urlLastFailure = finalFailure(urlLastFailure, lastUpstreamFailure)
+	}()
 	sortedURLs := orderChannelAttemptURLs(selector, cfg, urls)
 	if route := reqCtx.responsesHTTPRoute; route != nil {
 		filtered := sortedURLs[:0]
@@ -4162,6 +4168,9 @@ func (s *Server) attemptKeyAcrossURLs(
 		if reqCtx.nativeProtocolOnly {
 			protocolCandidates = nativeProtocolCandidates(protocolCandidates, clientProtocol)
 		}
+		if reqCtx.preserveSamplingParameters {
+			protocolCandidates = samplingProtocolCandidates(protocolCandidates, clientProtocol, cfg)
+		}
 		if len(protocolCandidates) == 0 {
 			urlLastFailure = &proxyResult{
 				status:                    http.StatusNotFound,
@@ -4188,6 +4197,9 @@ func (s *Server) attemptKeyAcrossURLs(
 				shouldDeferChannelCooldown, urlPolicy.antigravityCapacityRetries)
 			if attemptErr != nil {
 				return nil, nil, attemptErr
+			}
+			if result != nil && !result.succeeded && result.header != nil {
+				lastUpstreamFailure = result
 			}
 			if result != nil && result.operatorAborted {
 				return result, nil, nil
