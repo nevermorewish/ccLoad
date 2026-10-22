@@ -127,10 +127,10 @@ export function ChannelsPage() {
 
   const loadStats = useCallback(async () => {
     try {
-      const data = await getJSON<{ stats?: Array<Record<string, unknown>> }>(`${readBase}/stats`, { range: statsRange, limit: 500, offset: 0 })
+      const data = await getJSON<{ stats?: Array<Record<string, unknown>> }>('/dashboard/stats', { range: statsRange, limit: 500, offset: 0 })
       setStats(aggregateChannelStats(data.stats ?? []))
     } catch { /* 统计列缺失不影响列表 */ }
-  }, [readBase, statsRange])
+  }, [statsRange])
 
   const refresh = useCallback(async () => { invalidateGetCache(); await Promise.all([load(), loadStats()]) }, [load, loadStats])
 

@@ -1,4 +1,4 @@
-/** 列表统计列：按渠道聚合 /admin/stats 的逐模型行，权重与旧页 channels-data.js:aggregateChannelStats 一致。 */
+/** 列表统计列：按渠道聚合 /dashboard/stats 的逐模型行，权重与旧页 channels-data.js:aggregateChannelStats 一致。 */
 export type ChannelStats = {
   success: number
   error: number
