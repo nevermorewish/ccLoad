@@ -277,15 +277,13 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
 		"top_p",
 		"service_tier",
 		"truncation",
+		"prompt_cache_options",
 		"prompt_cache_retention",
 		"user",
 	} {
 		if gjson.GetBytes(output, path).Exists() {
 			t.Fatalf("%s should be removed: %s", path, output)
 		}
-	}
-	if got := gjson.GetBytes(output, "prompt_cache_options.mode").String(); got != "implicit" {
-		t.Fatalf("GPT-5.6 cache options must survive: %s", output)
 	}
 }
 
