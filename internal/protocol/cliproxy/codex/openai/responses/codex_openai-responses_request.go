@@ -50,8 +50,18 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 		}
 	}
 
-	rawJSON = deleteCodexRequestFields(rawJSON, "truncation", "prompt_cache_options", "prompt_cache_retention")
-	rawJSON = stripCodexResponsesCacheBreakpoints(rawJSON)
+	rawJSON = deleteCodexRequestFields(rawJSON, "truncation", "prompt_cache_retention")
+	// GPT-5.6+ defines explicit cache options and content-block breakpoints.
+	// Preserve these controls for upstream validation instead of silently
+	// changing an explicit-cache request into implicit caching.
+	cacheModel := strings.TrimSpace(modelName)
+	if cacheModel == "" {
+		cacheModel = gjson.GetBytes(rawJSON, "model").String()
+	}
+	if !preservesExplicitPromptCache(cacheModel) {
+		rawJSON = deleteCodexRequestFields(rawJSON, "prompt_cache_options")
+		rawJSON = stripCodexResponsesCacheBreakpoints(rawJSON)
+	}
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
 
 	// Delete the user field as it is not supported by the Codex upstream.
@@ -164,10 +174,9 @@ func deleteCodexRequestFields(rawJSON []byte, paths ...string) []byte {
 // stripCodexResponsesCacheBreakpoints removes any "prompt_cache_breakpoint" hint
 // attached to input items: inside content-part arrays (message input[].content[]
 // and function_call_output input[].output[]) or as an item-level field. Some
-// clients (e.g. GitHub Copilot CLI) attach this field per content item when
-// targeting the OpenAI Responses format. Codex Responses rejects it outright:
-// {"error":{"message":"prompt_cache_breakpoint is not supported on this model", ...}}.
-// The top-level prompt_cache_options strip above does not cover these nested cases.
+// clients attach this field per content item when targeting Responses. This
+// legacy compatibility rule applies only before GPT-5.6 (or to unknown model
+// families); it must not erase explicit caching on newer GPT models.
 func stripCodexResponsesCacheBreakpoints(rawJSON []byte) []byte {
 	if !bytes.Contains(rawJSON, []byte(`"prompt_cache_breakpoint"`)) {
 		return rawJSON
