@@ -181,11 +181,11 @@ func cooldownInputForModel(in cooldown.ErrorInput, model string) cooldown.ErrorI
 	return in
 }
 
-func isProtocolEndpointMissing(res *fwResult) bool {
+func isProtocolEndpointMissing(res *fwResult, upstream protocol.Protocol) bool {
 	if res == nil || res.ResponseCommitted {
 		return false
 	}
-	return util.ShouldFallbackProtocol(res.Status, res.Body)
+	return util.ShouldFallbackProtocolForUpstream(res.Status, res.Body, upstream)
 }
 
 func (s *Server) logProxyResult(

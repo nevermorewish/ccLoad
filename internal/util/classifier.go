@@ -1406,6 +1406,34 @@ func ShouldFallbackProtocol(statusCode int, responseBody []byte) bool {
 	}
 }
 
+// ShouldFallbackProtocolForUpstream also recognizes validation errors that only
+// imply a protocol mismatch in the context of the protocol actually sent.
+func ShouldFallbackProtocolForUpstream(statusCode int, responseBody []byte, upstream protocol.Protocol) bool {
+	if ShouldFallbackProtocol(statusCode, responseBody) {
+		return true
+	}
+	if statusCode != http.StatusBadRequest || upstream != protocol.Codex {
+		return false
+	}
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(responseBody, &payload); err != nil {
+		return false
+	}
+	// Responses sends input, not messages. Some gateways accept /responses but
+	// validate it as a chat request. Retry with a translated protocol instead of
+	// treating this as a malformed client request. The same error on a messages
+	// protocol is a normal validation error and must not trigger negotiation.
+	message := strings.ToLower(payload.Error.Message)
+	message = strings.NewReplacer("`", "", "\"", "", "'", "").Replace(message)
+	return strings.EqualFold(payload.Error.Code, "MissingParameter") &&
+		strings.Contains(message, "missing messages parameter")
+}
+
 func isUnsupportedProtocolRequest(responseBody []byte) bool {
 	var payload struct {
 		Error struct {

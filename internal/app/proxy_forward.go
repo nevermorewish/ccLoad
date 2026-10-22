@@ -3368,7 +3368,7 @@ func (s *Server) forwardAttempt(
 
 	if cfg.GetProtocolTransformMode() != model.ProtocolTransformModeUpstream &&
 		!isAntigravityModelNotFound(cfg, res.Status) &&
-		isProtocolEndpointMissing(res) {
+		isProtocolEndpointMissing(res, upstreamProtocol) {
 		logged := s.logProtocolCapabilityFallback(
 			reqCtx, cfg, actualModel, selectedKey, res.Status, duration, res,
 			fmt.Sprintf("upstream protocol %s rejected request", upstreamProtocol),

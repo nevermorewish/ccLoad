@@ -3086,7 +3086,8 @@ func isChannelTestProtocolEndpointMissing(cfg *model.Config, result map[string]a
 		return false
 	}
 	_, errorBody, _ := buildTestFailureClassificationInput(result)
-	return util.ShouldFallbackProtocol(statusCode, errorBody)
+	upstream, _ := result["upstream_protocol"].(string)
+	return util.ShouldFallbackProtocolForUpstream(statusCode, errorBody, protocol.Protocol(upstream))
 }
 
 func isAutomaticProtocolTranslationFailure(cfg *model.Config, err error) bool {
