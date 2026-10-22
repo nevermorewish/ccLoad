@@ -3504,6 +3504,9 @@ func retryBodyForRejectedRequest(
 	plan protocol.TransformPlan,
 	res *fwResult,
 ) ([]byte, string, bool) {
+	if retryBody, strategy, ok := usageSemanticsRetryBodyFor400(upstreamProtocol, plan, res); ok {
+		return retryBody, strategy, true
+	}
 	if retryBody, strategy, ok := anthropicRetryBodyFor400(upstreamProtocol, cfg, target, plan, res); ok {
 		return retryBody, strategy, true
 	}
