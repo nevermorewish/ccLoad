@@ -144,45 +144,51 @@ func TestAutoCooldownDisabledPreservesKeyRestrictions(t *testing.T) {
 }
 
 func TestProxy_AutoCooldownDisabledRetriesEveryRequest(t *testing.T) {
-	for _, status := range []int{401, 429, 503} {
-		t.Run(strconv.Itoa(status), func(t *testing.T) {
-			var primaryCalls, fallbackCalls atomic.Int64
-			primary := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				primaryCalls.Add(1)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(status)
-				_, _ = io.WriteString(w, `{"error":{"message":"upstream failed"}}`)
-			}))
-			defer primary.Close()
-			fallback := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fallbackCalls.Add(1)
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, `{"id":"chat-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
-			}))
-			defer fallback.Close()
-			env := setupProxyTestEnvWithSettings(t, []testChannel{
-				{name: "primary", upstreamProtocol: "openai", models: "test-model", priority: 100, retryOtherKeysOnFailure: true},
-				{name: "fallback", upstreamProtocol: "openai", models: "test-model", priority: 50},
-			}, map[int]string{0: primary.URL, 1: fallback.URL}, map[string]string{
-				autoCooldownEnabledSettingKey: "false", "cooldown_fallback_enabled": "false",
-			})
-			if err := env.store.CreateAPIKeysBatch(context.Background(), []*model.APIKey{{ChannelID: 1, KeyIndex: 1, APIKey: "sk-second"}}); err != nil {
-				t.Fatal(err)
-			}
-			env.server.invalidateChannelRelatedCache(1)
-			for range 2 {
-				response := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
-					"model": "test-model", "messages": []any{map[string]any{"role": "user", "content": "hi"}},
-				}, nil)
-				if response.Code != http.StatusOK {
-					t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	for _, retryOtherKeys := range []bool{false, true} {
+		for _, status := range []int{401, 403, 429, 503} {
+			t.Run(strconv.Itoa(status)+"/key-fallback="+strconv.FormatBool(retryOtherKeys), func(t *testing.T) {
+				var primaryCalls, fallbackCalls atomic.Int64
+				primary := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					primaryCalls.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(status)
+					_, _ = io.WriteString(w, `{"error":{"message":"upstream failed"}}`)
+				}))
+				defer primary.Close()
+				fallback := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					fallbackCalls.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"chat-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+				}))
+				defer fallback.Close()
+				env := setupProxyTestEnvWithSettings(t, []testChannel{
+					{name: "primary", upstreamProtocol: "openai", models: "test-model", priority: 100, retryOtherKeysOnFailure: retryOtherKeys},
+					{name: "fallback", upstreamProtocol: "openai", models: "test-model", priority: 50},
+				}, map[int]string{0: primary.URL, 1: fallback.URL}, map[string]string{
+					autoCooldownEnabledSettingKey: "false", "cooldown_fallback_enabled": "false",
+				})
+				if err := env.store.CreateAPIKeysBatch(context.Background(), []*model.APIKey{{ChannelID: 1, KeyIndex: 1, APIKey: "sk-second"}}); err != nil {
+					t.Fatal(err)
 				}
-			}
-			if primaryCalls.Load() != 4 || fallbackCalls.Load() != 2 {
-				t.Fatalf("primary calls=%d fallback calls=%d; want 4 and 2", primaryCalls.Load(), fallbackCalls.Load())
-			}
-			assertNoStoredAutoCooldowns(t, env.server)
-		})
+				env.server.invalidateChannelRelatedCache(1)
+				for range 2 {
+					response := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
+						"model": "test-model", "messages": []any{map[string]any{"role": "user", "content": "hi"}},
+					}, nil)
+					if response.Code != http.StatusOK {
+						t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+					}
+				}
+				wantPrimary := int64(4)
+				if !retryOtherKeys && (status == 429 || status == 503) {
+					wantPrimary = 2
+				}
+				if primaryCalls.Load() != wantPrimary || fallbackCalls.Load() != 2 {
+					t.Fatalf("primary calls=%d fallback calls=%d; want %d and 2", primaryCalls.Load(), fallbackCalls.Load(), wantPrimary)
+				}
+				assertNoStoredAutoCooldowns(t, env.server)
+			})
+		}
 	}
 }
 
