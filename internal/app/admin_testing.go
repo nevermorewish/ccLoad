@@ -172,18 +172,19 @@ func (s *Server) HandleChannelWebsocketProbe(c *gin.Context) {
 }
 
 type channelTestRequestPlan struct {
-	clientProtocol    string
-	upstreamProtocol  string
-	upstreamStreaming bool
-	codeBuddyOAuth    bool
-	openCodeFree      bool
-	apiKey            string
-	xaiOAuth          bool
-	xaiConversationID string
-	clientTester      testutil.ChannelTester
-	clientURL         string
-	clientHeaders     http.Header
-	fullURL           string
+	clientProtocol      string
+	upstreamProtocol    string
+	upstreamStreaming   bool
+	codeBuddyOAuth      bool
+	openCodeFree        bool
+	forceUpstreamStream bool
+	apiKey              string
+	xaiOAuth            bool
+	xaiConversationID   string
+	clientTester        testutil.ChannelTester
+	clientURL           string
+	clientHeaders       http.Header
+	fullURL             string
 	// endpointPath 是下游端点路径，协议族判定一律用它，不能用 fullURL 的完整
 	// 路径——渠道基础 URL 带子路径时两者不等，见 downstreamEndpointPath。
 	endpointPath              string
@@ -1889,9 +1890,9 @@ func (s *Server) testChannelAPIWithURLForProtocol(
 		}
 	}
 
-	if requestPlan.openCodeFree && !testReq.Stream && resp.StatusCode >= 200 && resp.StatusCode < 300 && responseIsSSE(resp, true) {
+	if (requestPlan.openCodeFree || requestPlan.forceUpstreamStream) && !testReq.Stream && resp.StatusCode >= 200 && resp.StatusCode < 300 && responseIsSSE(resp, true) {
 		collectedResult := map[string]any{"is_streaming": false}
-		body, parser, collectErr := collectOpenCodeCompletion(ctx, resp.Body, protocol.Protocol(requestPlan.upstreamProtocol), func(parser *sseUsageParser) {
+		body, parser, collectErr := collectUpstreamCompletion(ctx, resp.Body, protocol.Protocol(requestPlan.upstreamProtocol), func(parser *sseUsageParser) {
 			if testStreamParserHasFirstContent(parser) {
 				markTestFirstStreamContent(requestPlan, collectedResult, start)
 			}
@@ -2102,6 +2103,22 @@ func (s *Server) parseTestNonStreamResponse(
 				return result
 			}
 			parseBody = upstreamBody
+		}
+		if requestPlan.upstreamProtocol == string(protocol.Gemini) {
+			if status, completionErr := geminiCompletionFailure(requestPlan.endpointPath, upstreamBody); status != 0 {
+				result["success"] = false
+				result["status_code"] = util.ClientStatusFor(status)
+				result["upstream_response_body"] = string(bodyBytes)
+				if completionErr != nil {
+					result["error"] = completionErr.Error()
+				} else {
+					var apiError map[string]any
+					_ = sonic.Unmarshal(upstreamBody, &apiError)
+					result["api_error"] = apiError
+					result["error"] = extractTestAPIErrorMessage(apiError)
+				}
+				return result
+			}
 		}
 		if (requestPlan.clientProtocol != requestPlan.upstreamProtocol || requestPlan.antigravityOAuth) && len(bodyBytes) > 0 {
 			translatedBody, translateErr := s.protocolRegistry.TranslateResponseNonStream(
@@ -2355,6 +2372,22 @@ func (s *Server) buildTestUpstreamRequestPlan(
 		}
 		requestPlan.upstreamStreaming = true
 	}
+	requestPlan.forceUpstreamStream = shouldForceUpstreamStream(cfgForBuild, upstreamProtocolValue, requestPath)
+	if requestPlan.forceUpstreamStream {
+		requestPlan.requestBody, err = forceStreamRequestBody(requestPlan.requestBody, upstreamProtocolValue)
+		if err != nil {
+			return nil, nil, err
+		}
+		requestPath = forceStreamRequestPath(requestPath, upstreamProtocolValue)
+		if upstreamProtocolValue == protocol.Gemini {
+			parsedTestURL.Path = forceStreamRequestPath(parsedTestURL.Path, upstreamProtocolValue)
+			query := parsedTestURL.Query()
+			query.Set("alt", "sse")
+			parsedTestURL.RawQuery = query.Encode()
+			requestPlan.fullURL = parsedTestURL.String()
+		}
+		requestPlan.upstreamStreaming = true
+	}
 	requestPlan.endpointPath = requestPath
 	requestPlan.codeBuddyOAuth = cfgForBuild.UsesCodeBuddyOAuth()
 	// Same model source as prepareTranslatedUpstreamBody, so body shaping and transport agree.
@@ -2368,7 +2401,7 @@ func (s *Server) newTestUpstreamRequest(
 	testReq *testutil.TestChannelRequest,
 	requestPlan *channelTestRequestPlan,
 ) (*http.Request, context.CancelFunc, error) {
-	ctx, timeout := s.newChannelTestTimeoutContextWithTimeouts(reqCtx, testReq.Stream || cfgForBuild.UsesCodeBuddyOAuth() || requestPlan.openCodeFree, s.resolveProtocolTimeouts(protocol.TransformPlan{
+	ctx, timeout := s.newChannelTestTimeoutContextWithTimeouts(reqCtx, testReq.Stream || cfgForBuild.UsesCodeBuddyOAuth() || requestPlan.openCodeFree || requestPlan.forceUpstreamStream, s.resolveProtocolTimeouts(protocol.TransformPlan{
 		UpstreamProtocol: protocol.Protocol(requestPlan.upstreamProtocol),
 	}))
 	requestPlan.timeout = timeout

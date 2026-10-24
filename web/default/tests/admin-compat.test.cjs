@@ -14,6 +14,17 @@ function loadPage(relative) {
 }
 const api = loadPage('pages/channels/api.ts');
 const { advancedFromChannel, advancedToPayload } = loadPage('pages/channels/advanced-settings-dialog.tsx');
+
+test('channel force-upstream-stream switch persists without body rules and can be disabled', () => {
+  const initial = advancedFromChannel({ custom_request_rules: { force_upstream_stream: true } });
+  assert.equal(initial.force_upstream_stream, true);
+  const payload = advancedToPayload(initial, false);
+  assert.equal(payload.custom_request_rules.force_upstream_stream, true);
+  assert.equal(advancedToPayload({ ...initial, force_upstream_stream: false }, false).custom_request_rules, null);
+  const old = advancedFromChannel({});
+  assert.equal(old.force_upstream_stream, false);
+  assert.equal(advancedToPayload(old, false).custom_request_rules, null);
+});
 const tokens = loadPage('pages/tokens-page.tsx');
 const reasoning = loadPage('pages/reasoning-settings-dialog.tsx');
 const routing = loadPage('pages/route-preview-dialog.tsx');

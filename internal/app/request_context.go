@@ -31,6 +31,7 @@ type requestContext struct {
 	responsesSSEUpstreamNonStream bool
 	responsesCompaction           *responsesCompactionRequest
 	openCodeFree                  bool
+	forceUpstreamStream           bool // Upstream transport only; isStreaming retains the client contract.
 	codeBuddyOAuth                bool
 	antigravityOAuth              bool
 	antigravityReplay             *antigravityReplay

@@ -1,8 +1,11 @@
 package app
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
 
+	"ccLoad/internal/protocol"
 	"ccLoad/internal/util"
 
 	"github.com/bytedance/sonic"
@@ -64,13 +67,84 @@ func isEmptyChatOutputValue(value any) bool {
 	}
 }
 
-func rejectEmptyNonStreamChatResponse(reqCtx *requestContext, resp *http.Response, hdr http.Header, stats *streamReadStats, upstreamProtocol string, body []byte) (*fwResult, float64, error) {
-	if reqCtx.isStreaming || resp.StatusCode != http.StatusOK || upstreamProtocol != util.ProtocolOpenAI || !isEmptyChatCompletion(body) {
+// geminiCompletionFailure checks the complete JSON before conversion or commit.
+// A 200 error envelope must retain its real status and body. Token counts alone
+// cannot prove that a response contains output usable by the client.
+func geminiCompletionFailure(path string, body []byte) (int, error) {
+	generation := strings.HasSuffix(path, ":generateContent") || strings.HasSuffix(path, ":streamGenerateContent")
+	var response struct {
+		Error          any `json:"error"`
+		PromptFeedback struct {
+			BlockReason string `json:"blockReason"`
+		} `json:"promptFeedback"`
+		Candidates []struct {
+			FinishReason string `json:"finishReason"`
+			Content      struct {
+				Parts []map[string]any `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := sonic.Unmarshal(body, &response); err != nil {
+		if generation {
+			return http.StatusBadGateway, fmt.Errorf("%w (Gemini generation response is not valid JSON)", util.ErrUpstreamInvalidResponse)
+		}
+		return 0, nil
+	}
+	if response.Error != nil {
+		return classifySSEErrorStatus(body), nil
+	}
+	if !generation || response.PromptFeedback.BlockReason != "" {
+		return 0, nil
+	}
+	if len(response.Candidates) == 0 {
+		return http.StatusBadGateway, fmt.Errorf("%w (200 OK without Gemini candidates or a prompt block reason)", util.ErrUpstreamEmptyResponse)
+	}
+	for _, candidate := range response.Candidates {
+		// Safety, truncation and other explicit finish reasons are protocol
+		// outcomes, not empty successful completions to replay on another model.
+		if candidate.FinishReason != "" && candidate.FinishReason != "STOP" {
+			return 0, nil
+		}
+		for _, part := range candidate.Content.Parts {
+			for name, value := range part {
+				if name != "thought" && name != "thoughtSignature" && !isEmptyChatOutputValue(value) {
+					return 0, nil
+				}
+			}
+		}
+	}
+	return http.StatusBadGateway, fmt.Errorf("%w (200 OK without Gemini candidate output)", util.ErrUpstreamEmptyResponse)
+}
+
+func rejectInvalidNonStreamCompletion(reqCtx *requestContext, resp *http.Response, hdr http.Header, stats *streamReadStats, upstreamProtocol string, body []byte) (*fwResult, float64, error) {
+	if reqCtx.isStreaming || resp.StatusCode != http.StatusOK {
 		return nil, 0, nil
 	}
-	result, duration, err := emptyOKResponseResult(reqCtx, resp, hdr, stats, "without assistant output")
-	// Retain the actual upstream response for diagnostics, before any translation.
-	result.Body = body
-	result.BytesReceived = stats.totalBytes
-	return result, duration, err
+	var status int
+	var err error
+	switch upstreamProtocol {
+	case util.ProtocolOpenAI:
+		if isEmptyChatCompletion(body) {
+			status = http.StatusBadGateway
+			err = fmt.Errorf("%w (200 OK without assistant output)", util.ErrUpstreamEmptyResponse)
+		}
+	case util.ProtocolGemini:
+		path := reqCtx.transformPlan.UpstreamPath
+		if reqCtx.transformPlan.NeedsTransform {
+			path = buildGeminiGeneratePath(reqCtx.transformPlan.RequestModel(), false)
+		}
+		// Explicitly exclude token counting and other non-generation endpoints.
+		if reqCtx.transformPlan.RequestFamily == protocol.RequestFamilyCountTokens {
+			path = ""
+		}
+		status, err = geminiCompletionFailure(path, body)
+	}
+	if status == 0 {
+		return nil, 0, nil
+	}
+	return &fwResult{
+		Status: status, UpstreamStatus: resp.StatusCode, Header: hdr,
+		Body: body, BytesReceived: stats.totalBytes,
+		FirstByteTime: responseFirstByteSec(reqCtx, stats),
+	}, reqCtx.Duration().Seconds(), err
 }

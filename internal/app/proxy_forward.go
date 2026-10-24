@@ -213,6 +213,10 @@ func (s *Server) buildProxyRequest(
 	// 1. 构建完整 URL
 	upstreamProtocol := protocol.Protocol(runtimeUpstreamProtocol(reqCtx))
 	upstreamStreaming := reqCtx != nil && reqCtx.isStreaming
+	if reqCtx != nil && reqCtx.forceUpstreamStream {
+		upstreamStreaming = true
+		requestPath = forceStreamRequestPath(requestPath, upstreamProtocol)
+	}
 	var sourceBody []byte
 	if reqCtx != nil {
 		sourceBody = reqCtx.transformPlan.OriginalBody
@@ -238,6 +242,14 @@ func (s *Server) buildProxyRequest(
 	// 上游 URL 在 body 最终化前解析，供旧版 Haiku helper 的 CCH 策略使用。
 	xaiResponsesRequest := isXAIOAuthResponsesRequest(cfg, upstreamProtocol, requestPath)
 	upstreamQuery := upstreamQueryForAttempt(reqCtx, rawQuery)
+	if reqCtx != nil && reqCtx.forceUpstreamStream && upstreamProtocol == protocol.Gemini {
+		query, err := url.ParseQuery(upstreamQuery)
+		if err != nil {
+			return nil, err
+		}
+		query.Set("alt", "sse")
+		upstreamQuery = query.Encode()
+	}
 	upstreamURL := buildUpstreamURL(baseURL, requestPath, upstreamQuery)
 	if upstreamProtocol == protocol.SystemOne {
 		upstreamURL = systemOneURL(baseURL)
@@ -373,6 +385,13 @@ func (s *Server) buildProxyRequest(
 			return nil, err
 		}
 		upstreamStreaming = true
+	}
+
+	if reqCtx != nil && reqCtx.forceUpstreamStream {
+		body, err = forceStreamRequestBody(body, upstreamProtocol)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// 2. 创建带上下文的请求
@@ -1349,8 +1368,8 @@ func (s *Server) handleSuccessResponse(
 		}
 		return finishStreaming(s.handleTranslatedStreamSuccessResponse(reqCtx, resp, hdrClone, w, upstreamProtocol, readStats, observer))
 	}
-	if reqCtx.openCodeFree && !reqCtx.isStreaming && responseIsSSE(resp, true) {
-		body, parser, err := collectOpenCodeCompletion(reqCtx.ctx, resp.Body, protocol.Protocol(upstreamProtocol), func(parser *sseUsageParser) {
+	if (reqCtx.openCodeFree || reqCtx.forceUpstreamStream) && !reqCtx.isStreaming && responseIsSSE(resp, true) {
+		body, parser, err := collectUpstreamCompletion(reqCtx.ctx, resp.Body, protocol.Protocol(upstreamProtocol), func(parser *sseUsageParser) {
 			if shouldMarkUpstreamFirstByte(parser) {
 				markFirstStreamResponse(reqCtx, readStats)
 			}
@@ -1530,7 +1549,7 @@ func (s *Server) handleSuccessResponse(
 			}
 		}
 	} else if !deferredWriter.Committed() && streamErr == nil {
-		if result, duration, err := rejectEmptyNonStreamChatResponse(reqCtx, resp, hdrClone, readStats, upstreamProtocol, deferredWriter.buffer.Bytes()); err != nil {
+		if result, duration, err := rejectInvalidNonStreamCompletion(reqCtx, resp, hdrClone, readStats, upstreamProtocol, deferredWriter.buffer.Bytes()); result != nil {
 			return result, duration, err
 		}
 		// Non-stream responses are atomic: validate before committing any bytes
@@ -1646,7 +1665,7 @@ func (s *Server) handleTranslatedNonStreamSuccessResponse(
 	}
 
 	parser := newJSONUsageParser(upstreamProtocol)
-	if result, duration, err := rejectEmptyNonStreamChatResponse(reqCtx, resp, hdrClone, readStats, upstreamProtocol, responseBody); err != nil {
+	if result, duration, err := rejectInvalidNonStreamCompletion(reqCtx, resp, hdrClone, readStats, upstreamProtocol, responseBody); result != nil {
 		return result, duration, err
 	}
 	if err := parser.Feed(responseBody); err != nil {
@@ -2083,10 +2102,10 @@ func attachFirstByteDetector(
 			return reqCtx.startTime
 		}(),
 		onFirstRead: func() {
-			if (reqCtx.isStreaming || reqCtx.codeBuddyOAuth || reqCtx.openCodeFree) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if (reqCtx.isStreaming || reqCtx.codeBuddyOAuth || reqCtx.openCodeFree || reqCtx.forceUpstreamStream) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				return
 			}
-			if reqCtx.isStreaming || reqCtx.codeBuddyOAuth || reqCtx.openCodeFree {
+			if reqCtx.isStreaming || reqCtx.codeBuddyOAuth || reqCtx.openCodeFree || reqCtx.forceUpstreamStream {
 				reqCtx.stopFirstByteTimer()
 			}
 			if readStats.firstByteSec == 0 {
@@ -2120,7 +2139,7 @@ func attachFirstByteDetector(
 // Responses 元数据也属于上游已返回数据，可以结束上游首字节计时；但此处
 // 不通知客户端，因为 deferredResponseWriter 可能仍在缓冲，客户端尚未收到任何字节。
 func markFirstStreamResponse(reqCtx *requestContext, readStats *streamReadStats) {
-	if (!reqCtx.isStreaming && !reqCtx.codeBuddyOAuth && !reqCtx.openCodeFree) || readStats.firstByteSec > 0 {
+	if (!reqCtx.isStreaming && !reqCtx.codeBuddyOAuth && !reqCtx.openCodeFree && !reqCtx.forceUpstreamStream) || readStats.firstByteSec > 0 {
 		return
 	}
 
@@ -2543,11 +2562,13 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 		}
 	}
 	openCodeFree := isOpenCodeFreeRequest(cfg, baseURL, plan.UpstreamProtocol, openCodePath, plan.RequestModel())
-	upstreamStreaming := isStreamingRequest(plan.UpstreamPath, plan.TranslatedBody) || isCodeBuddyChatRequest(cfg, plan.UpstreamProtocol) || openCodeFree
+	forceUpstreamStream := compaction == nil && shouldForceUpstreamStream(cfg, plan.UpstreamProtocol, openCodePath)
+	upstreamStreaming := isStreamingRequest(plan.UpstreamPath, plan.TranslatedBody) || isCodeBuddyChatRequest(cfg, plan.UpstreamProtocol) || openCodeFree || forceUpstreamStream
 	reqCtx := newRequestContextForStreaming(ctx, upstreamStreaming, s.resolveProtocolTimeouts(plan))
-	if isCodeBuddyChatRequest(cfg, plan.UpstreamProtocol) || openCodeFree {
+	if isCodeBuddyChatRequest(cfg, plan.UpstreamProtocol) || openCodeFree || forceUpstreamStream {
 		reqCtx.isStreaming = plan.Streaming
 	}
+	reqCtx.forceUpstreamStream = forceUpstreamStream
 	reqCtx.openCodeFree = openCodeFree
 	reqCtx.responsesCompaction = compaction
 	reqCtx.transformPlan = plan

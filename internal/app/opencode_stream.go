@@ -14,13 +14,13 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// collectOpenCodeCompletion preserves the upstream protocol while joining an
+// collectUpstreamCompletion preserves the upstream protocol while joining an
 // inference stream into its non-stream JSON response. The original SSE parser
 // is returned even on failure for error classification and partial usage.
-func collectOpenCodeCompletion(ctx context.Context, reader io.Reader, upstream protocol.Protocol, onEvent func(*sseUsageParser)) ([]byte, *sseUsageParser, error) {
+func collectUpstreamCompletion(ctx context.Context, reader io.Reader, upstream protocol.Protocol, onEvent func(*sseUsageParser)) ([]byte, *sseUsageParser, error) {
 	switch upstream {
 	case protocol.OpenAI:
-		return collectChatCompletion(ctx, reader, onEvent, nil, "OpenCode")
+		return collectChatCompletion(ctx, reader, onEvent, nil, "upstream")
 	case protocol.Codex:
 		return collectOpenCodeResponsesCompletion(ctx, reader, onEvent)
 	case protocol.Anthropic:
@@ -28,7 +28,7 @@ func collectOpenCodeCompletion(ctx context.Context, reader io.Reader, upstream p
 	case protocol.Gemini:
 		return collectOpenCodeGeminiCompletion(ctx, reader, onEvent)
 	default:
-		return nil, newSSEUsageParser(string(upstream)), fmt.Errorf("unsupported OpenCode stream protocol %q", upstream)
+		return nil, newSSEUsageParser(string(upstream)), fmt.Errorf("unsupported upstream stream protocol %q", upstream)
 	}
 }
 
@@ -38,7 +38,7 @@ func collectOpenCodeResponsesCompletion(ctx context.Context, reader io.Reader, o
 	total := 0
 	err := streamTransformSSEEventsUntil(ctx, reader, discardHTTPResponseWriter{}, nil, func(raw []byte) ([][]byte, error) {
 		if len(raw) > maxCodexNonStreamOutputBytes-total {
-			return nil, errors.New("OpenCode completion exceeds output limit")
+			return nil, errors.New("upstream completion exceeds output limit")
 		}
 		total += len(raw)
 		if err := collector.consume(raw); err != nil {
@@ -53,14 +53,14 @@ func collectOpenCodeResponsesCompletion(ctx context.Context, reader io.Reader, o
 		return nil, parser, err
 	}
 	if parser.GetLastError() != nil {
-		return nil, parser, errors.New("OpenCode upstream stream error")
+		return nil, parser, errors.New("upstream stream error")
 	}
 	if len(collector.terminal) == 0 {
-		return nil, parser, errors.New("OpenCode stream ended without response.completed or response.incomplete")
+		return nil, parser, errors.New("upstream stream ended without response.completed or response.incomplete")
 	}
 	response := gjson.GetBytes(collector.patchedTerminal(), "response")
 	if !response.IsObject() {
-		return nil, parser, errors.New("OpenCode terminal event is missing response")
+		return nil, parser, errors.New("upstream terminal event is missing response")
 	}
 	return []byte(response.Raw), parser, nil
 }
@@ -71,7 +71,7 @@ func collectOpenCodeMessagesCompletion(ctx context.Context, reader io.Reader, on
 	var stopped bool
 	err := streamTransformSSEEventsUntil(ctx, reader, discardHTTPResponseWriter{}, nil, func(raw []byte) ([][]byte, error) {
 		if len(raw) > maxCodexNonStreamOutputBytes-transcript.Len() {
-			return nil, errors.New("OpenCode completion exceeds output limit")
+			return nil, errors.New("upstream completion exceeds output limit")
 		}
 		transcript.Write(raw)
 		if err := parser.Feed(raw); err != nil {
@@ -81,7 +81,7 @@ func collectOpenCodeMessagesCompletion(ctx context.Context, reader io.Reader, on
 			onEvent(parser)
 		}
 		if parser.GetLastError() != nil {
-			return nil, errors.New("OpenCode upstream stream error")
+			return nil, errors.New("upstream stream error")
 		}
 		eventType, data := parseSSEEventChunk(raw)
 		payloadType := gjson.GetBytes(data, "type").String()
@@ -92,7 +92,7 @@ func collectOpenCodeMessagesCompletion(ctx context.Context, reader io.Reader, on
 		return nil, parser, err
 	}
 	if !stopped {
-		return nil, parser, errors.New("OpenCode stream ended without message_stop")
+		return nil, parser, errors.New("upstream stream ended without message_stop")
 	}
 	body, err := translatorcommon.NormalizeAnthropicResponse(transcript.Bytes())
 	if err != nil {
@@ -150,7 +150,7 @@ func collectOpenCodeGeminiCompletion(ctx context.Context, reader io.Reader, onEv
 	total := 0
 	err := streamTransformSSEEventsUntil(ctx, reader, discardHTTPResponseWriter{}, nil, func(raw []byte) ([][]byte, error) {
 		if len(raw) > maxCodexNonStreamOutputBytes-total {
-			return nil, errors.New("OpenCode completion exceeds output limit")
+			return nil, errors.New("upstream completion exceeds output limit")
 		}
 		total += len(raw)
 		if err := parser.Feed(raw); err != nil {
@@ -160,7 +160,7 @@ func collectOpenCodeGeminiCompletion(ctx context.Context, reader io.Reader, onEv
 			onEvent(parser)
 		}
 		if parser.GetLastError() != nil {
-			return nil, errors.New("OpenCode upstream stream error")
+			return nil, errors.New("upstream stream error")
 		}
 		data := sseEventData(raw)
 		if len(data) == 0 {
@@ -168,7 +168,7 @@ func collectOpenCodeGeminiCompletion(ctx context.Context, reader io.Reader, onEv
 		}
 		chunk := gjson.ParseBytes(data)
 		if !chunk.IsObject() {
-			return nil, errors.New("invalid OpenCode Gemini stream event")
+			return nil, errors.New("invalid upstream Gemini stream event")
 		}
 		chunk.ForEach(func(key, value gjson.Result) bool {
 			if key.String() != "candidates" {
@@ -195,7 +195,7 @@ func collectOpenCodeGeminiCompletion(ctx context.Context, reader io.Reader, onEv
 		return nil, parser, err
 	}
 	if !finished {
-		return nil, parser, errors.New("OpenCode stream ended without finishReason")
+		return nil, parser, errors.New("upstream stream ended without finishReason")
 	}
 	var out bytes.Buffer
 	out.WriteString(`{"candidates":[`)

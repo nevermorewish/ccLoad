@@ -17,6 +17,7 @@ export type ManagementDraft = {
   credential_configured?: boolean
 }
 export type AdvancedDraft = {
+  force_upstream_stream: boolean
   headers: HeaderRuleDraft[]; body: BodyRuleDraft[]; cooldown: CooldownRuleDraft[]
   proxy_url: string; available_time_start: string; available_time_end: string; retry_other_keys_on_failure: boolean
   scheduled_check_enabled: boolean; scheduled_check_model: string; scheduled_check_interval_minutes: number; scheduled_check_start_time: string
@@ -40,11 +41,12 @@ const PROFILES = [{ value: '', label: '不启用' }, { value: 'new_api', label: 
 // ---------------------------------------------------------------- 与后端结构互转
 
 export function advancedFromChannel(channel: Record<string, unknown>, management: Record<string, unknown> | undefined): AdvancedDraft {
-  const custom = (channel.custom_request_rules ?? {}) as { headers?: Array<Record<string, unknown>>; body?: Array<Record<string, unknown>> }
+  const custom = (channel.custom_request_rules ?? {}) as { force_upstream_stream?: boolean; headers?: Array<Record<string, unknown>>; body?: Array<Record<string, unknown>> }
   const cooldown = (channel.cooldown_detection_rules ?? {}) as { rules?: Array<Record<string, unknown>> }
   const rules = [...(cooldown.rules ?? [])].sort((a, b) => Number(a.priority ?? 0) - Number(b.priority ?? 0))
   const account = management ?? {}
   return {
+    force_upstream_stream: custom.force_upstream_stream === true,
     headers: (custom.headers ?? []).map((rule) => ({ action: String(rule.action ?? 'override'), name: String(rule.name ?? ''), value: String(rule.value ?? '') })),
     body: (custom.body ?? []).map((rule) => ({ action: String(rule.action ?? 'override'), path: String(rule.path ?? ''), value: rule.value === undefined ? '' : JSON.stringify(rule.value) })),
     cooldown: rules.map((rule) => ({
@@ -136,7 +138,7 @@ export function advancedToPayload(draft: AdvancedDraft, isOAuth: boolean): Recor
     ...(rule.mode === 'fixed' ? { cooldown_seconds: Number(rule.cooldown_seconds) } : { time_capture: rule.time_capture, time_format: rule.time_format, time_layout: rule.time_layout || undefined, timezone: rule.timezone || undefined }),
   }))
   const payload: Record<string, unknown> = {
-    custom_request_rules: headers.length || body.length ? { headers, body } : null,
+    custom_request_rules: headers.length || body.length || draft.force_upstream_stream ? { headers, body, ...(draft.force_upstream_stream ? { force_upstream_stream: true } : {}) } : null,
     cooldown_detection_rules: rules.length ? { rules } : null,
     proxy_url: draft.proxy_url.trim(),
     available_time_start: draft.available_time_start,
@@ -219,6 +221,10 @@ export function AdvancedSettingsDialog({ open, draft: initial, channelId, authTy
       {notice && <p className="muted" role="status">{notice}</p>}
 
       {tab === 'custom' && <>
+        {!isOAuth && authType !== 'system_one' && <>
+          <label><input type="checkbox" role="switch" checked={draft.force_upstream_stream} onChange={(event) => patch({ force_upstream_stream: event.target.checked })} /> 强制上游流式</label>
+          <p className="muted">聊天生成请求始终使用上游流式。客户端请求非流式时，收齐结果后返回完整 JSON；客户端请求流式时正常推流。</p>
+        </>}
         {urls.some((url) => /anyrouter/i.test(url)) && <p className="muted">检测到 anyrouter 地址：ccLoad 会自动注入 <code>anthropic-beta: context-1m-2025-08-07</code>，并在 /v1/messages 缺少 thinking 时补 <code>thinking.type=adaptive</code>。</p>}
         <div className="dialog-tabs" role="tablist">
           <button role="tab" aria-selected={customTab === 'headers'} className={`dialog-tab${customTab === 'headers' ? ' active' : ''}`} onClick={() => setCustomTab('headers')}>请求头 ({draft.headers.length})</button>

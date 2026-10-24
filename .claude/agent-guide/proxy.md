@@ -51,6 +51,8 @@
 
 ## 自定义状态码(改相关代码前先读语义)
 
+- **Gemini 非流式伪成功**：原生 JSON、跨协议转换前的 JSON 和强制上游流式聚合后的 JSON，在提交客户端之前检查完整响应。HTTP 200 中的顶层 `error` 按真实错误状态处理并保留原文（不受前 512 字节探测长度影响）；生成端点缺少 candidates、或候选无有效 parts 且没有明确的拦截/截断终态时，按 `ErrUpstreamEmptyResponse` 换渠道，耗尽后返回带具体原因的 502。无效 JSON 按 `ErrUpstreamInvalidResponse` 处理。文本、工具调用、图片、思考文本和未知非空输出字段保留；不以 token 数量判断输出存在，计数端点不套用生成结构检查。管理后台测试复用同一校验。
+
 - **非流式 OpenAI 空完成**：同协议转发与跨协议响应转换均在提交下游前检查原始 Chat Completions JSON。只有全部 choice 均为 assistant、`finish_reason=stop` 且消息字段没有输出、usage 没有正数输出/推理 token 时，才按 `ErrUpstreamEmptyResponse` 进入模型级冷却与故障切换。保留原始响应供诊断；文本（含空白）、工具调用、拒绝、推理、多模态及未知非空扩展均保留，`length`/`content_filter` 等终态不按空故障重试。不把无 choices、未知结构或流式响应纳入此判定。
 
 - **499** 客户端取消:不计失败、不冷却,已提交流的部分 usage 照常计费([计费口径](billing.md));上游直接返回 499:模型级冷却
@@ -72,3 +74,9 @@
 - 渠道高级设置 → OAuth 凭证的 `oauth_quota_passthrough`（输出额度信息）默认关闭，旧渠道迁移同样为关闭。仅 Codex、Anthropic 返回账号额度，界面只对二者展示该开关，过滤也只对二者生效；其他 OAuth 渠道隐藏开关并保持原样透传；开启后保留原有透传行为，后台额度查询不受影响；API Key 渠道不受此开关影响。
 - 关闭时，在下游输出边界过滤账号额度响应头（Anthropic/Codex/rate-limit）、额度 SSE/WS 事件和协议 JSON 中的额度字段，包括最终错误响应；保留请求 ID、Codex turn-state、正常错误和模型输出。用户自定义 metadata 与 token usage 不作为账号额度删除。
 - 原始响应仍先用于内部额度采样、计费、冷却和故障切换，过滤只作用于客户端输出。HTTP、SSE 与 Responses WebSocket 共用该边界；不能在 usage parser 前删事件。
+
+## 渠道强制上游流式
+
+- API Key 渠道高级设置的 `custom_request_rules.force_upstream_stream` 默认关闭，仅作用于 Chat Completions、Messages、Responses 和 Gemini 内容生成端点。OAuth、System One、计数、嵌入、图片与压缩端点不适用。
+- 开启后在上游发送边界强制流式（Gemini 使用 `:streamGenerateContent?alt=sse`），客户端流式标记保持独立。非流式客户端使用有大小限制的协议收集器聚合完整 JSON，再执行普通响应转换；工具调用、思考与 usage 保留，上游错误或缺失终态进入既有重试/冷却路径，不能把半截输出当成功。
+- 管理后台渠道测试使用相同开关；旧版请求规则编辑器保存时也必须保留该字段。

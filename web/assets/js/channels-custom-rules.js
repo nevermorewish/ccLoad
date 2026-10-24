@@ -40,6 +40,7 @@
     const headers = Array.isArray(safe.headers) ? safe.headers : [];
     const body = Array.isArray(safe.body) ? safe.body : [];
     return {
+      ...(safe.force_upstream_stream === true ? { force_upstream_stream: true } : {}),
       headers: headers.map((r) => ({
         action: String(r && r.action || 'override').toLowerCase(),
         name: String(r && r.name || ''),
@@ -202,8 +203,8 @@
         }
       })
       .filter((r) => r);
-    if (headers.length === 0 && body.length === 0) return null;
-    const payload = {};
+    if (headers.length === 0 && body.length === 0 && !state.force_upstream_stream) return null;
+    const payload = state.force_upstream_stream ? { force_upstream_stream: true } : {};
     if (headers.length > 0) {
       payload.headers = headers.map((r) => {
         const entry = { action: r.action, name: r.name };

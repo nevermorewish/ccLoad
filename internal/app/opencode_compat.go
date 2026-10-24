@@ -299,7 +299,7 @@ func isOpenCodeInferencePath(upstream protocol.Protocol, path string) bool {
 // openCodeGeminiURL maps a Gemini API path onto OpenCode's route
 // {base}/v1/models/{model}:{action}; OpenCode has no /v1beta prefix. The free
 // gate only accepts the SSE stream action, so free requests always stream and
-// non-stream callers are served by collectOpenCodeCompletion. ccLoad-built
+// non-stream callers are served by collectUpstreamCompletion. ccLoad-built
 // streams (translation or free shaping) request SSE explicitly.
 func openCodeGeminiURL(baseURL, requestPath, rawQuery string, defaultSSE, free bool) string {
 	path := requestPath

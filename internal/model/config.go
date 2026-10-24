@@ -551,8 +551,9 @@ type CustomBodyRule struct {
 
 // CustomRequestRules 渠道级自定义请求改写规则集
 type CustomRequestRules struct {
-	Headers []CustomHeaderRule `json:"headers,omitempty"`
-	Body    []CustomBodyRule   `json:"body,omitempty"`
+	ForceUpstreamStream bool               `json:"force_upstream_stream,omitempty"`
+	Headers             []CustomHeaderRule `json:"headers,omitempty"`
+	Body                []CustomBodyRule   `json:"body,omitempty"`
 }
 
 // IsEmpty 当两类规则均为空时返回 true
@@ -560,7 +561,7 @@ func (r *CustomRequestRules) IsEmpty() bool {
 	if r == nil {
 		return true
 	}
-	return len(r.Headers) == 0 && len(r.Body) == 0
+	return !r.ForceUpstreamStream && len(r.Headers) == 0 && len(r.Body) == 0
 }
 
 // Clone returns an independent copy suitable for config-cache boundaries.
@@ -569,8 +570,9 @@ func (r *CustomRequestRules) Clone() *CustomRequestRules {
 		return nil
 	}
 	out := &CustomRequestRules{
-		Headers: append([]CustomHeaderRule(nil), r.Headers...),
-		Body:    make([]CustomBodyRule, len(r.Body)),
+		ForceUpstreamStream: r.ForceUpstreamStream,
+		Headers:             append([]CustomHeaderRule(nil), r.Headers...),
+		Body:                make([]CustomBodyRule, len(r.Body)),
 	}
 	for i, rule := range r.Body {
 		out.Body[i] = rule
