@@ -248,6 +248,8 @@ type fwResult struct {
 	// OpenAI service_tier（2026-03新增）。请求中的 priority 是 Fast 模式标记，
 	// 计费时不能被上游回显的 default/standard 降档。
 	ServiceTier string
+	// RateCard 是 service_tier 倍率依据的价目，由渠道认证与 CodexHasCredits 决定。
+	RateCard util.OpenAIRateCard
 
 	// ThinkingEffort 记录请求或上游响应声明的思考等级；上游响应非空时覆盖请求值。
 	ThinkingEffort string
@@ -321,6 +323,7 @@ type proxyRequestContext struct {
 	// preserveSamplingParameters restricts fallback to converters known to retain
 	// temperature/top_p after an upstream rejects either control.
 	preserveSamplingParameters bool
+	responsesReplayBody        []byte // HTTP Responses 的完整 transcript，供跨协议或本地压缩恢复使用
 }
 
 // countTokens reports the auxiliary count_tokens request: it is never billed,
@@ -370,6 +373,8 @@ type proxyResult struct {
 	proxyLogWritten           bool
 	antigravityCapacity429    bool
 	protocolCapabilityMissing bool
+	// 本地转换无法表示本次请求，不代表端点能力；回退成功后也不写能力缓存。
+	requestScopedProtocolMiss bool
 	websocketTargetCooling    bool
 	responsesTurn             responsesWebsocketTurnResult
 	hasResponsesTurn          bool
@@ -930,6 +935,10 @@ func (s *Server) prepareRequestBody(cfg *model.Config, reqCtx *proxyRequestConte
 	actualModel = s.resolveFinalUpstreamModel(cfg, selected, string(upstreamProtocol))
 
 	bodyToSend = reqCtx.body
+	if reqCtx.clientProtocol == protocol.Codex && len(reqCtx.responsesReplayBody) > 0 &&
+		(upstreamProtocol != protocol.Codex || hasLocalResponsesCompaction(reqCtx.responsesReplayBody)) {
+		bodyToSend = reqCtx.responsesReplayBody
+	}
 	requestedModel := reqCtx.requestedModel
 	if requestedModel == "" {
 		requestedModel = reqCtx.originalModel
@@ -1340,6 +1349,7 @@ func computeRequestCostWithPrice(model string, serviceTier string, price *util.C
 	return util.CalculateStandardCostBreakdownWithPrice(
 		model,
 		serviceTier,
+		res.RateCard,
 		price,
 		res.InputTokens,
 		res.OutputTokens,
@@ -1347,6 +1357,19 @@ func computeRequestCostWithPrice(model string, serviceTier string, price *util.C
 		res.Cache5mInputTokens,
 		res.Cache1hInputTokens,
 	).Total + res.ToolCostUSD
+}
+
+// openAIRateCard 选择 service_tier 倍率价目：Codex OAuth 按本次是否落入购买积分区分
+// 订阅额度与积分，其余渠道按 API 价目。
+func openAIRateCard(codexOAuth, codexHasCredits bool) util.OpenAIRateCard {
+	switch {
+	case !codexOAuth:
+		return util.OpenAIRateCardAPI
+	case codexHasCredits:
+		return util.OpenAIRateCardCodexCredits
+	default:
+		return util.OpenAIRateCardCodexAllowance
+	}
 }
 
 func requestedServiceTier(reqCtx *proxyRequestContext) string {

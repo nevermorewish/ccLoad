@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   normalizeInlineKeyRow,
+  updateInlineKey,
   pruneKeyAllowedModels,
   selectModelFetchKeyEntries,
   countConfiguredInlineKeys,
@@ -16,7 +17,8 @@ const {
   canFetchInlineKeyRate,
   toggleKeyDisabled
 } = require('./channels-keys.js');
-const { applyURLStats } = require('./channels-urls.js');
+const { applyURLStats, normalizeInlineURLConfigs } = require('./channels-urls.js');
+const { isOpenCodeChannel } = require('./channels-render.js');
 const ModelEntryParser = require('./model-entry-parser.js');
 
 function installFetchModelsGlobals({ rows, states, onFetch, onError, onWarning, channelId = null, authType = 'api_key', proxyURL = '' }) {
@@ -37,6 +39,7 @@ function installFetchModelsGlobals({ rows, states, onFetch, onError, onWarning, 
     editingChannelAuthType: authType,
     selectModelFetchKeyEntries,
     countConfiguredInlineKeys,
+    isOpenCodeChannel,
     fetchAPIWithAuth: onFetch,
     console: { ...console, error: () => {} }
   };
@@ -94,31 +97,75 @@ test('inline Key rows preserve and normalize model scopes', () => {
     api_key: 'sk-test',
     note: 'primary',
     allowed_models: ['GPT-5', 'Claude-4'],
+    model_scope_auto: false,
     priority: 0, cost_multiplier: 1
   });
   assert.deepEqual(normalizeInlineKeyRow('legacy-key').allowed_models, []);
+  assert.equal(normalizeInlineKeyRow('legacy-key').model_scope_auto, false);
+  assert.equal(normalizeInlineKeyRow({ model_scope_auto: true }).model_scope_auto, true);
+  assert.equal(normalizeInlineKeyRow({ model_scope_auto: false }).model_scope_auto, false);
+  assert.equal(normalizeInlineKeyRow({ model_scope_auto: 'true' }).model_scope_auto, false);
   assert.equal(normalizeInlineKeyRow({ api_key: 'sk-free', cost_multiplier: 0 }).cost_multiplier, 0);
   assert.equal(normalizeInlineKeyRow({ api_key: 'sk-bad', cost_multiplier: -3 }).cost_multiplier, 1);
   assert.equal(normalizeInlineKeyRow({ api_key: 'sk-nan', cost_multiplier: 'abc' }).cost_multiplier, 1);
 });
 
+test('editing Key credentials clears automatic model detection only when the credential changes', () => {
+  let dirtyCount = 0;
+  const hiddenInput = { value: 'sk-original' };
+  const row = {
+    api_key: 'sk-original', note: 'primary', allowed_models: ['logical'],
+    detected_models: ['upstream'], model_scope_auto: true
+  };
+  const globals = {
+    inlineKeyTableData: [structuredClone(row)],
+    editingChannelAuthType: 'api_key',
+    document: { getElementById: id => id === 'channelApiKey' ? hiddenInput : null },
+    markChannelFormDirty: () => { dirtyCount++; }
+  };
+  const previous = new Map();
+  for (const [name, value] of Object.entries(globals)) {
+    previous.set(name, Object.getOwnPropertyDescriptor(global, name));
+    Object.defineProperty(global, name, { configurable: true, writable: true, value });
+  }
+  try {
+    updateInlineKey(0, ' sk-original ');
+    assert.deepEqual(global.inlineKeyTableData[0], row);
+    assert.equal(dirtyCount, 0);
+
+    updateInlineKey(0, ' sk-replacement ');
+    assert.equal(global.inlineKeyTableData[0].api_key, 'sk-replacement');
+    assert.equal(global.inlineKeyTableData[0].model_scope_auto, false);
+    assert.equal(global.inlineKeyTableData[0].detected_models, undefined);
+    assert.deepEqual(global.inlineKeyTableData[0].allowed_models, ['logical']);
+    assert.equal(global.inlineKeyTableData[0].note, 'primary');
+    assert.equal(hiddenInput.value, 'sk-replacement');
+    assert.equal(dirtyCount, 1);
+  } finally {
+    for (const [name, descriptor] of previous) {
+      if (descriptor) Object.defineProperty(global, name, descriptor);
+      else delete global[name];
+    }
+  }
+});
+
 test('removing configured models prunes every restricted Key scope', () => {
   const rows = [
-    { api_key: 'sk-primary', allowed_models: ['GPT-5', 'claude-opus'] },
+    { api_key: 'sk-primary', model_scope_auto: true, allowed_models: ['GPT-5', 'claude-opus'] },
     { api_key: 'sk-unrestricted', allowed_models: [] }
   ];
 
   assert.deepEqual(pruneKeyAllowedModels(rows, [{ model: 'gpt-5' }]), [
-    { api_key: 'sk-primary', note: '', allowed_models: ['GPT-5'], priority: 0, cost_multiplier: 1 },
-    { api_key: 'sk-unrestricted', note: '', allowed_models: [], priority: 0, cost_multiplier: 1 }
+    { api_key: 'sk-primary', note: '', model_scope_auto: true, allowed_models: ['GPT-5'], priority: 0, cost_multiplier: 1 },
+    { api_key: 'sk-unrestricted', note: '', model_scope_auto: false, allowed_models: [], priority: 0, cost_multiplier: 1 }
   ]);
   assert.deepEqual(pruneKeyAllowedModels(
     [{ api_key: 'sk-thinking', allowed_models: ['gpt-5'] }],
     [{ model: 'gpt-5(max)' }]
-  ), [{ api_key: 'sk-thinking', note: '', allowed_models: ['gpt-5'], priority: 0, cost_multiplier: 1 }]);
+  ), [{ api_key: 'sk-thinking', note: '', model_scope_auto: false, allowed_models: ['gpt-5'], priority: 0, cost_multiplier: 1 }]);
   assert.deepEqual(pruneKeyAllowedModels(rows, []), [
-    { api_key: 'sk-primary', note: '', allowed_models: [], model_scope_empty: true, priority: 0, cost_multiplier: 1 },
-    { api_key: 'sk-unrestricted', note: '', allowed_models: [], priority: 0, cost_multiplier: 1 }
+    { api_key: 'sk-primary', note: '', model_scope_auto: true, allowed_models: [], model_scope_empty: true, priority: 0, cost_multiplier: 1 },
+    { api_key: 'sk-unrestricted', note: '', model_scope_auto: false, allowed_models: [], priority: 0, cost_multiplier: 1 }
   ]);
 });
 
@@ -152,6 +199,7 @@ test('single and batch model deletion use the same Key scope reconciliation', ()
       note: '',
       allowed_models: [],
       model_scope_empty: true,
+      model_scope_auto: false,
       priority: 0, cost_multiplier: 1
     }]);
     assert.deepEqual([...global.selectedModelIndices], []);
@@ -430,6 +478,8 @@ test('Escape closes only the topmost Key model scope modal', () => {
 });
 
 test('per-Key model detection handles stale sessions, model variants, redirect misses, and illegal model names', async () => {
+  const listEvents = {};
+  const allowAllEvents = {};
   const checkboxes = [];
   const makeClassList = () => ({
     add() {},
@@ -439,22 +489,30 @@ test('per-Key model detection handles stale sessions, model variants, redirect m
   const list = {
     replaceChildren() { checkboxes.length = 0; },
     appendChild(label) { checkboxes.push(label.children[0]); },
-    setAttribute() {}
+    setAttribute() {},
+    addEventListener(name, handler) { listEvents[name] = handler; }
   };
-  const modal = { dataset: { bound: 'true' }, classList: makeClassList(), setAttribute() {} };
-  const allowAll = { checked: true, focus() {} };
+  const modal = {
+    dataset: {}, classList: makeClassList(), setAttribute() {},
+    querySelectorAll: () => [], querySelector: () => null, addEventListener() {}
+  };
+  const allowAll = {
+    checked: true, focus() {},
+    addEventListener(name, handler) { allowAllEvents[name] = handler; }
+  };
   const detectButton = {
     disabled: false,
     attributes: new Map(),
     setAttribute(name, value) { this.attributes.set(name, value); },
-    removeAttribute(name) { this.attributes.delete(name); }
+    removeAttribute(name) { this.attributes.delete(name); },
+    addEventListener() {}
   };
   const status = { textContent: '', classList: makeClassList() };
   const elements = {
     keyModelScopeModal: modal,
     keyModelScopeList: list,
     keyModelScopeAll: allowAll,
-    keyModelScopeSearch: { value: '' },
+    keyModelScopeSearch: { value: '', addEventListener() {} },
     keyModelScopeModalTitle: { textContent: '' },
     keyModelScopeStatus: status,
     detectKeyModelScopeBtn: detectButton,
@@ -464,10 +522,12 @@ test('per-Key model detection handles stale sessions, model variants, redirect m
   };
   const pending = [];
   const detectedBodies = [];
+  const modals = loadChannelsModals();
   const globals = {
     window: { t: key => key },
     document: {
       activeElement: { focus() {} },
+      addEventListener() {},
       getElementById: id => elements[id] || null,
       querySelector: () => null,
       querySelectorAll: selector => selector === '#keyModelScopeList input[name="keyAllowedModel"]' ? checkboxes : [],
@@ -492,6 +552,8 @@ test('per-Key model detection handles stale sessions, model variants, redirect m
       { model: 'model-new', redirect_model: '', disabled: false }
     ],
     getValidInlineURLConfigs: () => [{ url: 'https://upstream.test', exact: false, protocols: [] }],
+    editorFinalUpstreamModels: modals.editorFinalUpstreamModels,
+    currentEditorUpstreamModelRewrite: modals.currentEditorUpstreamModelRewrite,
     fetchAPIWithAuth: (_url, options) => {
       detectedBodies.push(JSON.parse(options.body));
       return new Promise(resolve => pending.push(resolve));
@@ -504,6 +566,7 @@ test('per-Key model detection handles stale sessions, model variants, redirect m
   }
 
   try {
+    initKeyModelScopeModalEvents();
     assert.equal(openKeyModelScopeModal(0), true);
     const staleDetection = detectKeyModelScope();
     assert.equal(detectedBodies[0]?.proxy_url, 'socks5://127.0.0.1:1080');
@@ -548,6 +611,24 @@ test('per-Key model detection handles stale sessions, model variants, redirect m
     assert.equal(confirmKeyModelScope(), true);
     assert.deepEqual(global.inlineKeyTableData[0].allowed_models, ['auto', 'other']);
     assert.deepEqual(global.inlineKeyTableData[0].detected_models, ['target-b', 'other']);
+    assert.equal(global.inlineKeyTableData[0].model_scope_auto, true);
+    assert.equal(openKeyModelScopeModal(0), true);
+    assert.equal(confirmKeyModelScope(), true);
+    assert.equal(global.inlineKeyTableData[0].model_scope_auto, true, 'confirming unchanged selections preserves automatic scope');
+    assert.equal(openKeyModelScopeModal(0), true);
+    checkboxes[0].checked = false;
+    listEvents.change();
+    checkboxes[0].checked = true;
+    listEvents.change();
+    assert.equal(confirmKeyModelScope(), true);
+    assert.equal(global.inlineKeyTableData[0].model_scope_auto, false, 'manual selection owns the scope even when restored to the probe values');
+    global.inlineKeyTableData[0].model_scope_auto = true;
+    assert.equal(openKeyModelScopeModal(0), true);
+    allowAll.checked = true;
+    allowAllEvents.change();
+    assert.equal(confirmKeyModelScope(), true);
+    assert.equal(global.inlineKeyTableData[0].model_scope_auto, false);
+    assert.deepEqual(global.inlineKeyTableData[0].allowed_models, []);
 
     global.inlineKeyTableData = [{ api_key: 'sk-test', note: '', allowed_models: [] }];
     global.redirectTableData = [
@@ -566,6 +647,12 @@ test('per-Key model detection handles stale sessions, model variants, redirect m
     assert.equal(confirmKeyModelScope(), true);
     assert.deepEqual(global.inlineKeyTableData[0].allowed_models, ['A', 'B']);
     assert.deepEqual(global.inlineKeyTableData[0].detected_models, ['C']);
+    assert.equal(global.inlineKeyTableData[0].model_scope_auto, true);
+    assert.equal(openKeyModelScopeModal(0), true);
+    setVisibleKeyModelScopeChecked(false);
+    setVisibleKeyModelScopeChecked(true);
+    assert.equal(confirmKeyModelScope(), true);
+    assert.equal(global.inlineKeyTableData[0].model_scope_auto, false, 'manual select-all clears the automatic source');
 
     // 命中只看最终上游目标：上游有逻辑名 gpt-5、没有重定向目标 gpt-5-2026 时判未命中，
     // 与后端 detectedChannelModelScope 同源，避免写出 allowed 含 gpt-5 而 detected 不含其目标的矛盾范围。
@@ -599,6 +686,38 @@ test('per-Key model detection handles stale sessions, model variants, redirect m
     await wildcardDetection;
     assert.deepEqual(checkboxes, []);
     assert.equal(allowAll.checked, true);
+
+    // OpenAI 上游的最终模型被 body.model 规则改写，命中看 forced 而不是重定向目标 base。
+    closeKeyModelScopeModal(false);
+    global.window.collectCustomRulesForSubmit = () => ({ body: [{ action: 'override', path: 'model', value: 'forced' }] });
+    global.getValidInlineURLConfigs = () => [{ url: 'https://upstream.test', exact: false, protocols: ['openai'] }];
+    global.inlineKeyTableData = [{ api_key: 'sk-test', note: '', allowed_models: [] }];
+    global.redirectTableData = [
+      { model: 'logical', redirect_model: 'base', disabled: false },
+      { model: 'other', redirect_model: '', disabled: false }
+    ];
+    assert.equal(openKeyModelScopeModal(0), true);
+    const bodyRuleDetection = detectKeyModelScope();
+    pending[6]({
+      success: true,
+      data: { key_models: [{ models: [{ model: 'forced' }] }] }
+    });
+    await bodyRuleDetection;
+    assert.deepEqual(checkboxes.map(checkbox => checkbox.checked), [true, true]);
+    assert.equal(confirmKeyModelScope(), true);
+    assert.deepEqual(global.inlineKeyTableData[0].allowed_models, ['logical', 'other']);
+    assert.deepEqual(global.inlineKeyTableData[0].detected_models, ['forced']);
+    assert.equal(global.inlineKeyTableData[0].model_scope_auto, true);
+
+    assert.equal(openKeyModelScopeModal(0), true);
+    const editedDetection = detectKeyModelScope();
+    pending[7]({ success: true, data: { key_models: [{ models: [{ model: 'forced' }] }] } });
+    await editedDetection;
+    checkboxes[1].checked = false;
+    listEvents.change();
+    assert.equal(confirmKeyModelScope(), true);
+    assert.deepEqual(global.inlineKeyTableData[0].allowed_models, ['logical']);
+    assert.equal(global.inlineKeyTableData[0].model_scope_auto, false, 'editing probe selections before confirming makes the scope manual');
   } finally {
     closeKeyModelScopeModal(false);
     for (const [name, descriptor] of previous) {
@@ -883,6 +1002,7 @@ function installEditChannelGlobals(channel, {
     },
     normalizeInlineKeyRow,
     channelAuthTypeFilterLabel: value => value,
+    channelAvatarType: value => value.auth_type || 'api_key',
     channels: [],
     editingChannelId: null,
     editingChannelAuthType: 'api_key',
@@ -1382,6 +1502,157 @@ test('quota output refills and submits booleans without leaking the previous cha
   }
 });
 
+test('OpenCode chooser resets to Zen, cancels without changes, and creates the selected API Key channel', async () => {
+  const fixture = installEditChannelGlobals({ id: 1, urls: [] });
+  const previous = new Map();
+  const setGlobal = (name, value) => {
+    previous.set(name, Object.getOwnPropertyDescriptor(global, name));
+    Object.defineProperty(global, name, { configurable: true, writable: true, value });
+  };
+  const submitted = [];
+  try {
+    const dialog = fixture.getElement('openCodeChannelDialog');
+    const dialogEvents = {};
+    dialog.open = false;
+    dialog.showModal = () => { dialog.open = true; };
+    dialog.close = () => { dialog.open = false; };
+    dialog.addEventListener = (name, handler) => { dialogEvents[name] = handler; };
+    const formEvents = {};
+    fixture.getElement('openCodeChannelForm').addEventListener = (name, handler) => {
+      assert.equal(formEvents[name], undefined, 'reopening must not bind the form twice');
+      formEvents[name] = handler;
+    };
+    const selection = fixture.getElement('openCodeChannelPreset');
+    fixture.getElement('channelForm').reset = () => {};
+    setGlobal('emptyInlineURLConfig', () => ({ url: '', exact: false, protocols: [] }));
+    setGlobal('makeInlineKeyRow', () => normalizeInlineKeyRow({ api_key: '' }));
+    setGlobal('getValidInlineURLConfigs', () => normalizeInlineURLConfigs(global.inlineURLTableData));
+    setGlobal('getValidInlineKeyRows', () => global.inlineKeyTableData.filter(row => row.api_key).map(normalizeInlineKeyRow));
+    setGlobal('getInlineKeyRows', () => global.inlineKeyTableData);
+    setGlobal('selectModelFetchKeyEntries', selectModelFetchKeyEntries);
+    setGlobal('countConfiguredInlineKeys', countConfiguredInlineKeys);
+    setGlobal('isOpenCodeChannel', isOpenCodeChannel);
+    setGlobal('channelFormDirty', false);
+    let dirtyMarks = 0;
+    setGlobal('markChannelFormDirty', () => { dirtyMarks++; });
+    const notifications = [];
+    global.window.showSuccess = message => notifications.push(message);
+    global.window.showWarning = message => notifications.push(message);
+    const fetchedModels = [{ model: 'big-pickle', redirect_model: 'big-pickle' }];
+    let modelsResponse = async () => ({ success: true, data: { models: fetchedModels, source: 'api' } });
+    setGlobal('fetchAPIWithAuth', async (url, options) => {
+      if (url === '/admin/channels/check-duplicate') return { success: true, data: { duplicates: [] } };
+      submitted.push({ url, method: options.method, body: JSON.parse(options.body) });
+      if (url === '/admin/channels/models/fetch') return modelsResponse();
+      return { success: false, error: 'captured' };
+    });
+    const {
+      showAddModal, saveChannel, closeModal, openOpenCodeChannelDialog, closeOpenCodeChannelDialog, continueOpenCodeChannel
+    } = loadChannelsModals();
+    fixture.getElement('channelName').value = 'existing draft';
+    global.editingChannelId = 42;
+    openOpenCodeChannelDialog();
+    assert.equal(dialog.open, true);
+    assert.equal(selection.value, 'opencode_zen');
+    selection.value = 'opencode_anonymous';
+    closeOpenCodeChannelDialog();
+    await continueOpenCodeChannel({ preventDefault() {} });
+    assert.equal(dialog.open, false);
+    assert.equal(fixture.getElement('channelName').value, 'existing draft');
+    assert.equal(global.editingChannelId, 42);
+    assert.equal(submitted.length, 0);
+
+    openOpenCodeChannelDialog();
+    assert.equal(selection.value, 'opencode_zen');
+    selection.value = 'opencode_zen_go';
+    dialog.close(); // Native Escape dismisses without confirming.
+    assert.equal(fixture.getElement('channelName').value, 'existing draft');
+    assert.equal(global.editingChannelId, 42);
+
+    openOpenCodeChannelDialog();
+    dialogEvents.click({ target: dialog });
+    assert.equal(dialog.open, false);
+    assert.equal(fixture.getElement('channelName').value, 'existing draft');
+    assert.equal(global.editingChannelId, 42);
+    assert.equal(submitted.length, 0);
+
+    for (const [preset, name, url, presetKey] of [
+      ['opencode_zen', 'OpenCode-Zen', 'https://opencode.ai/zen', ''],
+      ['opencode_zen_go', 'OpenCode-Zen-Go', 'https://opencode.ai/zen/go', ''],
+      ['opencode_anonymous', 'OpenCode-Anonymous', 'https://opencode.ai/inference', 'public']
+    ]) {
+      openOpenCodeChannelDialog();
+      assert.equal(selection.value, 'opencode_zen');
+      selection.value = preset;
+      let prevented = false;
+      await formEvents.submit({ preventDefault() { prevented = true; } });
+      assert.equal(prevented, true);
+      assert.equal(dialog.open, false);
+      assert.equal(global.editingChannelId, null);
+      assert.equal(fixture.getElement('channelName').value, name);
+      assert.equal(fixture.getElement('protocolTransformModeValue').value, 'auto');
+      assert.deepEqual(global.inlineURLTableData, [{ url, exact: false, protocols: [] }]);
+      assert.equal(global.inlineKeyTableData[0].api_key, presetKey);
+
+      // The public catalog is fetched on open, before the user enters a key.
+      const discovery = submitted.at(-1);
+      assert.equal(discovery.url, '/admin/channels/models/fetch');
+      assert.deepEqual(discovery.body.urls, [{ url, exact: false, protocols: [] }]);
+      assert.deepEqual(discovery.body.api_keys, ['public']);
+      assert.equal(discovery.body.auth_type, 'api_key');
+      assert.deepEqual(global.redirectTableData.map(row => row.model), ['big-pickle']);
+      assert.equal(dirtyMarks, 0, 'preset discovery must not count as an unsaved edit');
+
+      const apiKey = presetKey || 'user-api-key';
+      if (!presetKey) global.inlineKeyTableData[0].api_key = apiKey;
+      fixture.getElement('channelName').value = `${name} custom`;
+      await saveChannel({ preventDefault() {} });
+      const request = submitted.at(-1);
+      assert.equal(request.url, '/admin/channels');
+      assert.equal(request.method, 'POST');
+      assert.equal(request.body.name, `${name} custom`);
+      assert.equal(request.body.auth_type, 'api_key');
+      assert.equal(request.body.protocol_transform_mode, 'auto');
+      assert.equal(request.body.api_key, apiKey);
+      assert.equal(request.body.api_keys[0].api_key, apiKey);
+      assert.deepEqual(request.body.urls, [{ url, exact: false, protocols: [] }]);
+      assert.deepEqual(request.body.models.map(entry => entry.model), ['big-pickle']);
+    }
+
+    // A response that outlives its editor session must not leak into the next one.
+    let releaseModels;
+    let modelsRequested;
+    const requested = new Promise(resolve => { modelsRequested = resolve; });
+    modelsResponse = () => {
+      modelsRequested();
+      return new Promise(resolve => {
+        releaseModels = () => resolve({ success: true, data: { models: fetchedModels, source: 'api' } });
+      });
+    };
+    openOpenCodeChannelDialog();
+    const pendingPreset = formEvents.submit({ preventDefault() {} });
+    await requested;
+    closeModal();
+    const notificationCount = notifications.length;
+    releaseModels();
+    await pendingPreset;
+    assert.deepEqual(global.redirectTableData, []);
+    assert.equal(notifications.length, notificationCount);
+
+    await showAddModal();
+    assert.equal(fixture.getElement('channelName').value, '');
+    assert.deepEqual(global.inlineURLTableData, [{ url: '', exact: false, protocols: [] }]);
+    assert.equal(global.inlineKeyTableData[0].api_key, '');
+    assert.deepEqual(global.redirectTableData, []);
+  } finally {
+    for (const [name, descriptor] of previous) {
+      if (descriptor) Object.defineProperty(global, name, descriptor);
+      else delete global[name];
+    }
+    fixture.restore();
+  }
+});
+
 test('saving rejects invalid daily schedules and focuses the field with an inline error', async () => {
   const channel = { id: 80, name: 'invalid-schedule', auth_type: 'api_key', urls: [{ url: 'https://example.com' }], models: [] };
   const fixture = installEditChannelGlobals(channel, { editorKeys: [] });
@@ -1532,7 +1803,7 @@ test('saving an API Key channel submits per-Key model scopes', async () => {
     ]) fixture.getElement(id).value = '0';
     setGlobal('getValidInlineURLConfigs', () => channel.urls);
     setGlobal('getValidInlineKeyRows', () => [
-      { api_key: 'sk-scoped', note: 'primary', allowed_models: ['gpt-5'], priority: -7, cost_multiplier: 2 },
+      { api_key: 'sk-scoped', note: 'primary', allowed_models: ['gpt-5'], model_scope_auto: true, priority: -7, cost_multiplier: 2 },
       { api_key: 'sk-emptied', note: '', allowed_models: [], model_scope_empty: true, priority: 0, cost_multiplier: 1 }
     ]);
     setGlobal('fetchAPIWithAuth', async (_url, options) => {
@@ -1542,8 +1813,8 @@ test('saving an API Key channel submits per-Key model scopes', async () => {
 
     await saveChannel({ preventDefault() {} });
 	assert.deepEqual(submitted.api_keys, [
-		{ api_key: 'sk-scoped', note: 'primary', allowed_models: ['gpt-5'], detected_models: [], model_scope_empty: false, priority: -7, cost_multiplier: 2 },
-      { api_key: 'sk-emptied', note: '', allowed_models: [], detected_models: [], model_scope_empty: true, priority: 0, cost_multiplier: 1 }
+		{ api_key: 'sk-scoped', note: 'primary', allowed_models: ['gpt-5'], detected_models: [], model_scope_empty: false, model_scope_auto: true, priority: -7, cost_multiplier: 2 },
+      { api_key: 'sk-emptied', note: '', allowed_models: [], detected_models: [], model_scope_empty: true, model_scope_auto: false, priority: 0, cost_multiplier: 1 }
     ]);
     for (const priority of [1.5, -100000, 10000000, NaN]) {
       submitted = undefined;
@@ -1663,7 +1934,7 @@ for (const testCase of [
 
 test('common models add every selected type and ignore existing names case-insensitively', () => {
   const rows = [
-    { model: 'GPT-5.5', redirect_model: 'custom-upstream-model' }
+    { model: 'GPT-6-LUNA', redirect_model: 'custom-upstream-model' }
   ];
 
   const restore = installCommonModelsGlobals();
@@ -1674,7 +1945,8 @@ test('common models add every selected type and ignore existing names case-insen
     assert.equal(result.hasSupportedTypes, true);
     assert.ok(result.addedCount > 0);
     assert.equal(rows.length, result.addedCount + 1);
-    assert.equal(rows.filter(row => row.model.toLowerCase() === 'gpt-5.5').length, 1);
+    assert.equal(rows.filter(row => row.model.toLowerCase() === 'gpt-6-luna').length, 1);
+    assert.equal(rows.some(row => row.model.toLowerCase() === 'gpt-5.5'), false);
     assert.ok(rows.some(row => row.model.startsWith('claude-')));
     assert.equal(rows[0].redirect_model, 'custom-upstream-model');
   } finally {
@@ -1975,10 +2247,31 @@ test('per-Key discovery proposals map out-of-order results back to original Key 
   assert.equal(result.matchedCount, 2);
   assert.equal(result.unmatchedCount, 0);
   assert.equal(result.complete, true);
+  assert.deepEqual(result.rows.map(row => row.model_scope_auto), [true, true]);
   assert.deepEqual(result.rows.map(row => row.allowed_models), [
     ['logical-a', 'common'],
     ['common', 'logical-b']
   ]);
+});
+
+test('per-Key discovery counts an unchanged scope becoming automatic as a change', () => {
+  const { proposeFetchedKeyModelScopes } = loadChannelsModals();
+  const row = { api_key: 'sk', allowed_models: ['logical'], detected_models: ['upstream'], model_scope_auto: false };
+  const propose = rows => proposeFetchedKeyModelScopes(
+    rows,
+    [{ model: 'logical', redirect_model: 'upstream' }],
+    [{ key_index: 0, models: [{ model: 'upstream' }] }],
+    [{ keyIndex: 0, apiKey: 'sk' }]
+  );
+  const first = propose([row]);
+  assert.equal(first.changedCount, 1);
+  assert.equal(first.rows[0].model_scope_auto, true);
+  assert.equal(row.model_scope_auto, false, 'a proposal must not change the editor before acceptance');
+  assert.equal(propose(first.rows).changedCount, 0);
+  const failed = proposeFetchedKeyModelScopes(
+    first.rows, [], [{ key_index: 0, error: 'HTTP 429' }], [{ keyIndex: 0, apiKey: 'sk' }]
+  );
+  assert.deepEqual(failed.rows, first.rows, 'a failed probe preserves the scope source');
 });
 
 test('per-Key discovery applies each provider scope independently', () => {
@@ -2024,10 +2317,11 @@ test('per-Key discovery applies each provider scope independently', () => {
   assert.deepEqual(result.rows, [
     {
       api_key: 'micu-codex',
+      model_scope_auto: true,
       allowed_models: ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra'],
       detected_models: ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra']
     },
-    { api_key: 'micu-claude', allowed_models: [], model_scope_empty: true }
+    { api_key: 'micu-claude', allowed_models: [], model_scope_empty: true, model_scope_auto: true }
   ]);
 });
 
@@ -2048,7 +2342,8 @@ test('per-Key discovery clears scope-empty marker when a scope is recovered', ()
   assert.deepEqual(result.rows, [{
     api_key: 'sk-scope-empty',
     allowed_models: ['logical-model'],
-    detected_models: ['logical-model']
+    detected_models: ['logical-model'],
+    model_scope_auto: true
   }]);
 });
 
@@ -2065,7 +2360,8 @@ test('per-Key discovery retains the capability of a disabled model row', () => {
   assert.deepEqual(result.rows[0], {
     api_key: 'sk-disabled-model',
     allowed_models: ['logical-model'],
-    detected_models: ['upstream-model']
+    detected_models: ['upstream-model'],
+    model_scope_auto: true
   });
 });
 
@@ -2097,7 +2393,7 @@ test('per-Key discovery keeps failed Keys unchanged while applying successful Ke
     { api_key: 'sk-disabled', note: '', allowed_models: ['keep-disabled'] },
     { api_key: 'sk-a', note: '', allowed_models: ['logical-a'] },
     { api_key: 'sk-cooling', note: '', allowed_models: ['keep-cooling'] },
-    { api_key: 'sk-b', note: '', allowed_models: ['common', 'logical-b'], detected_models: ['common', 'upstream-b'] }
+    { api_key: 'sk-b', note: '', allowed_models: ['common', 'logical-b'], detected_models: ['common', 'upstream-b'], model_scope_auto: true }
   ]);
 });
 
@@ -2115,7 +2411,7 @@ test('per-Key discovery marks a successful Key with no matching model as empty',
   assert.equal(result.unmatchedCount, 1);
   assert.equal(result.complete, false);
   assert.deepEqual(result.rows[0], {
-    api_key: 'sk-a', note: '', allowed_models: [], model_scope_empty: true
+    api_key: 'sk-a', note: '', allowed_models: [], model_scope_empty: true, model_scope_auto: true
   });
 });
 
@@ -2189,6 +2485,29 @@ test('per-Key discovery keeps final targets separate for chained variants', () =
     { allowed_models: ['a', 'b'], detected_models: ['c'] },
     { allowed_models: ['a'], detected_models: ['d'] }
   ]);
+});
+
+test('per-Key discovery matches the final upstream model after body model rules', () => {
+  const { proposeFetchedKeyModelScopes, editorUpstreamModelRewrite } = loadChannelsModals();
+  const rules = { body: [{ action: 'override', path: 'model', value: 'forced' }] };
+  const propose = (protocols, models) => {
+    const row = proposeFetchedKeyModelScopes(
+      [{ api_key: 'sk', allowed_models: [] }],
+      [{ model: 'logical', redirect_model: 'base' }],
+      [{ key_index: 0, models: models.map(model => ({ model })) }],
+      [{ keyIndex: 0, apiKey: 'sk' }],
+      editorUpstreamModelRewrite(rules, [{ url: 'https://upstream.test', protocols }], 'auto', 'api_key')
+    ).rows[0];
+    return { allowed: row.allowed_models, detected: row.detected_models || [], empty: row.model_scope_empty === true };
+  };
+
+  assert.deepEqual(propose(['openai'], ['forced']), { allowed: ['logical'], detected: ['forced'], empty: false });
+  // OpenAI 上游实际发送 forced，目录只有重定向目标 base 时不可路由。
+  assert.deepEqual(propose(['openai'], ['base']), { allowed: [], detected: [], empty: true });
+  // Gemini 模型在 URL 路径里，body 规则不改写。
+  assert.deepEqual(propose(['gemini'], ['base']), { allowed: ['logical'], detected: ['base'], empty: false });
+  // 自动检测 URL 可能走任一协议，两个最终模型都属于该行。
+  assert.deepEqual(propose([], ['base', 'forced']), { allowed: ['logical'], detected: ['forced', 'base'], empty: false });
 });
 
 test('fetchModelsFromAPI uses the saved Antigravity channel without submitting its OAuth token', async () => {
@@ -2531,6 +2850,62 @@ test('batch RPM rejects fractional values without sending a request', async () =
     assert.equal(fixture.elements.batchRPMLimit.attributes.get('aria-invalid'), 'true');
     assert.equal(fixture.elements.batchRPMLimitError.hidden, false);
   } finally {
+    fixture.restore();
+  }
+});
+
+test('batch model refresh runs channels concurrently with a bounded pool', async () => {
+  const fixture = installBatchProtocolModeGlobals({ success: true, data: {} });
+  const extraGlobals = new Map();
+  const setGlobal = (key, value) => {
+    extraGlobals.set(key, Object.getOwnPropertyDescriptor(global, key));
+    Object.defineProperty(global, key, { configurable: true, writable: true, value });
+  };
+  const channelIDs = [1, 2, 3, 4, 5, 6];
+  const pending = [];
+  const rowStatuses = new Map();
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fakeElement = () => ({ style: {}, appendChild() {} });
+  fixture.selectedChannelIds.clear();
+  channelIDs.forEach(id => fixture.selectedChannelIds.add(String(id)));
+  global.document.createElement = fakeElement;
+  global.window.ensureNotifyHost = fakeElement;
+  setGlobal('requestAnimationFrame', callback => callback());
+  setGlobal('setBatchRefreshResult', (channelID, result) => rowStatuses.set(channelID, result.status));
+  setGlobal('fetchAPIWithAuth', (url, options) => {
+    fixture.requests.push({ url, options });
+    maxInFlight = Math.max(maxInFlight, ++inFlight);
+    return new Promise(resolve => pending.push(() => {
+      inFlight--;
+      resolve({ success: true, data: { results: [{ status: 'updated', fetched: 1, total: 1 }] } });
+    }));
+  });
+
+  try {
+    const { batchRefreshSelectedChannelsMerge } = loadChannelsModals();
+    const operation = batchRefreshSelectedChannelsMerge();
+    while (fixture.requests.length < channelIDs.length || pending.length > 0) {
+      await new Promise(resolve => setImmediate(resolve));
+      pending.splice(0).forEach(finish => finish());
+    }
+    await operation;
+
+    assert.equal(maxInFlight, 4);
+    const requestedIDs = fixture.requests.map(request => {
+      assert.equal(request.url, '/admin/channels/models/refresh-batch');
+      const body = JSON.parse(request.options.body);
+      assert.equal(body.mode, 'merge');
+      return body.channel_ids;
+    });
+    assert.deepEqual(requestedIDs, channelIDs.map(id => [id]));
+    assert.deepEqual([...rowStatuses.entries()].sort((a, b) => a[0] - b[0]), channelIDs.map(id => [id, 'updated']));
+    assert.equal(fixture.reloads, 1);
+  } finally {
+    for (const [key, descriptor] of extraGlobals) {
+      if (descriptor) Object.defineProperty(global, key, descriptor);
+      else delete global[key];
+    }
     fixture.restore();
   }
 });
@@ -3095,7 +3470,7 @@ test('Key sorting confirms priorities without rebuilding keys, cancels drafts, a
     { api_key: 'sk-duplicate', note: 'first', allowed_models: ['gpt-5'], priority: -4, cost_multiplier: 2 },
     { api_key: '', note: '', allowed_models: [], priority: 0, cost_multiplier: 1 },
     { api_key: 'sk-duplicate', note: 'second', allowed_models: [], model_scope_empty: true, priority: 20, cost_multiplier: 0 }
-  ];
+  ].map(row => ({ ...row, model_scope_auto: false }));
   const states = [{ key_index: 0, disabled: true }, { key_index: 2, cooldown_remaining_ms: 30000 }];
   const context = vm.createContext({
     inlineKeyTableData: structuredClone(rows), currentChannelKeyCooldowns: structuredClone(states),

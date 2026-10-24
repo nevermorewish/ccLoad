@@ -9,6 +9,7 @@ export type ChannelKeyRow = {
   allowed_models?: string[]
   detected_models?: string[]
   model_scope_empty?: boolean
+  model_scope_auto?: boolean
   cost_multiplier?: number
   priority?: number
   disabled?: boolean
@@ -68,6 +69,7 @@ export const AUTH_TYPES = [
   { value: 'zai_oauth', label: 'Z.ai OAuth' },
   { value: 'zed_oauth', label: 'Zed OAuth' },
   { value: 'cursor_oauth', label: 'Cursor OAuth' },
+  { value: 'vertex_oauth', label: 'Vertex AI' },
 ]
 
 export const usesAPIKeyCredentials = (authType?: string) => !authType || authType === 'api_key' || authType === 'system_one'
@@ -181,7 +183,13 @@ export function formToPayload(form: ChannelForm, extras: { customRules: unknown;
   payload.api_keys = keys.map(({ cooldown_until: _cooldownUntil, cooldown_remaining_ms: _cooldownRemaining, key_index: _keyIndex, disabled: _disabled, ...entry }) => entry)
   payload.api_key = keys.map((entry) => entry.api_key).join(',')
   payload.key_strategy = keyStrategy || 'sequential'
-  if (form.auth_type === 'api_key') payload.management_account = extras.management ?? { profile: '' }
+  const openCode = form.urls.some(({ url }) => {
+    try {
+      const target = new URL(url.trim().replace(/#$/, ''))
+      return target.protocol === 'https:' && target.hostname === 'opencode.ai' && !target.port && /^\/(zen|inference)(\/|$)/.test(target.pathname)
+    } catch { return false }
+  })
+  if (form.auth_type === 'api_key' && !openCode) payload.management_account = extras.management ?? { profile: '' }
   if (form.auth_type === 'system_one') {
     payload.urls = form.urls.map(({ protocols: _protocols, ...url }) => url)
     payload.websockets = false

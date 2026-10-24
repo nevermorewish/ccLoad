@@ -273,6 +273,9 @@ func migrate(ctx context.Context, db *sql.DB, dialect Dialect) error {
 			if err := ensureAPIKeysModelScopeEmpty(ctx, db, dialect); err != nil {
 				return fmt.Errorf("migrate api_keys model_scope_empty: %w", err)
 			}
+			if err := ensureAPIKeysModelScopeAuto(ctx, db, dialect); err != nil {
+				return fmt.Errorf("migrate api_keys model_scope_auto: %w", err)
+			}
 			if err := ensureAPIKeysCostMultiplier(ctx, db, dialect); err != nil {
 				return fmt.Errorf("migrate api_keys cost_multiplier: %w", err)
 			}
@@ -319,6 +322,9 @@ func migrate(ctx context.Context, db *sql.DB, dialect Dialect) error {
 			}
 			if err := ensureAuthTokensRPMLimit(ctx, db, dialect); err != nil {
 				return fmt.Errorf("migrate auth_tokens rpm_limit: %w", err)
+			}
+			if err := ensureAuthTokensPerformanceStats(ctx, db, dialect); err != nil {
+				return fmt.Errorf("migrate auth_tokens performance stats: %w", err)
 			}
 			if err := backfillAuthTokensCostLimitMaxConcurrency(ctx, db, dialect); err != nil {
 				return fmt.Errorf("backfill auth_tokens max_concurrency: %w", err)

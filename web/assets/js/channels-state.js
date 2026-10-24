@@ -53,7 +53,6 @@ function getChannelAuthTypeOptions() {
   return [
     { value: 'all', label: window.t('channels.authTypeAll') },
     { value: 'api_key', label: window.t('channels.authTypeAPI') },
-    { value: 'system_one', label: window.t('channels.authTypeSystemOne') },
     { value: 'codex_oauth', label: window.t('channels.authTypeCodex') },
     { value: 'anthropic_oauth', label: window.t('channels.authTypeAnthropic') },
     { value: 'antigravity_oauth', label: window.t('channels.authTypeAntigravity') },
@@ -61,7 +60,9 @@ function getChannelAuthTypeOptions() {
     { value: 'xai_oauth', label: window.t('channels.authTypeXAI') },
     { value: 'cursor_oauth', label: window.t('channels.authTypeCursor') },
     { value: 'zed_oauth', label: window.t('channels.authTypeZed') },
-    { value: 'zai_oauth', label: window.t('channels.authTypeZAI') }
+    { value: 'zai_oauth', label: window.t('channels.authTypeZAI') },
+    { value: 'vertex_oauth', label: window.t('channels.authTypeVertex') },
+    { value: 'system_one', label: window.t('channels.authTypeSystemOne') }
   ];
 }
 
@@ -141,18 +142,12 @@ function humanizeMS(ms) {
   return window.t('common.timeS', { s });
 }
 
+// 沿用全局 K/M/B 缩写，整单位省略 .0
 function formatMetricNumber(value) {
   if (value === null || value === undefined) return '--';
   const num = Number(value);
   if (!Number.isFinite(num)) return '--';
-  return formatCompactNumber(num);
-}
-
-function formatCompactNumber(num) {
-  const abs = Math.abs(num);
-  if (abs >= 1_000_000) return (num / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
-  if (abs >= 1_000) return (num / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
-  return num.toString();
+  return window.formatNumber(num).replace(/\.0(?=[KMB]$)/, '');
 }
 
 function formatTimestampForFilename() {

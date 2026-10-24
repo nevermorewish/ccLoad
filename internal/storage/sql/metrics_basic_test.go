@@ -304,6 +304,47 @@ func TestMetrics_TokenSpeedUsesSuccessfulOutputAndEffectiveDuration(t *testing.T
 	}
 }
 
+// 首字/耗时均值只算成功请求，并返回各自样本数供渠道/合计行加权。
+func TestMetrics_TimingAveragesUseSuccessfulSamples(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	cfg, err := store.CreateConfig(ctx, &model.Config{
+		Name:         "timing-channel",
+		URLs:         model.ChannelURLs{{URL: "https://example.com"}},
+		Enabled:      true,
+		ModelEntries: []model.ModelEntry{{Model: "gpt-4o"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateConfig failed: %v", err)
+	}
+
+	now := time.Now()
+	logs := []*model.LogEntry{
+		{Time: model.JSONTime{Time: now}, ChannelID: cfg.ID, Model: "gpt-4o", StatusCode: 200, IsStreaming: true, Duration: 4, FirstByteTime: 1, LogSource: model.LogSourceProxy},
+		{Time: model.JSONTime{Time: now}, ChannelID: cfg.ID, Model: "gpt-4o", StatusCode: 200, Duration: 2, LogSource: model.LogSourceProxy},
+		{Time: model.JSONTime{Time: now}, ChannelID: cfg.ID, Model: "gpt-4o", StatusCode: 502, IsStreaming: true, Duration: 10, LogSource: model.LogSourceProxy},
+		{Time: model.JSONTime{Time: now}, ChannelID: cfg.ID, Model: "gpt-4o", StatusCode: 499, IsStreaming: true, Duration: 30, FirstByteTime: 5, LogSource: model.LogSourceProxy},
+	}
+	if err := store.BatchAddLogs(ctx, logs); err != nil {
+		t.Fatalf("BatchAddLogs failed: %v", err)
+	}
+
+	stats, err := store.GetStats(ctx, now.Add(-time.Minute), now.Add(time.Minute), &model.LogFilter{LogSource: model.LogSourceProxy}, false)
+	if err != nil {
+		t.Fatalf("GetStats failed: %v", err)
+	}
+	if len(stats) != 1 {
+		t.Fatalf("stats len=%d, want 1", len(stats))
+	}
+	got := stats[0]
+	if got.AvgFirstByteTimeSeconds == nil || *got.AvgFirstByteTimeSeconds != 1 || got.FirstByteSampleCount != 1 {
+		t.Fatalf("first byte avg/samples = %v/%d, want 1/1", got.AvgFirstByteTimeSeconds, got.FirstByteSampleCount)
+	}
+	if got.AvgDurationSeconds == nil || *got.AvgDurationSeconds != 3 || got.DurationSampleCount != 2 {
+		t.Fatalf("duration avg/samples = %v/%d, want 3/2", got.AvgDurationSeconds, got.DurationSampleCount)
+	}
+}
+
 func TestMetrics_UpstreamProtocolFilterUsesPersistedAttemptProtocol(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -586,6 +627,65 @@ func TestMetrics_ChannelLevelLastRequestIDsExposeTieBreakForFrontEndAggregation(
 	}
 	if idsByModel["gpt-4.1"] != idsByModel["gpt-4o"] {
 		t.Fatalf("want channel-level latest request id shared across entries, got %+v", idsByModel)
+	}
+}
+
+func TestMetrics_ChannelPeakRPMMergesModelsPerMinute(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	cfg, err := store.CreateConfig(ctx, &model.Config{
+		Name:     "peak-channel",
+		URLs:     model.ChannelURLs{{URL: "https://example.com"}},
+		Priority: 10,
+		Enabled:  true,
+		ModelEntries: []model.ModelEntry{
+			{Model: "gpt-4o"},
+			{Model: "gpt-4.1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateConfig failed: %v", err)
+	}
+
+	// 两个分钟桶的渠道合计都是 3，单模型峰值都是 2；各模型峰值相加会得到错误的 4。
+	minuteA := time.Now().Add(-10 * time.Minute).Truncate(time.Minute).Add(10 * time.Second)
+	minuteB := minuteA.Add(5 * time.Minute)
+	logAt := func(at time.Time, modelName string, status int) *model.LogEntry {
+		return &model.LogEntry{Time: model.JSONTime{Time: at}, ChannelID: cfg.ID, Model: modelName, StatusCode: status, LogSource: model.LogSourceProxy}
+	}
+	if err := store.BatchAddLogs(ctx, []*model.LogEntry{
+		logAt(minuteA, "gpt-4o", 200),
+		logAt(minuteA, "gpt-4o", 200),
+		logAt(minuteA, "gpt-4.1", 500),
+		logAt(minuteA, "gpt-4.1", 499), // 客户端取消不计入 RPM
+		logAt(minuteB, "gpt-4o", 200),
+		logAt(minuteB, "gpt-4.1", 200),
+		logAt(minuteB, "gpt-4.1", 200),
+	}); err != nil {
+		t.Fatalf("BatchAddLogs failed: %v", err)
+	}
+
+	stats, err := store.GetStats(ctx, minuteA.Add(-time.Hour), minuteB.Add(time.Minute), nil, false)
+	if err != nil {
+		t.Fatalf("GetStats failed: %v", err)
+	}
+
+	seen := 0
+	for _, e := range stats {
+		if e.ChannelID == nil || int64(*e.ChannelID) != cfg.ID {
+			continue
+		}
+		seen++
+		if e.PeakRPM == nil || *e.PeakRPM != 2 {
+			t.Fatalf("model %s PeakRPM=%v, want 2", e.Model, e.PeakRPM)
+		}
+		if e.ChannelPeakRPM == nil || *e.ChannelPeakRPM != 3 {
+			t.Fatalf("model %s ChannelPeakRPM=%v, want channel-wide 3", e.Model, e.ChannelPeakRPM)
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("got %d entries for channel, want 2", seen)
 	}
 }
 
@@ -960,5 +1060,47 @@ func TestAggregateRangeWithFilter_CountsRateLimitedWithinError(t *testing.T) {
 	}
 	if success != 1 || errorCount != 3 || rateLimited != 2 {
 		t.Fatalf("success=%d error=%d rate_limited=%d, want 1/3/2", success, errorCount, rateLimited)
+	}
+}
+
+func TestAggregateRangeWithFilter_PreservesCancelledBillableUsage(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Minute).Add(10 * time.Second)
+	if err := store.BatchAddLogs(ctx, []*model.LogEntry{
+		{Time: model.JSONTime{Time: now}, ChannelID: 1, Model: "m1", ClientProtocol: "codex", StatusCode: 499,
+			IsStreaming: true, FirstByteTime: 99, Duration: 100, InputTokens: 100, OutputTokens: 50,
+			CacheReadInputTokens: 30, CacheCreationInputTokens: 20, Cost: 0.125, CostMultiplier: 2, LogSource: model.LogSourceProxy},
+		{Time: model.JSONTime{Time: now}, ChannelID: 1, Model: "m1", ClientProtocol: "codex", StatusCode: 200,
+			InputTokens: 999, Cost: 99, LogSource: model.LogSourceManualTest},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	statusCancelled := 499
+	for _, filter := range []*model.LogFilter{nil, {ClientProtocol: "codex", StatusCode: &statusCancelled}} {
+		points, err := store.AggregateRangeWithFilter(ctx, now.Add(-time.Minute), now.Add(time.Minute), time.Minute, filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var input, output, cacheRead, cacheCreation int64
+		var cost, effective float64
+		for _, point := range points {
+			input += point.InputTokens
+			output += point.OutputTokens
+			cacheRead += point.CacheReadTokens
+			cacheCreation += point.CacheCreationTokens
+			if point.TotalCost != nil {
+				cost += *point.TotalCost
+			}
+			if point.EffectiveCost != nil {
+				effective += *point.EffectiveCost
+			}
+			if point.Success != 0 || point.Error != 0 || point.RateLimited != 0 || point.AvgFirstByteTimeSeconds != nil || point.AvgDurationSeconds != nil {
+				t.Fatalf("cancelled request counted toward requests/latency: %+v", point)
+			}
+		}
+		if input != 100 || output != 50 || cacheRead != 30 || cacheCreation != 20 || cost != 0.125 || effective != 0.25 {
+			t.Fatalf("cancelled usage lost: input=%d output=%d cache_read=%d cache_creation=%d cost=%v effective=%v", input, output, cacheRead, cacheCreation, cost, effective)
+		}
 	}
 }

@@ -9,9 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"ccLoad/internal/cooldown"
 	"ccLoad/internal/model"
-	"github.com/gin-gonic/gin"
 )
 
 // channelJSONConfig keeps OAuthCredential in an explicit field because Config
@@ -57,6 +58,7 @@ type channelJSONDocument struct {
 	Channels   []channelJSONRecord `json:"channels"`
 }
 
+// HandleExportChannelsJSON exports channel configurations and credentials as JSON.
 func (s *Server) HandleExportChannelsJSON(c *gin.Context) {
 	selectedIDs, err := parseChannelIDsQuery(c.Query("ids"))
 	if err != nil {
@@ -100,6 +102,7 @@ func (s *Server) HandleExportChannelsJSON(c *gin.Context) {
 	c.Data(http.StatusOK, "application/json; charset=utf-8", body)
 }
 
+// HandleImportChannelsJSON validates and imports a JSON channel batch.
 func (s *Server) HandleImportChannelsJSON(c *gin.Context) {
 	file, err := c.FormFile("file")
 	if err != nil {
@@ -115,7 +118,7 @@ func (s *Server) HandleImportChannelsJSON(c *gin.Context) {
 		RespondError(c, http.StatusInternalServerError, err)
 		return
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 	data, err := io.ReadAll(io.LimitReader(src, 20<<20+1))
 	if err != nil {
 		RespondError(c, http.StatusBadRequest, err)
@@ -245,7 +248,7 @@ func (s *Server) HandleImportChannelsJSON(c *gin.Context) {
 		}
 		channels = append(channels, &model.ChannelWithKeys{Config: cfg, APIKeys: record.APIKeys, FullConfig: true})
 	}
-	if err := s.prepareExistingOAuthChannelUpdates(c.Request.Context(), channels); err != nil {
+	if err := s.prepareCSVImportOAuthCredentials(c.Request.Context(), channels); err != nil {
 		RespondError(c, http.StatusBadRequest, err)
 		return
 	}

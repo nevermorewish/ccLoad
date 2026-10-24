@@ -86,3 +86,16 @@ test('System One manual tests never send a chat protocol or request streaming', 
   assert.deepEqual(api.channelTestPayload('api_key', body), body);
   assert.deepEqual(api.channelTestPayload('codex_oauth', body), body);
 });
+
+
+test('OpenCode saves omit unsupported management accounts and retain automatic model scopes', () => {
+  const extras = { customRules: null, cooldownRules: null, management: { profile: '' } };
+  for (const url of ['https://opencode.ai/zen', 'https://opencode.ai/zen/go', 'https://opencode.ai/inference']) {
+    const form = { ...api.emptyForm(), urls: [{ url }], api_keys: [{ api_key: 'public', model_scope_auto: true, detected_models: ['gpt-test'] }] };
+    const payload = api.formToPayload(form, extras);
+    assert.equal('management_account' in payload, false);
+    assert.equal(payload.api_keys[0].model_scope_auto, true);
+    assert.deepEqual(payload.api_keys[0].detected_models, ['gpt-test']);
+  }
+  assert.deepEqual(api.formToPayload({ ...api.emptyForm(), urls: [{ url: 'https://opencode.ai.example/zen' }] }, extras).management_account, { profile: '' });
+});

@@ -855,15 +855,9 @@ func (h *HybridStore) GetStatsLite(ctx context.Context, startTime, endTime time.
 	})
 }
 
-func (h *HybridStore) GetClientProtocolStats(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter) ([]model.ClientProtocolStats, error) {
-	return readAnalytics(h, "GetClientProtocolStats", func(store *sqlstore.SQLStore) ([]model.ClientProtocolStats, error) {
-		return store.GetClientProtocolStats(ctx, startTime, endTime, filter)
-	})
-}
-
-func (h *HybridStore) GetAuthTypeStats(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter) ([]model.AuthTypeStats, error) {
-	return readAnalytics(h, "GetAuthTypeStats", func(store *sqlstore.SQLStore) ([]model.AuthTypeStats, error) {
-		return store.GetAuthTypeStats(ctx, startTime, endTime, filter)
+func (h *HybridStore) GetUsageBreakdown(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter) ([]model.UsageBreakdownRow, error) {
+	return readAnalytics(h, "GetUsageBreakdown", func(store *sqlstore.SQLStore) ([]model.UsageBreakdownRow, error) {
+		return store.GetUsageBreakdown(ctx, startTime, endTime, filter)
 	})
 }
 
@@ -1130,4 +1124,30 @@ func (h *HybridStore) Close() error {
 		}
 	})
 	return err
+}
+
+func (h *HybridStore) CreateConfigWithAPIKeys(ctx context.Context, c *model.Config, keys []*model.APIKey) (*model.Config, error) {
+	created, err := h.sqlite.CreateConfigWithAPIKeys(ctx, c, keys)
+	if err == nil {
+		h.markChannelDirty(created.ID, false)
+	}
+	return created, err
+}
+
+func (h *HybridStore) UpdateConfigWithAPIKeys(ctx context.Context, id int64, upd *model.Config, keys []*model.APIKey) (*model.Config, error) {
+	updated, err := h.sqlite.UpdateConfigWithAPIKeys(ctx, id, upd, keys)
+	if err == nil {
+		h.markChannelDirty(id, false)
+	}
+	return updated, err
+}
+
+func (h *HybridStore) UpdateModelStateAndAPIKeyScopesIfSnapshotMatches(ctx context.Context, expected *model.Config, modelEntries []model.ModelEntry, scheduledCheckModel string, keys []*model.APIKey, scopes map[int]model.APIKeyModelScope) (bool, error) {
+	h.oauthCredentialMu.Lock()
+	defer h.oauthCredentialMu.Unlock()
+	matched, err := h.sqlite.UpdateModelStateAndAPIKeyScopesIfSnapshotMatches(ctx, expected, modelEntries, scheduledCheckModel, keys, scopes)
+	if err == nil && matched {
+		h.markChannelDirty(expected.ID, false)
+	}
+	return matched, err
 }

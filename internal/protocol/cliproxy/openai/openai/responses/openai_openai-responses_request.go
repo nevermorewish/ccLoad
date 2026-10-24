@@ -1,8 +1,9 @@
 package responses
 
 import (
-	"ccLoad/internal/protocol"
 	"strings"
+
+	"ccLoad/internal/protocol"
 
 	translatorcommon "ccLoad/internal/protocol/cliproxy/common"
 

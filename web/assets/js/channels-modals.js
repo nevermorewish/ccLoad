@@ -41,8 +41,9 @@ function renderChannelDrawerIdentity(channel) {
 
   const avatar = document.getElementById('channelDrawerAvatar');
   if (avatar) {
-    avatar.innerHTML = window.channelAvatarContentHTML(authType, channel.name);
-    avatar.dataset.authType = authType;
+    const avatarType = channelAvatarType(channel);
+    avatar.innerHTML = window.channelAvatarContentHTML(avatarType, channel.name);
+    avatar.dataset.authType = avatarType;
   }
 
   const badge = document.getElementById('channelDrawerAuthBadge');
@@ -529,8 +530,47 @@ function resetModalKeyStatusFilter() {
   if (filter) filter.value = 'all';
 }
 
+const openCodeChannelPresets = {
+  opencode_zen: { name: 'OpenCode-Zen', url: 'https://opencode.ai/zen' },
+  opencode_zen_go: { name: 'OpenCode-Zen-Go', url: 'https://opencode.ai/zen/go' },
+  opencode_anonymous: { name: 'OpenCode-Anonymous', url: 'https://opencode.ai/inference', api_key: 'public' }
+};
+
+function openOpenCodeChannelDialog() {
+  const dialog = document.getElementById('openCodeChannelDialog');
+  const form = document.getElementById('openCodeChannelForm');
+  const preset = document.getElementById('openCodeChannelPreset');
+  if (!dialog || !form || !preset) return;
+  if (!dialog.dataset.bound) {
+    form.addEventListener('submit', continueOpenCodeChannel);
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) closeOpenCodeChannelDialog();
+    });
+    dialog.dataset.bound = '1';
+  }
+  preset.value = 'opencode_zen';
+  if (!dialog.open) dialog.showModal();
+}
+
+function closeOpenCodeChannelDialog() {
+  const dialog = document.getElementById('openCodeChannelDialog');
+  if (dialog?.open) dialog.close();
+}
+
+async function continueOpenCodeChannel(event) {
+  event.preventDefault();
+  const dialog = document.getElementById('openCodeChannelDialog');
+  const preset = document.getElementById('openCodeChannelPreset')?.value;
+  if (!dialog?.open || !Object.hasOwn(openCodeChannelPresets, preset)) return;
+  closeOpenCodeChannelDialog();
+  await showAddModal('api_key', preset);
+  // 官方模型目录公开，打开即拉取；拉到的模型属于预设初始状态，不算未保存修改。
+  await fetchModelsFromAPI({ markDirty: false });
+}
+
 // 认证方式由新建入口决定（API Key / System One），创建后不可改；OAuth 渠道由登录或导入创建。
-async function showAddModal(authType = 'api_key') {
+async function showAddModal(authType = 'api_key', channelPreset = '') {
+  const preset = openCodeChannelPresets[channelPreset];
   editingChannelId = null;
   editingChannelAuthType = authType === 'system_one' ? 'system_one' : 'api_key';
   currentChannelKeyCooldowns = [];
@@ -538,6 +578,7 @@ async function showAddModal(authType = 'api_key') {
 
   setChannelModalTitle(editingChannelAuthType === 'system_one' ? 'channels.addSystemOneChannel' : 'channels.addChannel');
   document.getElementById('channelForm').reset();
+  document.getElementById('channelName').value = preset?.name || '';
   document.getElementById('channelEnabled').checked = true;
   document.getElementById('channelScheduledCheckEnabled').checked = false;
   const retryOtherKeysCheckbox = document.getElementById('channelRetryOtherKeysOnFailure');
@@ -562,12 +603,14 @@ async function showAddModal(authType = 'api_key') {
   syncScheduledCheckModelState();
 
   inlineURLTableData = [emptyInlineURLConfig()];
+  if (preset) inlineURLTableData[0].url = preset.url;
   selectedURLIndices.clear();
   urlStatsMap = {};
   renderInlineURLTable();
   clearChannelDuplicateHint();
 
   inlineKeyTableData = [makeInlineKeyRow()];
+  if (preset?.api_key) inlineKeyTableData[0].api_key = preset.api_key;
   inlineKeyVisible = true;
   document.getElementById('inlineEyeIcon').style.display = 'none';
   document.getElementById('inlineEyeOffIcon').style.display = 'block';
@@ -610,7 +653,7 @@ async function editChannel(id) {
   const protocolModeRenderPromise = ensureProtocolTransformModeCombobox(channel.protocol_transform_mode);
 
   editingChannelId = id;
-  editingChannelAuthType = ['system_one', 'codebuddy_oauth', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth'].includes(channel.auth_type)
+  editingChannelAuthType = ['system_one', 'codebuddy_oauth', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth', 'vertex_oauth'].includes(channel.auth_type)
     ? channel.auth_type
     : 'api_key';
   clearChannelDuplicateHint();
@@ -718,8 +761,12 @@ async function editChannel(id) {
   scheduleChannelEditorTableSizingSync();
 }
 
+// 抽屉每次打开或关闭都递增；异步结果据此丢弃已离开的编辑会话。
+let channelEditorSession = 0;
+
 // 抽屉打开时高级分区进入草稿态，导航回到第一个分区。
 function showChannelEditorDrawer() {
+  channelEditorSession++;
   invokeChannelEditorAction('beginAdvancedSettingsDraft');
   document.getElementById('channelModal').classList.add('show');
   const main = document.getElementById('channelEditorMain');
@@ -782,6 +829,7 @@ async function closeModal() {
   if (channelFormDirty && !await window.showConfirm({ message: window.t('channels.unsavedChanges'), danger: true })) {
     return;
   }
+  channelEditorSession++;
   document.getElementById('channelModal').classList.remove('show');
   clearChannelRequiredFieldMarks();
   invokeChannelEditorAction('discardAdvancedSettingsDraft');
@@ -1037,7 +1085,7 @@ async function saveChannel(event) {
   }
 
   const validURLConfigs = getValidInlineURLConfigs();
-  const isOAuth = ['codebuddy_oauth', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth'].includes(editingChannelAuthType);
+  const isOAuth = ['codebuddy_oauth', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth', 'vertex_oauth'].includes(editingChannelAuthType);
   const validKeyRows = isOAuth ? [] : getValidInlineKeyRows();
   if (validKeyRows.some(row => !Number.isInteger(row.priority) || row.priority < -99999 || row.priority > 9999999)) {
     if (window.showError) window.showError(window.t('channels.keyPriorityInvalid'));
@@ -1063,6 +1111,7 @@ async function saveChannel(event) {
       allowed_models: Array.isArray(row.allowed_models) ? [...row.allowed_models] : [],
       detected_models: Array.isArray(row.detected_models) ? [...row.detected_models] : [],
       model_scope_empty: row.model_scope_empty === true,
+      model_scope_auto: row.model_scope_auto === true,
       cost_multiplier: row.cost_multiplier,
       priority: row.priority
     })),
@@ -1937,6 +1986,8 @@ function modelNormalizationOptionsForRequest(storage) {
   };
 }
 
+const BATCH_REFRESH_CHANNEL_CONCURRENCY = 4;
+
 async function batchRefreshSelectedChannels(mode) {
   const channelIDs = getSelectedChannelIDs();
   if (channelIDs.length === 0) {
@@ -1999,16 +2050,11 @@ async function batchRefreshSelectedChannels(mode) {
   host.appendChild(progressEl);
   requestAnimationFrame(() => { progressEl.style.opacity = '1'; progressEl.style.transform = 'translateX(0)'; });
 
-  let updated = 0, unchanged = 0, failed = 0;
+  let updated = 0, unchanged = 0, failed = 0, completed = 0, nextIndex = 0;
 
-  for (let i = 0; i < channelIDs.length; i++) {
-    const channelID = channelIDs[i];
+  const refreshChannel = async (channelID) => {
     const info = channels.find(c => c.id === channelID);
     const name = info ? info.name : `#${channelID}`;
-
-    titleSpan.textContent = window.t('channels.batchRefreshProgress', { current: i, total, mode: modeLabel });
-    detailSpan.textContent = window.t('channels.batchRefreshCurrent', { name });
-    barInner.style.width = `${(i / total * 100).toFixed(0)}%`;
     setBatchRefreshRowResult(channelID, { status: 'processing', mode });
 
     try {
@@ -2046,8 +2092,19 @@ async function batchRefreshSelectedChannels(mode) {
       });
     }
 
+    completed++;
+    titleSpan.textContent = window.t('channels.batchRefreshProgress', { current: completed, total, mode: modeLabel });
+    barInner.style.width = `${(completed / total * 100).toFixed(0)}%`;
     detailSpan.textContent = window.t('channels.batchRefreshCounts', { updated, unchanged, failed });
-  }
+  };
+
+  // 有上限地并发刷新；每个渠道仍单独请求，以便逐行展示结果
+  const refreshWorker = async () => {
+    while (nextIndex < total) {
+      await refreshChannel(channelIDs[nextIndex++]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(BATCH_REFRESH_CHANNEL_CONCURRENCY, total) }, refreshWorker));
 
   // 完成：更新进度条到100%
   barInner.style.width = '100%';
@@ -3200,7 +3257,52 @@ function resolveEditorActualModel(modelRows, row) {
   return routingModelNameForEditor(target);
 }
 
-function detectedChannelModelScope(modelRows, entries) {
+// 与后端 resolveFinalUpstreamModel 同源：顶层 body.model 规则只改写非 Gemini 上游，Gemini 模型在 URL 路径里。
+// protocols 对应后端 possibleUpstreamProtocols 对全部客户端协议的并集及顺序；无 body.model 规则时返回 null。
+function editorUpstreamModelRewrite(customRules, urlConfigs, transformMode, authType) {
+  let model;
+  for (const rule of Array.isArray(customRules?.body) ? customRules.body : []) {
+    const segments = String(rule?.path || '').trim().split('.').map(segment => segment.trim());
+    if (segments.length !== 1 || segments[0] !== 'model') continue;
+    if (rule.action === 'remove') model = '';
+    else if (rule.action === 'override') model = typeof rule.value === 'string' ? rule.value.trim() : '';
+  }
+  if (model === undefined) return null;
+  if (authType === 'system_one') return { model: routingModelNameForEditor(model), protocols: ['system_one'] };
+
+  const urls = Array.isArray(urlConfigs) ? urlConfigs : [];
+  const valid = ['openai', 'anthropic', 'codex', 'gemini'];
+  const automatic = urls.some(url => !Array.isArray(url?.protocols) || url.protocols.length === 0);
+  const supported = candidate => automatic || urls.some(url => url?.protocols?.includes(candidate));
+  let protocols = valid.filter(supported);
+  if (transformMode === 'local') {
+    const explicit = [...new Set(urls.flatMap(url => url?.protocols || []))].filter(candidate => valid.includes(candidate));
+    protocols = explicit.length > 0 ? explicit : ['anthropic', 'codex', 'openai', 'gemini'].filter(supported);
+  }
+  return { model: routingModelNameForEditor(model), protocols };
+}
+
+function currentEditorUpstreamModelRewrite() {
+  return editorUpstreamModelRewrite(
+    invokeChannelEditorAction('collectCustomRulesForSubmit'),
+    getValidInlineURLConfigs(),
+    getProtocolTransformMode(),
+    typeof editingChannelAuthType === 'undefined' ? '' : editingChannelAuthType
+  );
+}
+
+function editorFinalUpstreamModels(modelRows, row, rewrite) {
+  const actualModel = resolveEditorActualModel(modelRows, row);
+  if (!rewrite) return actualModel ? [actualModel] : [];
+  const targets = [];
+  for (const protocol of rewrite.protocols) {
+    const target = protocol === 'gemini' ? actualModel : rewrite.model;
+    if (target && !targets.some(name => name.toLowerCase() === target.toLowerCase())) targets.push(target);
+  }
+  return targets;
+}
+
+function detectedChannelModelScope(modelRows, entries, rewrite) {
   const detectedNames = normalizeDetectedModelNames(entries);
   const detected = new Set(detectedNames.map(name => routingModelNameForEditor(name).toLowerCase()));
   const matched = [];
@@ -3210,21 +3312,22 @@ function detectedChannelModelScope(modelRows, entries) {
   for (const row of Array.isArray(modelRows) ? modelRows : []) {
     const logicalModel = String(row?.model || '').trim();
     if (!logicalModel || logicalModel === '*') continue;
-    const actualModel = resolveEditorActualModel(modelRows, row);
-    if (!detected.has(actualModel.toLowerCase())) continue;
-    if (!seenActual.has(actualModel.toLowerCase())) {
-      seenActual.add(actualModel.toLowerCase());
-      actualModels.push(actualModel);
+    for (const actualModel of editorFinalUpstreamModels(modelRows, row, rewrite)) {
+      if (!detected.has(actualModel.toLowerCase())) continue;
+      if (!seenActual.has(actualModel.toLowerCase())) {
+        seenActual.add(actualModel.toLowerCase());
+        actualModels.push(actualModel);
+      }
+      const key = logicalModel.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      matched.push(logicalModel);
     }
-    const key = logicalModel.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    matched.push(logicalModel);
   }
   return { allowedModels: matched, detectedModels: actualModels };
 }
 
-function proposeFetchedKeyModelScopes(keyRows, modelRows, keyModels, requestEntries) {
+function proposeFetchedKeyModelScopes(keyRows, modelRows, keyModels, requestEntries, rewrite = null) {
   const originalRows = (Array.isArray(keyRows) ? keyRows : []).map(row => ({
     ...row,
     allowed_models: Array.isArray(row?.allowed_models) ? [...row.allowed_models] : [],
@@ -3258,10 +3361,12 @@ function proposeFetchedKeyModelScopes(keyRows, modelRows, keyModels, requestEntr
       const currentEmpty = row.model_scope_empty === true;
       if (current.length === next.length && current.every((name, index) => name === next[index]) &&
           currentDetected.length === nextDetected.length &&
-          currentDetected.every((name, index) => name === nextDetected[index]) && currentEmpty === scopeEmpty) {
+          currentDetected.every((name, index) => name === nextDetected[index]) && currentEmpty === scopeEmpty &&
+          row.model_scope_auto === true) {
         return;
       }
       row.allowed_models = allowedModels;
+      row.model_scope_auto = true;
       if (detectedModels.length > 0) row.detected_models = detectedModels;
       else delete row.detected_models;
       if (scopeEmpty) row.model_scope_empty = true;
@@ -3280,7 +3385,7 @@ function proposeFetchedKeyModelScopes(keyRows, modelRows, keyModels, requestEntr
       continue;
     }
 
-    const { allowedModels, detectedModels } = detectedChannelModelScope(modelRows, result.models);
+    const { allowedModels, detectedModels } = detectedChannelModelScope(modelRows, result.models, rewrite);
     if (allowedModels.length === 0) {
       unmatchedCount++;
       setScope([], true, detectedModels);
@@ -3636,12 +3741,12 @@ async function fetchedKeyModelApplyAccepted(changedCount, isSingleKeyChannel) {
   return window.showConfirm(window.t('channels.applyFetchedKeyModelsConfirm', { count: changedCount }));
 }
 
-async function fetchModelsFromAPI() {
+async function fetchModelsFromAPI({ markDirty = true } = {}) {
   let endpoint;
   let fetchOptions;
   let modelFetchEntries = [];
   let skippedKeyCount = 0;
-  if (['codebuddy_oauth', 'antigravity_oauth', 'codex_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth'].includes(editingChannelAuthType)) {
+  if (['codebuddy_oauth', 'antigravity_oauth', 'codex_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth', 'vertex_oauth'].includes(editingChannelAuthType)) {
     if (!editingChannelId) {
       window.showError(window.t('channels.saveBeforeModelTest'));
       return;
@@ -3664,8 +3769,12 @@ async function fetchModelsFromAPI() {
     }
 
     if (availableKeys.length === 0) {
-      window.showError(window.t('channels.addAtLeastOneEnabledKey'));
-      return;
+      // OpenCode 官方模型目录无需认证，没有可用 Key 时沿用匿名入口的 public。
+      if (!isOpenCodeChannel({ auth_type: editingChannelAuthType, urls })) {
+        window.showError(window.t('channels.addAtLeastOneEnabledKey'));
+        return;
+      }
+      availableKeys.push('public');
     }
 
     endpoint = '/admin/channels/models/fetch';
@@ -3683,8 +3792,10 @@ async function fetchModelsFromAPI() {
     };
   }
 
+  const session = channelEditorSession;
   try {
     const response = await fetchAPIWithAuth(endpoint, fetchOptions);
+    if (session !== channelEditorSession) return;
     if (!response.success) throw new Error(response.error || window.t('channels.fetchModelsFailed', { error: '' }));
     const data = response.data || {};
     const keyModels = Array.isArray(data.key_models) ? data.key_models : [];
@@ -3712,14 +3823,15 @@ async function fetchModelsFromAPI() {
     updateModelBatchDeleteButton();
 
     renderRedirectTable();
-    if (!areModelRowsEqual(previousRows, redirectTableData)) markChannelFormDirty();
+    if (markDirty && !areModelRowsEqual(previousRows, redirectTableData)) markChannelFormDirty();
 
     if (modelFetchEntries.length > 0) {
       const scopeProposal = proposeFetchedKeyModelScopes(
         getInlineKeyRows(),
         redirectTableData,
         keyModels,
-        modelFetchEntries
+        modelFetchEntries,
+        currentEditorUpstreamModelRewrite()
       );
       const shouldApply = scopeProposal.changedCount > 0 &&
         await fetchedKeyModelApplyAccepted(scopeProposal.changedCount, countConfiguredInlineKeys(getInlineKeyRows()) === 1);
@@ -3752,6 +3864,7 @@ async function fetchModelsFromAPI() {
     }
 
   } catch (error) {
+    if (session !== channelEditorSession) return;
     console.error('Fetch models failed', error);
 
     window.showError(window.t('channels.fetchModelsFailed', { error: error.message }));
@@ -3868,7 +3981,6 @@ const COMMON_MODELS = {
     'gpt-6.1-sol',
     'gpt-6-astra',
     'gpt-6-luna',
-    'gpt-5.5',
     'gpt-5.6-sol',
     'gpt-5.6-luna',
     'gpt-5.6-terra'
@@ -4026,6 +4138,7 @@ if (typeof module !== 'undefined' && module.exports) {
     applyChannelManagementPayload,
     applyQuickAddChannelSetup,
     batchClearSelectedChannelCooldowns,
+    batchRefreshSelectedChannelsMerge,
     batchSetSelectedChannelsPriority,
     batchSetSelectedChannelsDailyCostLimit,
     batchSetSelectedChannelsCostMultiplier,
@@ -4048,8 +4161,15 @@ if (typeof module !== 'undefined' && module.exports) {
     openBatchModelImportModal,
     parseQuickAddChannelInfo,
     proposeFetchedKeyModelScopes,
+    editorUpstreamModelRewrite,
+    currentEditorUpstreamModelRewrite,
+    editorFinalUpstreamModels,
     saveChannel,
     showAddModal,
+    closeModal,
+    openOpenCodeChannelDialog,
+    closeOpenCodeChannelDialog,
+    continueOpenCodeChannel,
     testRedirectModel,
     toggleModelDisabledState
   };

@@ -132,6 +132,18 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
     } catch (cause) { setError(cause instanceof Error ? cause.message : '保存失败') } finally { setBusy(false) }
   }
 
+  // OpenCode catalogs are public; credentials are needed only when saving paid channels.
+  const applyOpenCodePreset = async (preset: string) => {
+    const url = preset === 'anonymous' ? 'https://opencode.ai/inference' : preset === 'go' ? 'https://opencode.ai/zen/go' : 'https://opencode.ai/zen'
+    const name = preset === 'anonymous' ? 'OpenCode-Anonymous' : preset === 'go' ? 'OpenCode-Zen-Go' : 'OpenCode-Zen'
+    setForm({ ...blankForm(), name, urls: [{ url }], api_keys: [{ api_key: preset === 'anonymous' ? 'public' : '', cost_multiplier: 1, priority: 0 }] })
+    setDirty(true); setError(''); setBusy(true)
+    try {
+      const result = await fetchModelsPreview({ auth_type: 'api_key', urls: [{ url }], api_keys: ['public'], per_key: true })
+      setForm((current) => current.urls[0]?.url === url ? { ...current, models: toEntries(result.models) } : current)
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '获取 OpenCode 模型失败') } finally { setBusy(false) }
+  }
+
   // ---- 模型 ----
   const fetchModels = async () => {
     setError('')
@@ -156,7 +168,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
           const detected = perKey.find((item) => item.key_index === index)
           if (!detected) return row
           const names = (detected.models ?? []).map((entry) => entry.model)
-          return { ...row, detected_models: names, allowed_models: names, model_scope_empty: false }
+          return { ...row, detected_models: names, allowed_models: names, model_scope_empty: false, model_scope_auto: true }
         })
         setForm((current) => ({ ...current, models: merged, api_keys: nextKeys })); setDirty(true)
       } else update('models', merged)
@@ -275,6 +287,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
 
       <div className="toolbar">
         <input className="input wide" value={form.name} onChange={(event) => update('name', event.target.value)} placeholder="渠道名称" aria-label="渠道名称" />
+        {isCreate && !source && form.auth_type === 'api_key' && <SearchableSelect ariaLabel="OpenCode 渠道预设" className="combobox-inline" value="" disabled={busy} options={[{ value: '', label: 'OpenCode 预设…' }, { value: 'zen', label: 'OpenCode Zen' }, { value: 'go', label: 'OpenCode Zen Go' }, { value: 'anonymous', label: 'OpenCode 匿名免费' }]} onChange={(value) => { if (value) void applyOpenCodePreset(value) }} />}
         {isCreate && <button className="btn" title="从 JSON、环境变量或 URL/Key 文本一键填充" onClick={() => setDialog('quickAdd')}>✨ 一键填充</button>}
         {/* 类型由创建入口决定；保存后保持认证类型不变。 */}
         <SearchableSelect ariaLabel="认证类型" className="combobox-inline" value={form.auth_type} disabled options={AUTH_TYPES} onChange={() => undefined} />
@@ -462,7 +475,7 @@ function KeyScopeDialog({ open, row, options, urls, authType, proxyURL, onClose,
   }
   const apply = () => {
     if (!allowAll && JSON.stringify(values).length > 8000) { setStatus('模型范围过长，请减少选择'); return }
-    onApply(allowAll ? { allowed_models: [], model_scope_empty: false, detected_models: detected } : { allowed_models: values, model_scope_empty: values.length === 0, detected_models: detected })
+    onApply(allowAll ? { model_scope_auto: false, allowed_models: [], model_scope_empty: false, detected_models: detected } : { model_scope_auto: false, allowed_models: values, model_scope_empty: values.length === 0, detected_models: detected })
     onClose()
   }
   return (

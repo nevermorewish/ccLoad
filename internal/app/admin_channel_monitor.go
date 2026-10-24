@@ -4,9 +4,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"ccLoad/internal/config"
 	"ccLoad/internal/model"
-	"github.com/gin-gonic/gin"
 )
 
 type channelMonitorItem struct {
@@ -152,6 +153,7 @@ func (s *Server) HandleChannelMonitorExclude(c *gin.Context) {
 	RespondJSON(c, http.StatusOK, gin.H{"id": id, "monitored": request.Enabled})
 }
 
+// HandleChannelMonitorRun runs a channel monitor probe on demand.
 func (s *Server) HandleChannelMonitorRun(c *gin.Context) {
 	id, err := ParseInt64Param(c, "id")
 	if err != nil {

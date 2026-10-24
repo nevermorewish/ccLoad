@@ -25,6 +25,8 @@ const (
 	AuthTypeCursorOAuth      = "cursor_oauth"
 	AuthTypeZedOAuth         = "zed_oauth"
 	AuthTypeCodeBuddyOAuth   = "codebuddy_oauth"
+	// AuthTypeVertexOAuth authenticates Vertex AI with a Google service account.
+	AuthTypeVertexOAuth = "vertex_oauth"
 	// AuthTypeSystemOne is a decision-only channel authenticated by API keys.
 	AuthTypeSystemOne = "system_one"
 
@@ -61,6 +63,8 @@ func NormalizeAuthType(value string) string {
 		return AuthTypeZedOAuth
 	case AuthTypeCodeBuddyOAuth:
 		return AuthTypeCodeBuddyOAuth
+	case AuthTypeVertexOAuth:
+		return AuthTypeVertexOAuth
 	case AuthTypeSystemOne:
 		return AuthTypeSystemOne
 	default:
@@ -658,25 +662,25 @@ const MaxSameChannelRetries = 10
 // Config 渠道配置
 type Config struct {
 	// AntigravityCredits is request-local; never accepted or persisted by admin APIs.
-	AntigravityCredits            bool        `json:"-"`
-	ID                            int64       `json:"id"`
-	Name                          string      `json:"name"`
-	AuthType                      string      `json:"auth_type"`
-	Websockets                    bool        `json:"websockets,omitempty"`
-	OAuthQuotaPassthrough         bool        `json:"oauth_quota_passthrough"`
-	ProtocolTransformMode         string      `json:"protocol_transform_mode"`
-	URLs                          ChannelURLs `json:"urls"`
-	Priority                      int         `json:"priority"`
+	AntigravityCredits    bool        `json:"-"`
+	ID                    int64       `json:"id"`
+	Name                  string      `json:"name"`
+	AuthType              string      `json:"auth_type"`
+	Websockets            bool        `json:"websockets,omitempty"`
+	OAuthQuotaPassthrough bool        `json:"oauth_quota_passthrough"`
+	ProtocolTransformMode string      `json:"protocol_transform_mode"`
+	URLs                  ChannelURLs `json:"urls"`
+	Priority              int         `json:"priority"`
 	// SortOverride 手动接管渠道排序：非 0 时直接作为有效优先级，不再叠加失败/首字惩罚；
 	// 0 表示未覆盖，走自动健康度计算。冷却过滤优先于排序，故覆盖不会让故障渠道重新入选。
-	SortOverride                  int         `json:"sort_override"`
-	RPMLimit                      int         `json:"rpm_limit"`       // 每分钟请求数限制，0表示无限制
-	MaxConcurrency                int         `json:"max_concurrency"` // 最大并发请求数，0表示无限制
-	Enabled                       bool        `json:"enabled"`
-	ScheduledCheckEnabled         bool        `json:"scheduled_check_enabled"`
-	ScheduledCheckModel           string      `json:"scheduled_check_model"`
-	ScheduledCheckIntervalMinutes int         `json:"scheduled_check_interval_minutes"`
-	ScheduledCheckStartTime       string      `json:"scheduled_check_start_time"`
+	SortOverride                  int    `json:"sort_override"`
+	RPMLimit                      int    `json:"rpm_limit"`       // 每分钟请求数限制，0表示无限制
+	MaxConcurrency                int    `json:"max_concurrency"` // 最大并发请求数，0表示无限制
+	Enabled                       bool   `json:"enabled"`
+	ScheduledCheckEnabled         bool   `json:"scheduled_check_enabled"`
+	ScheduledCheckModel           string `json:"scheduled_check_model"`
+	ScheduledCheckIntervalMinutes int    `json:"scheduled_check_interval_minutes"`
+	ScheduledCheckStartTime       string `json:"scheduled_check_start_time"`
 
 	// 模型配置（统一管理模型和重定向）
 	ModelEntries []ModelEntry `json:"models"`
@@ -852,6 +856,11 @@ func (c *Config) UsesCursorOAuth() bool {
 // UsesZedOAuth reports whether this channel is backed by a Zed credential.
 func (c *Config) UsesZedOAuth() bool {
 	return c != nil && c.GetAuthType() == AuthTypeZedOAuth
+}
+
+// UsesVertexOAuth reports whether this channel is backed by a Vertex AI service account.
+func (c *Config) UsesVertexOAuth() bool {
+	return c != nil && c.GetAuthType() == AuthTypeVertexOAuth
 }
 
 // UsesOAuth reports whether API keys are replaced by a private OAuth credential.
@@ -1056,6 +1065,7 @@ type APIKey struct {
 	AllowedModels   []string `json:"allowed_models,omitempty"`    // 空表示该 Key 不限制模型
 	DetectedModels  []string `json:"detected_models,omitempty"`   // 最近一次模型探测确认的上游模型；空表示尚未探测
 	ModelScopeEmpty bool     `json:"model_scope_empty,omitempty"` // true 表示该 Key 当前不允许任何模型
+	ModelScopeAuto  bool     `json:"model_scope_auto,omitempty"`  // true 表示范围来自明确应用的模型探测，可自动刷新
 
 	Priority    int    `json:"priority"`     // 数值越大越优先，仅在渠道内比较
 	KeyStrategy string `json:"key_strategy"` // 历史配置字段，保留读写；同优先级统一轮询
@@ -1078,6 +1088,7 @@ type APIKeyModelScope struct {
 	AllowedModels   []string
 	DetectedModels  []string
 	ModelScopeEmpty bool
+	ModelScopeAuto  bool
 	Disabled        bool
 }
 

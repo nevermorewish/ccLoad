@@ -3491,6 +3491,92 @@ func TestAnthropicOAuthBuildProxyRequestKeepsCustomHeaderRules(t *testing.T) {
 	}
 }
 
+// Claude Code 2.1.300+ 直连官方 API 时 gzip 请求体；门槛按 JS 字符串长度计。
+func TestDoUpstreamRequestGzipsAnthropicFirstPartyBody(t *testing.T) {
+	padded := func(unit string, n int) []byte { return []byte(`{"pad":"` + strings.Repeat(unit, n) + `"}`) }
+	const gzipUA, oldUA = "claude-cli/2.1.300 (external, cli)", "claude-cli/2.1.299 (external, cli)"
+	tests := []struct {
+		name, target, userAgent, encoding string
+		body                              []byte
+		gzipped                           bool
+	}{
+		{name: "at threshold", userAgent: gzipUA, body: padded("a", 4086), gzipped: true},
+		{name: "below threshold", userAgent: gzipUA, body: padded("a", 4085)},
+		{name: "multibyte counts JS chars", userAgent: gzipUA, body: padded("中", 4085)},
+		{name: "astral counts two units", userAgent: gzipUA, body: padded("😀", 2043), gzipped: true},
+		{name: "older CLI", userAgent: oldUA, body: padded("a", 8192)},
+		{name: "non CLI", userAgent: "Anthropic/Python 0.70.0", body: padded("a", 8192)},
+		{name: "compatible gateway", target: "https://gateway.example/v1/messages", userAgent: gzipUA, body: padded("a", 8192)},
+		{name: "caller encoded", userAgent: gzipUA, encoding: "br", body: padded("a", 8192)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var captured *http.Request
+			var wire []byte
+			srv := newInMemoryServer(t)
+			srv.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				captured = req
+				var err error
+				if wire, err = io.ReadAll(req.Body); err != nil {
+					return nil, err
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+			})}
+			target := test.target
+			if target == "" {
+				target = "https://api.anthropic.com/v1/messages?beta=true"
+			}
+			req, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(test.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("User-Agent", test.userAgent)
+			if test.encoding != "" {
+				req.Header.Set("Content-Encoding", test.encoding)
+			}
+			resp, err := srv.doUpstreamRequest(&model.Config{ID: 1, Name: "anthropic"}, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+
+			if !test.gzipped {
+				if got := captured.Header.Get("Content-Encoding"); got != test.encoding || !bytes.Equal(wire, test.body) {
+					t.Fatalf("Content-Encoding=%q wire len=%d, want %q and the original %d bytes", got, len(wire), test.encoding, len(test.body))
+				}
+				return
+			}
+			if got := captured.Header.Get("Content-Encoding"); got != "gzip" || captured.ContentLength != int64(len(wire)) {
+				t.Fatalf("Content-Encoding=%q ContentLength=%d wire=%d", got, captured.ContentLength, len(wire))
+			}
+			// Bun fetch compress:"gzip" 的头：MTIME=0、XFL=0、OS=255。
+			if wantHeader := []byte{0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff}; !bytes.HasPrefix(wire, wantHeader) {
+				t.Fatalf("gzip header = % x, want % x", wire[:min(len(wire), 10)], wantHeader)
+			}
+			replay, err := captured.GetBody()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if replayed, _ := io.ReadAll(replay); !bytes.Equal(replayed, wire) {
+				t.Fatal("GetBody must replay the compressed wire body")
+			}
+			reader, err := gzip.NewReader(bytes.NewReader(wire))
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			padding, ok := bytes.CutPrefix(decoded, test.body)
+			if !ok || len(padding) < 1 || len(padding) > 257 || padding[0] != '\n' ||
+				len(bytes.Trim(padding[1:], " \t")) != 0 {
+				t.Fatalf("decoded body must be the original plus newline and 0-256 spaces/tabs, padding=%q", padding)
+			}
+		})
+	}
+}
+
 func TestAnthropicAPIKeyAuthenticationUsesOfficialOriginBoundary(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -3908,6 +3994,43 @@ func TestPrepareTranslatedUpstreamBodyInjectsAnyrouterFallbackTools(t *testing.T
 		if name := gjson.GetBytes(got, fmt.Sprintf("tools.%d.name", index)).String(); name != want {
 			t.Fatalf("tools.%d.name = %q, want %q; body = %s", index, name, want, got)
 		}
+	}
+}
+
+func TestPrepareTranslatedUpstreamBodyFillsXAIAnthropicToolDescriptions(t *testing.T) {
+	t.Parallel()
+
+	const body = `{"model":"grok-4.5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"lookup","input_schema":{"type":"object"}},{"type":"web_search_20250305","name":"web_search"},{"name":"read","description":"Read a file","input_schema":{"type":"object"}}]}`
+	tests := []struct {
+		target string
+		filled bool
+	}{
+		{target: "https://cli-chat-proxy.grok.com/v1/messages", filled: true},
+		{target: "https://api.x.ai/v1/messages", filled: true},
+		{target: anthropicOfficialTestURL.String()},
+		{target: anthropicThirdPartyTestURL.String()},
+	}
+	for _, test := range tests {
+		t.Run(test.target, func(t *testing.T) {
+			t.Parallel()
+			got, _, err := (&Server{}).prepareTranslatedUpstreamBody(
+				&model.Config{}, protocol.Anthropic, "/v1/messages", "",
+				[]byte(body), []byte(body), "sk-key", http.Header{}, false, mustParseTestURL(test.target),
+				false, false,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := gjson.GetBytes(got, "tools.2.description").String(); got != "Read a file" {
+				t.Fatalf("existing description = %q", got)
+			}
+			for index, want := range []string{"lookup", "web_search"} {
+				description := gjson.GetBytes(got, fmt.Sprintf("tools.%d.description", index))
+				if test.filled && description.String() != want || !test.filled && description.Exists() {
+					t.Fatalf("tools.%d.description = %s, filled=%v; body = %s", index, description.Raw, test.filled, got)
+				}
+			}
+		})
 	}
 }
 

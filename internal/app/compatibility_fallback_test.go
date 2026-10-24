@@ -8,9 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tidwall/gjson"
+
 	"ccLoad/internal/model"
 	"ccLoad/internal/protocol"
-	"github.com/tidwall/gjson"
 )
 
 func TestCompatibilityMultiURLPreservesUpstreamError(t *testing.T) {

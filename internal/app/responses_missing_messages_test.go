@@ -9,10 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"ccLoad/internal/model"
-	"ccLoad/internal/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+
+	"ccLoad/internal/model"
+	"ccLoad/internal/protocol"
 )
 
 const responsesMissingMessagesError = "{\"error\":{\"message\":\"The request failed because it is missing `messages` parameter. Request id: test\",\"type\":\"BadRequest\",\"param\":\"\",\"code\":\"MissingParameter\"}}"

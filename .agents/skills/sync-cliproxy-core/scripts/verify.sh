@@ -68,7 +68,9 @@ if [[ -z "$repo_root" ]]; then
   exit 1
 fi
 cd "$repo_root"
-go_module_root="$(dirname "$(go env GOMOD)")"
+# Go on Windows returns native paths; compare both sides using forward slashes.
+normalize_go_paths() { tr '\\' '/' | tr -d '\r'; }
+go_module_root="$(dirname "$(go env GOMOD | normalize_go_paths)")"
 
 failures=0
 fail() {
@@ -405,8 +407,8 @@ while IFS= read -r provider; do
   else
     fail "cannot load provider test packages: $provider"
   fi
-  if provider_build_files="$(go list -tags sonic -f "$build_files_template" "$provider_package_pattern")" &&
-     provider_test_build_files="$(go list -tags sonic -f "$test_build_files_template" "$provider_package_pattern")"; then
+  if provider_build_files="$(go list -tags sonic -f "$build_files_template" "$provider_package_pattern" | normalize_go_paths)" &&
+     provider_test_build_files="$(go list -tags sonic -f "$test_build_files_template" "$provider_package_pattern" | normalize_go_paths)"; then
     provider_build_files=$'\n'"$provider_build_files"$'\n'
     provider_test_build_files=$'\n'"$provider_test_build_files"$'\n'
     while IFS='|' read -r _ _ role _ local_file; do
@@ -463,7 +465,7 @@ while IFS= read -r provider; do
     [[ -f "$test_file" && -n "$provider_test_lister_bin" ]] || continue
     test_package="./$(dirname "$test_file")"
     if [[ "$test_package" != "$contract_package" ]]; then
-      if ! contract_build_files="$(go list -tags sonic -f "$test_build_files_template" "$test_package")"; then
+      if ! contract_build_files="$(go list -tags sonic -f "$test_build_files_template" "$test_package" | normalize_go_paths)"; then
         contract_package=""
         fail "cannot load provider contract test package: $test_package"
         continue
@@ -581,11 +583,19 @@ if [[ -z "$test_count" || "$test_count" == "0" ]]; then
   fail "snapshot contains no synchronized tests"
 fi
 
-if [[ ! -L "$claude_skill" ]]; then
+link_target=""
+if [[ -L "$claude_skill" ]]; then
+  link_target="$(readlink "$claude_skill")"
+elif [[ "$(go env GOHOSTOS)" == "windows" && -f "$claude_skill" ]] &&
+     [[ "$(git ls-files -s -- "$claude_skill" | awk '{print $1}')" == "120000" ]] &&
+     [[ "$(git hash-object --no-filters "$claude_skill")" == "$(git rev-parse ":$claude_skill")" ]]; then
+  # core.symlinks=false materializes tracked symlinks as their exact target text.
+  link_target="$(cat "$claude_skill")"
+fi
+if [[ -z "$link_target" ]]; then
   fail "$claude_skill must be a symlink to the canonical skill"
 else
   canonical_path="$(cd "$canonical_skill" && pwd -P)"
-  link_target="$(readlink "$claude_skill")"
   if [[ "$link_target" = /* ]]; then
     resolved_path="$(cd "$link_target" 2>/dev/null && pwd -P || true)"
   else

@@ -11,9 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tidwall/gjson"
+
 	"ccLoad/internal/model"
 	"ccLoad/internal/protocol"
-	"github.com/tidwall/gjson"
 )
 
 func TestAnthropicInclusiveCacheSnapshots(t *testing.T) {
@@ -101,7 +102,7 @@ func TestAnthropicInclusiveCacheDetectsMislabeledBody(t *testing.T) {
 
 func TestAnthropicInclusiveCacheObservesRawBytesAndCloseUnblocks(t *testing.T) {
 	input, writer := io.Pipe()
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: input}
 	cfg := &model.Config{URLs: model.ChannelURLs{{URL: "https://inclusive", AnthropicInputTokensIncludeCache: true}}}
 	normalizeAnthropicCacheResponse(resp, cfg, "https://inclusive", protocol.Anthropic)

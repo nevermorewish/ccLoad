@@ -2,7 +2,6 @@
 # 这些文件是从其他位置复制来的，不应提交到版本控制
 
 # 从 web 复制的共享资源
-assets/css/styles.css
 assets/js/theme-init.js
 
 # 从 web 复制的图标
@@ -17,3 +16,6 @@ assets/video/*.mp4
 
 # make www-build 的预渲染产物
 dist/
+
+# Legacy shared stylesheet left by earlier www-setup runs.
+assets/css/styles.css

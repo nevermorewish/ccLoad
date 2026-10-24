@@ -390,7 +390,7 @@ function CredentialPanel({ channelId, authType, credential, info, onNotice }: { 
     <div className="toolbar">
       <label><input type="radio" name="credential-view" checked={view === 'decoded'} onChange={() => setView('decoded')} /> 解码</label>
       <label><input type="radio" name="credential-view" checked={view === 'raw'} onChange={() => setView('raw')} /> 原始</label>
-      <button className="btn" disabled={!channelId} onClick={() => void refresh()}>刷新凭证</button>
+      <button className="btn" disabled={!channelId || !CREDENTIAL_RESOURCE[authType]} onClick={() => void refresh()}>刷新凭证</button>
       <button className="btn" onClick={() => void navigator.clipboard?.writeText(text)}>复制</button>
     </div>
     <pre className="result-pre">{text}</pre>

@@ -394,6 +394,7 @@ window.WebAuth = window.WebAuth || {
   let _activeTimer = null;
   let _activeWrap = null;        // .brand-icon-wrap 元素
   let _activeBadge = null;       // .brand-badge 元素
+  let _activeDots = [];          // .brand-flow-dots 下的圆点
   let _faviconBase = null;       // 预加载的 favicon 底图 Image
   let _origFaviconLinks = null;  // 页面初始 favicon 集合快照（用于完整恢复）
   let _lastBadgeCount = -1;      // 去重：仅数量变化时重绘 favicon
@@ -403,6 +404,30 @@ window.WebAuth = window.WebAuth || {
   let _activeCount = 0;
   let _activePulseTimer = null;
   let _faviconPulseOn = false;
+
+  // 流动圆点随并发数增多：1 个请求 3 颗，每多 1 个加 1 颗，封顶 BRAND_FLOW_DOTS_MAX
+  const BRAND_FLOW_DOTS_MAX = 8;
+
+  function brandFlowDotCount(count) {
+    return Math.min(BRAND_FLOW_DOTS_MAX, count + 2);
+  }
+
+  function syncBrandFlowDots(count) {
+    const visible = brandFlowDotCount(count);
+    _activeDots.forEach((dot, i) => {
+      const keep = i < visible;
+      // 并发减少时多出的圆点跑完当前一趟（周期末尾已透明）再隐藏，避免半路消失；闲置时无动画，直接隐藏
+      if (keep || count <= 0) {
+        dot.onanimationiteration = null;
+        dot.hidden = !keep;
+      } else if (!dot.hidden) {
+        dot.onanimationiteration = () => {
+          dot.onanimationiteration = null;
+          dot.hidden = true;
+        };
+      }
+    });
+  }
 
   function brandBadgeLabel(count) {
     return count > 999 ? '999+' : String(count);
@@ -512,7 +537,7 @@ window.WebAuth = window.WebAuth || {
     ctx.beginPath(); ctx.arc(cx, cy, r + 2, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff'; ctx.fill();
     ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle = pulseOn ? '#fb923c' : '#f97316'; ctx.fill();
+    ctx.fillStyle = pulseOn ? '#f97316' : '#ea580c'; ctx.fill();
 
     // 字号按位数两档自适应（1~9 单字符 / 9+ 双字符）
     const fs = text.length >= 2 ? 14 : 18;
@@ -562,6 +587,7 @@ window.WebAuth = window.WebAuth || {
     if (_activeWrap) {
       _activeWrap.classList.toggle('is-active', count > 0);
       if (_activeBadge) _activeBadge.textContent = brandBadgeLabel(count);
+      syncBrandFlowDots(count);
     }
     // 标签页 favicon 角标（仅在数量变化时重绘，省 toDataURL 开销）
     if (count !== _lastBadgeCount) {
@@ -627,24 +653,20 @@ window.WebAuth = window.WebAuth || {
   }
 
   // 顶栏 Logo 内联渲染：外部 SVG（img / use href）每次切页都要重新取文件解析，
-  // 顶栏先出现、Logo 后补上，表现为切页时 Logo 闪动。图形与 /web/brand-*.svg 保持一致。
+  // 顶栏先出现、Logo 后补上，表现为切页时 Logo 闪动。图形与 /web/brand-*.svg 保持一致；
+  // 字标 viewBox 只框字母，副标题画在框外下方，由 CSS 决定显示（桌面）或隐藏（窄屏）。
   const BRAND_MARK_SVG = '<defs><linearGradient id="topbar-brand-gradient" x1="0" y1="0" x2="0.82" y2="1">'
-    + '<stop offset="0" stop-color="#1d9bf0"/><stop offset="0.55" stop-color="#367df4"/><stop offset="1" stop-color="#7c3aed"/>'
+    + '<stop offset="0" stop-color="#60a5fa"/><stop offset="0.55" stop-color="#3b82f6"/><stop offset="1" stop-color="#2563eb"/>'
     + '</linearGradient><mask id="topbar-brand-c-mask"><rect width="112" height="72" fill="#000"/>'
     + '<circle cx="49" cy="36" r="30" fill="#fff"/><circle cx="49" cy="36" r="16" fill="#000"/><path d="M52 36 90 4v64Z" fill="#000"/>'
     + '</mask></defs>'
     + '<rect x="19" y="6" width="60" height="60" fill="url(#topbar-brand-gradient)" mask="url(#topbar-brand-c-mask)"/>'
     + '<path fill="url(#topbar-brand-gradient)" fill-rule="evenodd" d="M59.4 36c4-4 8-8 12-11 8-4 16 2 16 11s-8 15-16 11c-4-3-8-7-12-11Zm17-4a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/>';
 
-  const BRAND_WORDMARK_SVG = '<defs><linearGradient id="topbar-wordmark-gradient" x1="0" y1="0" x2="1" y2="1">'
-    + '<stop offset="0" stop-color="#2563eb"/><stop offset="1" stop-color="#1d4ed8"/></linearGradient></defs>'
-    + '<g font-family="Arial Black, Arial, Helvetica, sans-serif" font-size="30" font-style="italic" font-weight="900">'
-    + '<text x="4" y="24.5" fill="currentColor" textLength="34" lengthAdjust="spacingAndGlyphs">cc</text>'
-    + '<text x="40" y="24.5" fill="#2563eb" textLength="17" lengthAdjust="spacingAndGlyphs">L</text>'
-    + '<circle cx="68.5" cy="16" r="8.5" fill="url(#topbar-wordmark-gradient)"/>'
-    + '<path d="M70.7 3.2 64 15.4h3.9L66 28.8l8-14.7h-4.2Z" fill="#fbbf24" transform="rotate(34.6 68.5 16)"/>'
-    + '<text x="80" y="24.5" fill="#2563eb" textLength="46" lengthAdjust="spacingAndGlyphs">ad</text></g>'
-    + '<text x="0" y="35" fill="#2563eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9" font-weight="700" transform="translate(6.5 0) scale(.867 1)">API Load Balancer &amp; Proxy</text>';
+  const BRAND_WORDMARK_SVG = '<path fill="currentColor" d="M19.64 17.42 25.31 18.07Q24.83 19.84 23.77 21.13Q22.69 22.43 21.04 23.15Q19.37 23.87 16.81 23.87Q14.33 23.87 12.68 23.4Q11.03 22.94 9.85 21.91Q8.66 20.88 7.99 19.49Q7.31 18.09 7.31 15.79Q7.31 13.39 8.14 11.8Q8.73 10.62 9.78 9.69Q10.82 8.76 11.91 8.31Q13.66 7.59 16.38 7.59Q20.19 7.59 22.19 8.95Q24.19 10.32 25 12.94L19.39 13.69Q19.12 12.69 18.43 12.18Q17.73 11.68 16.56 11.68Q15.08 11.68 14.16 12.74Q13.25 13.8 13.25 15.96Q13.25 17.88 14.16 18.87Q15.07 19.87 16.47 19.87Q17.64 19.87 18.44 19.27Q19.24 18.67 19.64 17.42ZM39.05 17.42 44.72 18.07Q44.24 19.84 43.18 21.13Q42.1 22.43 40.45 23.15Q38.78 23.87 36.22 23.87Q33.74 23.87 32.09 23.4Q30.44 22.94 29.26 21.91Q28.07 20.88 27.4 19.49Q26.72 18.09 26.72 15.79Q26.72 13.39 27.55 11.8Q28.14 10.62 29.19 9.69Q30.23 8.76 31.32 8.31Q33.07 7.59 35.79 7.59Q39.6 7.59 41.6 8.95Q43.6 10.32 44.41 12.94L38.8 13.69Q38.53 12.69 37.84 12.18Q37.14 11.68 35.97 11.68Q34.49 11.68 33.57 12.74Q32.66 13.8 32.66 15.96Q32.66 17.88 33.57 18.87Q34.48 19.87 35.88 19.87Q37.05 19.87 37.85 19.27Q38.65 18.67 39.05 17.42Z"/>'
+    + '<path fill="#2563eb" d="M47.25 2.03H53.89L53.89 18.21H64.24L64.24 23.5H47.25ZM91.11 12.98 85.41 12.38Q85.73 10.89 86.34 10.03Q86.95 9.17 88.09 8.54Q88.91 8.09 90.34 7.84Q91.78 7.59 93.45 7.59Q96.13 7.59 97.75 7.89Q99.39 8.19 100.47 9.14Q101.23 9.8 101.67 11.01Q102.1 12.22 102.11 13.32L102.11 20.19Q102.11 21.29 102.24 21.91Q102.38 22.53 102.85 23.5H97.26Q96.92 22.9 96.81 22.58Q96.72 22.27 96.62 21.6Q95.44 22.72 94.29 23.21Q92.7 23.85 90.6 23.85Q87.82 23.85 86.38 22.56Q84.94 21.27 84.93 19.38Q84.94 17.61 85.98 16.47Q87.02 15.33 89.82 14.77Q93.17 14.1 94.16 13.82Q95.17 13.55 96.27 13.11Q96.28 12.02 95.83 11.58Q95.37 11.14 94.22 11.14Q92.76 11.14 92.03 11.61Q91.46 11.97 91.11 12.98ZM96.28 16.12Q95.05 16.56 93.72 16.89Q91.9 17.38 91.42 17.85Q90.91 18.33 90.91 18.94Q90.91 19.65 91.41 20.09Q91.9 20.54 92.85 20.54Q93.84 20.54 94.7 20.06Q95.56 19.57 95.92 18.88Q96.28 18.18 96.27 17.07ZM121.46 2.03 121.46 23.5H115.88L115.88 21.2Q114.7 22.67 113.74 23.18Q112.44 23.85 110.86 23.85Q107.68 23.85 106.01 21.43Q104.34 19.02 104.33 15.56Q104.33 11.69 106.19 9.64Q108.04 7.59 110.9 7.59Q112.29 7.59 113.43 8.06Q114.56 8.53 115.44 9.47L115.44 2.03ZM115.48 15.68Q115.48 13.85 114.71 12.95Q113.93 12.04 112.75 12.04Q111.71 12.04 111 12.91Q110.29 13.77 110.3 15.81Q110.3 17.71 111.02 18.6Q111.75 19.49 112.82 19.49Q113.96 19.49 114.72 18.59Q115.48 17.7 115.48 15.68Z"/>'
+    + '<path fill="#2563eb" fill-rule="evenodd" d="M65.53 15.77Q65.53 12.21 67.93 9.9Q70.34 7.59 74.42 7.59Q79.1 7.59 81.49 10.3Q83.4 12.48 83.4 15.68Q83.4 19.27 81.02 21.56Q78.64 23.85 74.43 23.85Q70.68 23.85 68.37 21.95Q65.53 19.59 65.53 15.77ZM74.47 9.87L69.76 17.02L73.46 17.02L74.46 21.58L79.16 14.42L75.46 14.42Z"/>'
+    + '<text x="7" y="35" textLength="114.5" lengthAdjust="spacingAndGlyphs" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="10" font-weight="600" fill="#475569" style="fill: var(--brand-tagline-color, #475569)">Self-hosted AI Gateway</text>';
 
   function createInlineBrandSVG(className, viewBox, markup) {
     const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -660,13 +682,12 @@ window.WebAuth = window.WebAuth || {
 
     // 图标与字标独立复用；活动动画层只属于图标
     const iconImg = createInlineBrandSVG('brand-mark', '8 6 88 60', BRAND_MARK_SVG);
-    const wordmark = createInlineBrandSVG('brand-wordmark', '0 0 132 36', BRAND_WORDMARK_SVG);
+    const wordmark = createInlineBrandSVG('brand-wordmark', '0 1 132 24', BRAND_WORDMARK_SVG);
     const speedLines = h('span', { class: 'brand-speed-lines', 'aria-hidden': 'true' }, [
       h('i'), h('i'), h('i'), h('i'), h('i')
     ]);
-    const flowDots = h('span', { class: 'brand-flow-dots', 'aria-hidden': 'true' }, [
-      h('i'), h('i'), h('i')
-    ]);
+    _activeDots = Array.from({ length: BRAND_FLOW_DOTS_MAX }, () => h('i'));
+    const flowDots = h('span', { class: 'brand-flow-dots', 'aria-hidden': 'true' }, _activeDots);
     _activeBadge = h('span', { class: 'brand-badge' }, '0');
     _activeWrap = h('span', { class: 'brand-icon-wrap' }, [speedLines, iconImg, flowDots, _activeBadge]);
 
@@ -677,7 +698,7 @@ window.WebAuth = window.WebAuth || {
         target: '_blank',
         rel: 'noopener noreferrer',
         title: t('nav.githubRepo'),
-        'aria-label': 'ccLoad — API Load Balancer & Proxy'
+        'aria-label': 'ccLoad — Self-hosted AI Gateway'
       }, [
         _activeWrap,
         wordmark
@@ -1379,20 +1400,98 @@ window.WebAuth = window.WebAuth || {
     return output / tokenDuration;
   }
 
-  function timingColor(seconds, greenThreshold, warningThreshold) {
+  // 缓存命中率 = 缓存读 /（输入 + 缓存读 + 缓存建）；无缓存读时返回 null
+  function calculateCacheHitRate(inputTokens, cacheReadTokens, cacheCreationTokens) {
+    const read = Number(cacheReadTokens) || 0;
+    const total = (Number(inputTokens) || 0) + read + (Number(cacheCreationTokens) || 0);
+    if (total <= 0 || read <= 0) return null;
+    return read / total;
+  }
+
+  // 质量指标（耗时、速度、成功率、缓存命中率、RPM）统一四档 good / normal / warn / bad → 绿 / 默认文字色 / 橙 / 红，无效值为空串。
+  // 请求数、Token 数等量值不分档，保持中性色。
+  // 耗时分级：越小越好
+  function timingLevel(seconds, greenThreshold, normalThreshold, warningThreshold) {
     const value = Number(seconds);
-    if (!Number.isFinite(value) || value <= 0) return 'var(--neutral-600)';
-    if (value <= greenThreshold) return 'var(--success-600)';
-    if (value <= warningThreshold) return 'var(--warning-600)';
-    return 'var(--error-600)';
+    if (!Number.isFinite(value) || value <= 0) return '';
+    if (value <= greenThreshold) return 'good';
+    if (value <= normalThreshold) return 'normal';
+    if (value <= warningThreshold) return 'warn';
+    return 'bad';
+  }
+
+  const METRIC_LEVEL_COLORS = { good: 'var(--success-600)', normal: 'var(--neutral-700)', warn: 'var(--warning-600)', bad: 'var(--error-600)' };
+
+  function getFirstByteTimingLevel(seconds) {
+    return timingLevel(seconds, 3, 6, 10);
+  }
+
+  function getDurationTimingLevel(seconds) {
+    return timingLevel(seconds, 10, 30, 60);
+  }
+
+  function metricLevelColor(level) {
+    return METRIC_LEVEL_COLORS[level] || 'var(--neutral-600)';
   }
 
   function getFirstByteTimingColor(seconds) {
-    return timingColor(seconds, 5, 10);
+    return metricLevelColor(getFirstByteTimingLevel(seconds));
   }
 
   function getDurationTimingColor(seconds) {
-    return timingColor(seconds, 30, 60);
+    return metricLevelColor(getDurationTimingLevel(seconds));
+  }
+
+  // 正值分级：越大越好，≤0 视为无数据
+  function positiveLevel(value, greenThreshold, normalThreshold, warningThreshold) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    if (n >= greenThreshold) return 'good';
+    if (n >= normalThreshold) return 'normal';
+    if (n >= warningThreshold) return 'warn';
+    return 'bad';
+  }
+
+  // 输出速度分级（tok/s）：≥100 / 50–100 / 20–50 / <20
+  function getSpeedLevel(tokensPerSecond) {
+    return positiveLevel(tokensPerSecond, 100, 50, 20);
+  }
+
+  function getSpeedColor(tokensPerSecond) {
+    return metricLevelColor(getSpeedLevel(tokensPerSecond));
+  }
+
+  // RPM 分级（看渠道吞吐）：≥20 / 10–20 / 5–10 / <5
+  function getRpmColor(rpm) {
+    return metricLevelColor(positiveLevel(rpm, 20, 10, 5));
+  }
+
+  // 比例分级（0~1）：越大越好
+  function ratioLevel(ratio, greenThreshold, normalThreshold, warningThreshold) {
+    const value = Number(ratio);
+    if (ratio === null || ratio === undefined || !Number.isFinite(value) || value < 0) return '';
+    if (value >= greenThreshold) return 'good';
+    if (value >= normalThreshold) return 'normal';
+    if (value >= warningThreshold) return 'warn';
+    return 'bad';
+  }
+
+  // 成功率：≥99% / 95–99% / 80–95% / <80%
+  function getSuccessRateLevel(ratio) {
+    return ratioLevel(ratio, 0.99, 0.95, 0.8);
+  }
+
+  function getSuccessRateColor(ratio) {
+    return metricLevelColor(getSuccessRateLevel(ratio));
+  }
+
+  // 缓存命中率：≥85% / 70–85% / 50–70% / <50%
+  function getCacheHitRateLevel(ratio) {
+    return ratioLevel(ratio, 0.85, 0.7, 0.5);
+  }
+
+  function getCacheHitRateColor(ratio) {
+    return metricLevelColor(getCacheHitRateLevel(ratio));
   }
 
   /**
@@ -1487,14 +1586,14 @@ window.WebAuth = window.WebAuth || {
    * 构建两行成本显示HTML
    * @param {number} standard - 标准成本
    * @param {number|null|undefined} effective - 倍率后成本
-   * @param {{tone?: 'warning'|'success', decimalPlaces?: number}} options - 样式配置
+   * @param {{tone?: 'warning'|'success'|'neutral', decimalPlaces?: number}} options - 样式配置
    * @returns {string}
    */
   function buildCostStackHtml(standard, effective, options = {}) {
     const info = getCostDisplayInfo(standard, effective);
     if (!(info.standardCost > 0)) return '';
 
-    const tone = options.tone === 'success' ? 'success' : 'warning';
+    const tone = options.tone === 'success' || options.tone === 'neutral' ? options.tone : 'warning';
     const inline = options.inline === true;
     const classes = ['cost-stack', `cost-stack--${tone}`];
     if (info.hasMultiplier) {
@@ -1537,13 +1636,20 @@ window.WebAuth = window.WebAuth || {
     return `<sup class="cell-multiplier-badge">${text}</sup>`;
   }
 
-  // 格式化数字显示（通用：K/M缩写）
+  const COMPACT_NUMBER_UNITS = ['K', 'M', 'B'];
+
+  // 格式化数字显示（通用：K/M/B缩写）；一位小数舍入后满 1000 进到下一单位，不出现 1000.0K
   function formatNumber(num) {
     const n = Number(num);
     if (!Number.isFinite(n)) return '0';
-    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-    return n.toString();
+    if (n < 1000) return n.toString();
+    let unitIndex = 0;
+    let text = (n / 1000).toFixed(1);
+    while (Number(text) >= 1000 && unitIndex < COMPACT_NUMBER_UNITS.length - 1) {
+      unitIndex++;
+      text = (n / 1000 ** (unitIndex + 1)).toFixed(1);
+    }
+    return text + COMPACT_NUMBER_UNITS[unitIndex];
   }
 
   /**
@@ -1555,15 +1661,6 @@ window.WebAuth = window.WebAuth || {
     const n = Number(ratio);
     if (ratio === null || ratio === undefined || !Number.isFinite(n)) return '--';
     return `${(n * 100).toFixed(1)}%`;
-  }
-
-  // RPM 颜色：低流量绿色，中等橙色，高流量红色
-  function getRpmColor(rpm) {
-    const n = Number(rpm);
-    if (!Number.isFinite(n)) return 'var(--neutral-600)';
-    if (n < 10) return 'var(--success-600)';
-    if (n < 100) return 'var(--warning-600)';
-    return 'var(--error-600)';
   }
 
   /**
@@ -1600,6 +1697,7 @@ window.WebAuth = window.WebAuth || {
   window.fillAuthTokenSelect = fillAuthTokenSelect;
   window.initAuthTokenFilter = initAuthTokenFilter;
   window.calculateTokenSpeed = calculateTokenSpeed;
+  window.calculateCacheHitRate = calculateCacheHitRate;
   window.formatCost = formatCost;
   window.formatCostPair = formatCostPair;
   window.getCostDisplayInfo = getCostDisplayInfo;
@@ -1607,9 +1705,17 @@ window.WebAuth = window.WebAuth || {
   window.buildCornerMultiplierBadge = buildCornerMultiplierBadge;
   window.getFirstByteTimingColor = getFirstByteTimingColor;
   window.getDurationTimingColor = getDurationTimingColor;
+  window.getFirstByteTimingLevel = getFirstByteTimingLevel;
+  window.getDurationTimingLevel = getDurationTimingLevel;
+  window.getSpeedLevel = getSpeedLevel;
+  window.getSpeedColor = getSpeedColor;
+  window.getRpmColor = getRpmColor;
+  window.getSuccessRateLevel = getSuccessRateLevel;
+  window.getSuccessRateColor = getSuccessRateColor;
+  window.getCacheHitRateLevel = getCacheHitRateLevel;
+  window.getCacheHitRateColor = getCacheHitRateColor;
   window.formatNumber = formatNumber;
   window.formatPercent = formatPercent;
-  window.getRpmColor = getRpmColor;
   window.escapeHtml = escapeHtml;
   window.toggleResponse = toggleResponse;
 
@@ -2167,6 +2273,8 @@ window.WebAuth = window.WebAuth || {
       }
       activeIndex = -1;
       renderDropdown();
+      // 过滤改变列表高度，需重新锚定；否则向上展开的列表会停在视口顶部
+      positionDropdown();
     });
 
     input.addEventListener('keydown', (e) => {
@@ -2235,6 +2343,7 @@ window.WebAuth = window.WebAuth || {
       refresh: () => {
         if (dropdown.dataset.open === '1') {
           renderDropdown();
+          positionDropdown();
         }
       },
       getInput: () => input,

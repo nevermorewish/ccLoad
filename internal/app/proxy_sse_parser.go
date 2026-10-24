@@ -635,17 +635,7 @@ func (p *sseUsageParser) parseEvent(eventType, data string) error {
 	if isSuccessfulResponsesTerminal(payloadType) {
 		responseRaw := gjson.Get(data, "response")
 		if responseRaw.IsObject() {
-			outputRaw := responseRaw.Get("output")
-			output := []byte(outputRaw.Raw)
-			if !outputRaw.IsArray() {
-				output = []byte("[]")
-			}
-			responseID := strings.TrimSpace(responseRaw.Get("id").String())
-			p.responsesTurnResult = responsesWebsocketTurnResult{
-				completedOutput:     output,
-				completedResponseID: responseID,
-				pendingToolCallIDs:  responsesWebsocketPendingToolCallIDs(output),
-			}
+			p.responsesTurnResult = responsesWebsocketTurnFromResponse(responseRaw)
 			p.hasResponsesTurn = true
 		}
 	}
@@ -873,6 +863,9 @@ func gjsonOpenAIStreamComplete(data string) bool {
 }
 
 func gjsonGeminiStreamComplete(data string) bool {
+	if strings.TrimSpace(gjson.Get(data, "promptFeedback.blockReason").String()) != "" {
+		return true
+	}
 	candidates := gjson.Get(data, "candidates")
 	if !candidates.IsArray() {
 		return false
@@ -936,8 +929,14 @@ func openAIStreamPayloadComplete(payload map[string]any) bool {
 }
 
 // geminiStreamPayloadComplete 判断 Gemini 流分片是否给出终态。
-// Gemini SSE 没有 [DONE]，非空 finishReason 是唯一的完成信号。
+// Gemini SSE 没有 [DONE]：非空 finishReason 是正常完成信号；提示词被拦截时
+// 只回 promptFeedback.blockReason、不带 candidates，同样是终态。
 func geminiStreamPayloadComplete(payload map[string]any) bool {
+	if feedback, _ := payload["promptFeedback"].(map[string]any); feedback != nil {
+		if reason, _ := feedback["blockReason"].(string); strings.TrimSpace(reason) != "" {
+			return true
+		}
+	}
 	candidates, _ := payload["candidates"].([]any)
 	for _, item := range candidates {
 		candidate, _ := item.(map[string]any)
@@ -1097,14 +1096,15 @@ func (p *jsonUsageParser) scanJSONUsage(data []byte) {
 			p.scanHaveToken = false
 			p.scanStringToken = ""
 		}
-		if b == '"' {
+		switch b {
+		case '"':
 			p.scanInString = true
 			p.scanEscape = false
 			p.scanStringBuf = p.scanStringBuf[:0]
 			p.scanStringTooLong = false
-		} else if b == '{' || b == '[' {
+		case '{', '[':
 			p.scanDepth++
-		} else if b == '}' || b == ']' {
+		case '}', ']':
 			p.scanDepth = max(0, p.scanDepth-1)
 		}
 	}

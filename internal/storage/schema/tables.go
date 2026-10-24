@@ -63,6 +63,7 @@ func DefineAPIKeysTable() *TableBuilder {
 		Column("allowed_models VARCHAR(2000) NOT NULL DEFAULT ''").
 		Column("detected_models TEXT"). // 可空 TEXT：MySQL utf8mb4 下两个 VARCHAR(8000) 会超过 65535 行长上限
 		Column("model_scope_empty TINYINT NOT NULL DEFAULT 0").
+		Column("model_scope_auto TINYINT NOT NULL DEFAULT 0").
 		Column("key_strategy VARCHAR(32) NOT NULL DEFAULT 'sequential'").
 		Column("cooldown_until BIGINT NOT NULL DEFAULT 0").
 		Column("cooldown_duration_ms BIGINT NOT NULL DEFAULT 0").
@@ -132,9 +133,13 @@ func DefineAuthTokensTable() *TableBuilder {
 		Column("success_count INT NOT NULL DEFAULT 0").
 		Column("failure_count INT NOT NULL DEFAULT 0").
 		Column("stream_avg_ttfb DOUBLE NOT NULL DEFAULT 0.0").
-		Column("non_stream_avg_rt DOUBLE NOT NULL DEFAULT 0.0").
+		Column("non_stream_avg_rt DOUBLE NOT NULL DEFAULT 0.0"). // 已废弃：不再写入，保留供旧版本回滚读取
 		Column("stream_count INT NOT NULL DEFAULT 0").
-		Column("non_stream_count INT NOT NULL DEFAULT 0").
+		Column("non_stream_count INT NOT NULL DEFAULT 0"). // 已废弃：同 non_stream_avg_rt
+		Column("avg_duration DOUBLE NOT NULL DEFAULT 0.0").
+		Column("duration_count INT NOT NULL DEFAULT 0").
+		Column("speed_output_tokens BIGINT NOT NULL DEFAULT 0").
+		Column("speed_duration DOUBLE NOT NULL DEFAULT 0.0").
 		Column("prompt_tokens_total BIGINT NOT NULL DEFAULT 0").
 		Column("completion_tokens_total BIGINT NOT NULL DEFAULT 0").
 		Column("cache_read_tokens_total BIGINT NOT NULL DEFAULT 0").

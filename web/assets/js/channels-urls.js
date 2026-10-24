@@ -145,11 +145,17 @@ function createURLRow(index) {
   statusTd.className = 'inline-url-cell-center inline-url-col-status';
   statusTd.setAttribute('data-mobile-label', window.t('common.status'));
   statusTd.innerHTML = formatURLStatus(stat);
+  const disableHint = window.t(
+    typeof editingChannelAuthType !== 'undefined' && editingChannelAuthType === 'antigravity_oauth'
+      ? 'channels.urlDisable'
+      : 'channels.urlDisableFallback'
+  );
+  if (stat && stat.disabled) statusTd.title = disableHint;
 
   const latencyTd = document.createElement('td');
   latencyTd.className = 'inline-url-cell-center inline-url-cell-metric inline-url-col-latency';
   latencyTd.setAttribute('data-mobile-label', window.t('stats.latency'));
-  latencyTd.textContent = formatURLLatency(stat);
+  latencyTd.innerHTML = formatURLLatency(stat);
 
   const requestsTd = document.createElement('td');
   requestsTd.className = 'inline-url-cell-center inline-url-cell-metric inline-url-col-requests';
@@ -163,7 +169,7 @@ function createURLRow(index) {
     // 与同行其他按钮（测试/删除）保持中性灰色风格，状态仅由图标形状与 tooltip 表达
     toggleBtn.className = 'inline-url-toggle-btn';
     toggleBtn.style.cssText = 'width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--surface-border-strong); background: var(--surface-bg-strong); color: var(--neutral-500); cursor: pointer; transition: color 0.2s, border-color 0.2s, background-color 0.2s; display: inline-flex; align-items: center; justify-content: center; padding: 0;';
-    toggleBtn.title = isDisabled ? window.t('channels.urlEnable') : window.t('channels.urlDisable');
+    toggleBtn.title = isDisabled ? `${window.t('channels.urlEnable')} — ${disableHint}` : disableHint;
     toggleBtn.innerHTML = isDisabled
       ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>'
       : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>';
@@ -231,6 +237,7 @@ function initInlineURLTableEventDelegation() {
 }
 
 function renderInlineURLTable() {
+  window.syncManagementAccountURLs?.(getValidInlineURLConfigs());
   const tbody = document.getElementById('inlineUrlTableBody');
   if (!tbody) return;
 
@@ -288,6 +295,7 @@ function updateInlineURL(index, value) {
 
   entry.url = nextURL;
 	inlineURLTableData[index] = entry;
+  window.syncManagementAccountURLs?.(getValidInlineURLConfigs());
   if (typeof scheduleChannelDuplicateHintCheck === 'function') {
     scheduleChannelDuplicateHintCheck();
   }
@@ -533,20 +541,22 @@ function formatURLStatus(stat) {
     + `${window.t('channels.urlStatusNormal')}</span>`;
 }
 
+// 延迟是首字节时间的 EWMA，按首字四档着色
 function formatURLLatency(stat) {
   if (!stat || stat.latency_ms < 0) return '--';
   const ms = Math.round(stat.latency_ms);
-  if (ms < 1000) return ms + 'ms';
-  return (ms / 1000).toFixed(1) + 's';
+  const text = ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
+  return `<span style="color: ${window.getFirstByteTimingColor(ms / 1000)};">${text}</span>`;
 }
 
+// 请求数是量值保持中性色，失败数非零时标红
 function formatURLRequests(stat) {
   if (!stat) return '--';
   const s = stat.requests || 0;
   const f = stat.failures || 0;
   if (s === 0 && f === 0) return '--';
-  if (f === 0) return `<span style="color: var(--success-600);">${s}</span>`;
-  return `<span style="color: var(--success-600);">${s}</span><span style="color: var(--neutral-300); margin: 0 2px;">/</span><span style="color: var(--error-600);">${f}</span>`;
+  if (f === 0) return String(s);
+  return `${s}<span style="color: var(--neutral-300); margin: 0 2px;">/</span><span style="color: var(--error-600);">${f}</span>`;
 }
 
 function updateURLStatsHeader() {

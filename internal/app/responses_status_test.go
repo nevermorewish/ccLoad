@@ -130,9 +130,10 @@ func TestProxyResponsesStatusCompatibility(t *testing.T) {
 				},
 			}, nil)
 			wantStatus, wantCalls := http.StatusOK, int32(1)
-			if mode == "missing_status" {
+			switch mode {
+			case "missing_status":
 				wantStatus = http.StatusBadRequest
-			} else if mode == "unknown_function_status" {
+			case "unknown_function_status":
 				wantCalls = 2
 			}
 			if response.Code != wantStatus || calls.Load() != wantCalls {
@@ -151,7 +152,7 @@ func TestNativeCodexWebsocketStatusRetryPreservesRequiredStatus(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, body, err := conn.ReadMessage()
 		if err != nil {
 			t.Error(err)

@@ -8,6 +8,7 @@ import (
 	"ccLoad/internal/model"
 )
 
+// UpdateChannelMonitorSchedule persists the channel monitor schedule.
 func (s *SQLStore) UpdateChannelMonitorSchedule(ctx context.Context, id int64, schedule model.ChannelMonitorSchedule) error {
 	if err := model.ValidateScheduledCheckSchedule(schedule.IntervalMinutes, schedule.StartTime); err != nil {
 		return err
@@ -33,6 +34,7 @@ func (s *SQLStore) UpdateChannelMonitorParticipation(ctx context.Context, id int
 	return err
 }
 
+// ListChannelMonitorStats returns channel monitor statistics for the time range.
 func (s *SQLStore) ListChannelMonitorStats(ctx context.Context, since, until time.Time) ([]model.ChannelMonitorStats, error) {
 	// Aggregate every sample, but return at most twelve recent probes per model.
 	// Proxy traffic, chats and balance/check-in requests cannot restore test health.
@@ -47,7 +49,7 @@ func (s *SQLStore) ListChannelMonitorStats(ctx context.Context, since, until tim
 	if err != nil {
 		return nil, fmt.Errorf("channel monitor stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	result := make([]model.ChannelMonitorStats, 0)
 	for rows.Next() {
 		var stat model.ChannelMonitorStats

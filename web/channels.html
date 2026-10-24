@@ -29,33 +29,148 @@
                   配置API渠道、优先级和模型支持（<b>优先请求高优先级渠道，相同优先级按Key数量加权随机</b>）</p>
               </div>
               <div class="channel-page-actions">
-                <button id="oauthLoginBtn" type="button" class="btn btn-secondary channel-page-action-btn"
-                  data-i18n-title="channels.oauth.loginTitle" title="登录 OAuth 账号并创建渠道">
-                  <span data-i18n="channels.oauth.login">OAuth 登录</span>
-                </button>
-                <button id="oauthCredentialImportBtn" type="button" class="btn btn-secondary channel-page-action-btn"
-                  data-i18n-title="channels.oauth.importTitle" title="导入 OAuth 凭证 JSON">
-                  <span data-i18n="channels.oauth.import">导入凭证</span>
-                </button>
-                <button id="oauthCredentialCleanupOpenBtn" type="button"
-                  class="btn btn-secondary channel-page-action-btn"
-                  data-i18n-title="channels.oauth.cleanupTitle" title="打开凭证清理">
-                  <span data-i18n="channels.oauth.cleanup">清理凭证</span>
-                </button>
-                <button id="importCsvBtn" type="button" class="btn btn-secondary channel-page-action-btn"
-                  data-i18n-title="channels.importCsvTitle"
-                  title="从CSV导入渠道">
-                  <span data-i18n="channels.importCsv">导入 CSV</span>
-                </button>
-                <button id="importJsonBtn" type="button" class="btn btn-secondary channel-page-action-btn"
-                  data-i18n="channels.importJson" data-i18n-title="channels.importJsonTitle" title="从 JSON 导入渠道">导入 JSON</button>
-                <button id="exportJsonBtn" type="button" class="btn btn-secondary channel-page-action-btn"
-                  data-i18n="channels.exportJson" data-i18n-title="channels.exportJsonTitle" title="导出全部渠道为 JSON">导出 JSON</button>
-                <button id="addChannelBtn" type="button" data-action="show-add-modal" class="btn btn-primary channel-page-action-btn"
-                  data-i18n-title="channels.addChannelTitle" title="添加新渠道">
-                  <span data-i18n="channels.addChannel">+ 添加渠道</span>
-                </button>
+                <div id="channelAddGroup" class="channel-page-menu">
+                  <button type="button" class="btn btn-primary channel-page-action-btn channel-page-menu__trigger"
+                    aria-haspopup="menu" aria-expanded="false">
+                    <span data-i18n="common.add">添加</span>
+                    <svg class="channel-page-menu__chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2.5 4.5L6 8L9.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                  <div id="channelAddMenu" class="channel-page-menu__panel" role="menu">
+                    <div class="channel-page-menu__group-label" data-i18n="channels.menu.newChannel">新建渠道</div>
+                    <button id="addChannelBtn" data-action="show-add-modal" type="button" class="channel-page-menu__item" role="menuitem">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="api_key" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.menu.apiKeyChannel">API Key 渠道</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.menu.apiKeyChannelDesc">手动填写 URL / Key / 模型，支持 ✨ 一键填充</span>
+                      </span>
+                    </button>
+                    <button type="button" class="channel-page-menu__item" role="menuitem" data-oauth-provider="codex">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="codex_oauth" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.oauth.providerCodex">Codex</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.oauth.providerCodexDesc">浏览器 OAuth 或 Personal Access Token</span>
+                      </span>
+                    </button>
+                    <button type="button" class="channel-page-menu__item" role="menuitem" data-oauth-provider="anthropic">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="anthropic_oauth" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.oauth.providerAnthropic">Anthropic</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.oauth.providerAnthropicDesc">浏览器登录后粘贴授权码</span>
+                      </span>
+                    </button>
+                    <button type="button" class="channel-page-menu__item" role="menuitem" data-oauth-provider="antigravity">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="antigravity_oauth" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.oauth.providerAntigravity">Antigravity</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.oauth.providerAntigravityDesc">浏览器 OAuth 登录</span>
+                      </span>
+                    </button>
+                    <button type="button" class="channel-page-menu__item" role="menuitem" data-oauth-provider="codebuddy">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="codebuddy_oauth" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.oauth.providerCodeBuddy">CodeBuddy</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.oauth.providerCodeBuddyDesc">国内版 / 国际版，浏览器 OAuth 或认证文件</span>
+                      </span>
+                    </button>
+                    <button type="button" class="channel-page-menu__item" role="menuitem" data-oauth-provider="xai">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="xai_oauth" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.oauth.providerXAI">xAI</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.oauth.providerXAIDesc">刷新令牌、SSO Cookie 或手动授权</span>
+                      </span>
+                    </button>
+                    <button type="button" class="channel-page-menu__item" role="menuitem" data-oauth-provider="cursor">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="cursor_oauth" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.oauth.providerCursor">Cursor</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.oauth.providerCursorDesc">粘贴 Cursor User API Key</span>
+                      </span>
+                    </button>
+                    <button type="button" class="channel-page-menu__item" role="menuitem" data-oauth-provider="zed">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="zed_oauth" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.oauth.providerZed">Zed</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.oauth.providerZedDesc">使用 Zed 原生应用登录</span>
+                      </span>
+                    </button>
+                    <button type="button" class="channel-page-menu__item" role="menuitem" data-oauth-provider="zai">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="zai_oauth" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.oauth.providerZAI">Z.ai</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.oauth.providerZAIDesc">ZCode 登录或 Coding Plan API Key</span>
+                      </span>
+                    </button>
+                    <button type="button" class="channel-page-menu__item" role="menuitem" data-oauth-provider="vertex">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="vertex_oauth" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.oauth.providerVertex">Vertex</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.oauth.providerVertexDesc">上传服务账号 JSON 密钥</span>
+                      </span>
+                    </button>
+                    <button data-action="open-opencode-channel" type="button" class="channel-page-menu__item" role="menuitem">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="opencode" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title">OpenCode</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.menu.openCodeDesc">选择 Zen / Zen Go / 匿名接入</span>
+                      </span>
+                    </button>
+                    <button id="addSystemOneChannelBtn" data-action="show-add-system-one-modal" type="button" class="channel-page-menu__item" role="menuitem">
+                      <span class="channel-page-menu__icon channel-provider-avatar" data-auth-type="system_one" data-provider-icon aria-hidden="true"></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.menu.systemOneChannel">决策渠道</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.menu.systemOneChannelDesc">System One 决策接口，动态思考判断专用</span>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+                <div id="channelImportMenu" class="channel-page-menu">
+                  <button type="button" class="btn btn-secondary channel-page-action-btn channel-page-menu__trigger"
+                    aria-haspopup="menu" aria-expanded="false">
+                    <span data-i18n="common.import">导入</span>
+                    <svg class="channel-page-menu__chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2.5 4.5L6 8L9.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                  <div class="channel-page-menu__panel" role="menu">
+                    <button id="importCsvBtn" type="button" class="channel-page-menu__item" role="menuitem">
+                      <span class="channel-page-menu__icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.importCsv">导入 CSV</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.menu.importCsvDesc">批量导入渠道配置，格式与「导出 CSV」一致</span>
+                      </span>
+                    </button>
+                    <button id="oauthCredentialImportBtn" type="button" class="channel-page-menu__item" role="menuitem">
+                      <span class="channel-page-menu__icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.menu.importCredentials">导入 OAuth 凭证文件</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.menu.importCredentialsDesc">Codex / Anthropic / Antigravity / CodeBuddy / xAI / Vertex 凭证 JSON 或压缩包，自动识别提供商并按优先级递增创建渠道</span>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+                <div id="channelMoreMenu" class="channel-page-menu">
+                  <button type="button" class="btn btn-secondary channel-page-action-btn channel-page-menu__trigger"
+                    aria-haspopup="menu" aria-expanded="false">
+                    <span data-i18n="channels.moreActions">更多操作</span>
+                    <svg class="channel-page-menu__chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2.5 4.5L6 8L9.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                  <div class="channel-page-menu__panel" role="menu">
+                    <button id="btn_sort" type="button" class="channel-page-menu__item" role="menuitem">
+                      <span class="channel-page-menu__icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.sortChannels">调整渠道顺序</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.menu.sortDesc">拖拽排序当前筛选的渠道，保存后相邻优先级相差 10</span>
+                      </span>
+                    </button>
+                    <button id="oauthCredentialCleanupOpenBtn" type="button" class="channel-page-menu__item" role="menuitem">
+                      <span class="channel-page-menu__icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span>
+                      <span class="channel-page-menu__text">
+                        <span class="channel-page-menu__title" data-i18n="channels.menu.cleanupCredentials">清理 OAuth 凭证</span>
+                        <span class="channel-page-menu__desc" data-i18n="channels.menu.cleanupDesc">按凭证类型与模型检测失效渠道，批量禁用或删除；关闭窗口不中断任务</span>
+                      </span>
+                    </button>
+                  </div>
+                </div>
                 <input type="file" id="importCsvInput" accept=".csv" style="display: none;" />
+                <button id="importJsonBtn" type="button" class="btn btn-secondary" data-i18n="channels.importJson">导入 JSON</button>
                 <input type="file" id="importJsonInput" accept=".json,application/json" style="display: none;" />
               </div>
               <div id="csvImportProgress" class="csv-import-progress" hidden>
@@ -71,6 +186,37 @@
             </div>
           </div>
         </header>
+
+        <dialog id="openCodeChannelDialog" class="oauth-dialog oauth-dialog--compact"
+          aria-labelledby="openCodeChannelDialogTitle" aria-describedby="openCodeChannelDialogDescription">
+          <div class="oauth-dialog-header">
+            <div class="oauth-dialog-heading">
+              <h2 id="openCodeChannelDialogTitle" data-i18n="channels.openCode.dialogTitle">添加 OpenCode 渠道</h2>
+              <p id="openCodeChannelDialogDescription" class="oauth-dialog-description"
+                data-i18n="channels.openCode.dialogDescription">选择接入方式，然后配置 Key 和模型。</p>
+            </div>
+            <button type="button" class="close-btn" data-action="close-opencode-channel"
+              data-i18n-aria-label="common.close" aria-label="关闭">&times;</button>
+          </div>
+          <form id="openCodeChannelForm" class="oauth-dialog-body">
+            <div class="oauth-field">
+              <label for="openCodeChannelPreset" data-i18n="channels.openCode.connectionLabel">接入方式</label>
+              <select id="openCodeChannelPreset" name="opencode_preset" class="form-input">
+                <option value="opencode_zen" data-i18n="channels.openCode.zen"
+                  data-i18n-description="channels.openCode.zenDesc" data-description="预填 Zen URL，填写 API Key 后获取或配置模型">Zen</option>
+                <option value="opencode_zen_go" data-i18n="channels.openCode.zenGo"
+                  data-i18n-description="channels.openCode.zenGoDesc" data-description="预填 Zen Go URL，填写 API Key 后获取或配置模型">Zen Go</option>
+                <option value="opencode_anonymous" data-i18n="channels.openCode.anonymous"
+                  data-i18n-description="channels.openCode.anonymousDesc" data-description="免费模型免个人 Key，预填 public 后获取或配置模型">匿名</option>
+              </select>
+            </div>
+            <div class="oauth-actions">
+              <button type="button" class="btn btn-secondary" data-action="close-opencode-channel"
+                data-i18n="common.cancel">取消</button>
+              <button type="submit" class="btn btn-primary" data-i18n="channels.openCode.continue">继续</button>
+            </div>
+          </form>
+        </dialog>
 
         <dialog id="oauthLoginDialog" class="oauth-dialog oauth-dialog--compact"
           aria-labelledby="oauthLoginDialogTitle" aria-describedby="oauthLoginDialogDescription">
@@ -106,9 +252,11 @@
                     data-i18n-description="channels.oauth.providerZedDesc" data-description="使用 Zed 原生应用登录">Zed</option>
                   <option value="zai" data-i18n="channels.oauth.providerZAI" data-icon-auth-type="zai_oauth"
                     data-i18n-description="channels.oauth.providerZAIDesc" data-description="ZCode 登录或 Coding Plan API Key">Z.ai</option>
+                  <option value="vertex" data-i18n="channels.oauth.providerVertex" data-icon-auth-type="vertex_oauth"
+                    data-i18n-description="channels.oauth.providerVertexDesc" data-description="上传服务账号 JSON 密钥">Vertex</option>
                 </select>
               </div>
-              <div id="codexOAuthControls">
+              <div id="codexOAuthControls" class="oauth-provider-controls">
                 <div class="oauth-field">
                   <label for="codexOAuthMethod" data-i18n="channels.codex.methodLabel">Codex 授权方式</label>
                   <select id="codexOAuthMethod" name="codex_oauth_method" class="form-input">
@@ -126,7 +274,7 @@
                     data-i18n="channels.codex.personalAccessTokenHint">输入以 at- 开头的令牌。提交后输入会立即清除；令牌到期或被撤销后需要重新授权。</p>
                 </div>
               </div>
-              <div id="xaiOAuthControls" hidden>
+              <div id="xaiOAuthControls" class="oauth-provider-controls" hidden>
                 <div class="oauth-field">
                   <label for="xaiOAuthMethod" data-i18n="channels.xai.methodLabel">xAI 授权方式</label>
                   <select id="xaiOAuthMethod" name="xai_oauth_method" class="form-input">
@@ -164,7 +312,7 @@
                   </div>
                 </div>
               </div>
-              <div id="codebuddyOAuthControls" hidden>
+              <div id="codebuddyOAuthControls" class="oauth-provider-controls" hidden>
                 <div class="oauth-field">
                   <label for="codebuddyOAuthEdition" data-i18n="channels.codebuddy.editionLabel">CodeBuddy 版本</label>
                   <select id="codebuddyOAuthEdition" name="codebuddy_edition" class="form-input">
@@ -189,7 +337,7 @@
                   </div>
                 </div>
               </div>
-              <div id="zaiOAuthControls" hidden>
+              <div id="zaiOAuthControls" class="oauth-provider-controls" hidden>
                 <div class="oauth-field">
                   <label for="zaiOAuthMethod" data-i18n="channels.zai.methodLabel">Z.ai 授权方式</label>
                   <select id="zaiOAuthMethod" name="zai_oauth_method" class="form-input">
@@ -206,22 +354,22 @@
                     data-i18n="channels.zai.apiKeyHint">提交后输入会立即从页面清除。ccLoad 只把它保存在渠道凭证中。</p>
                 </div>
               </div>
-              <div id="cursorOAuthControls" hidden>
+              <div id="cursorOAuthControls" class="oauth-provider-controls" hidden>
                 <div id="cursorAPIKeyField" class="oauth-field" hidden>
                   <label for="cursorUserAPIKey" data-i18n="channels.cursor.apiKeyLabel">Cursor User API Key</label>
                   <input id="cursorUserAPIKey" name="cursor_user_api_key" type="text"
                     class="form-input" autocomplete="off" autocapitalize="none" spellcheck="false"
                     aria-describedby="cursorAPIKeyGetHint cursorAPIKeyHint oauthLoginDialogStatus">
                   <p id="cursorAPIKeyGetHint" class="oauth-field-hint">
-                    <span data-i18n="channels.cursor.apiKeyGetHint">前往 Cursor Dashboard 的 Integrations → User API Keys，创建并复制密钥。</span>
-                    <a href="https://cursor.com/dashboard?tab=integrations" target="_blank" rel="noopener noreferrer"
+                    <span data-i18n="channels.cursor.apiKeyGetHint">前往 Cursor Dashboard 的 API &amp; SSH Keys → User API Keys，创建并复制密钥。</span>
+                    <a href="https://cursor.com/dashboard/api" target="_blank" rel="noopener noreferrer"
                       data-i18n="channels.cursor.openDashboard">打开 Cursor Dashboard</a>
                   </p>
                   <p id="cursorAPIKeyHint" class="oauth-field-hint"
                     data-i18n="channels.cursor.apiKeyHint">提交后输入会立即从页面清除。ccLoad 用它换取 CLI 会话令牌。</p>
                 </div>
               </div>
-              <div id="zedOAuthControls" hidden>
+              <div id="zedOAuthControls" class="oauth-provider-controls" hidden>
                 <div class="oauth-field">
                   <label for="zedSystemID" data-i18n="channels.zed.systemIDLabel">Zed system ID（可选；试用需要）</label>
                   <input id="zedSystemID" name="zed_system_id" type="text"
@@ -230,6 +378,26 @@
                     aria-describedby="zedSystemIDHint oauthLoginDialogStatus">
                   <p id="zedSystemIDHint" class="oauth-field-hint"
                     data-i18n="channels.zed.systemIDHint">本机运行 ccLoad 时会自动读取 Zed。没有该值时仍可尝试登录，但 Zed 试用权限可能不可用；远程或容器部署可填写本机 Zed 数据库中的 system_id。</p>
+                </div>
+              </div>
+              <div id="vertexOAuthControls" class="oauth-provider-controls" hidden>
+                <div class="oauth-field">
+                  <label for="vertexCredentialFile" data-i18n="channels.vertex.fileLabel">服务账号密钥文件</label>
+                  <input id="vertexCredentialFile" type="file" class="form-input" accept=".json,application/json" aria-describedby="vertexCredentialFileHint">
+                  <label for="vertexCredentialContent" data-i18n="channels.vertex.contentLabel">服务账号密钥内容（JSON）</label>
+                  <textarea id="vertexCredentialContent" class="form-input oauth-url" rows="8" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="vertexCredentialFileHint oauthLoginDialogStatus"></textarea>
+                  <div id="vertexCredentialFileHint" class="oauth-field-hint">
+                    <p data-i18n="channels.vertex.fileHint">选择文件自动填入内容，或直接粘贴 JSON。支持 Google 服务账号密钥和 CLIProxyAPI Vertex 凭证文件。提交后清空内容。</p>
+                  </div>
+                </div>
+                <div class="oauth-field">
+                  <label for="vertexLocation" data-i18n="channels.vertex.locationLabel">区域（可选）</label>
+                  <input id="vertexLocation" name="vertex_location" type="text"
+                    class="form-input" autocomplete="off" autocapitalize="none" spellcheck="false"
+                    placeholder="us-central1"
+                    aria-describedby="vertexLocationHint oauthLoginDialogStatus">
+                  <p id="vertexLocationHint" class="oauth-field-hint"
+                    data-i18n="channels.vertex.locationHint">填写 global 或区域（如 us-central1），默认 us-central1。仅用于新建渠道的上游 URL。</p>
                 </div>
               </div>
               <div id="oauthLoginActions" class="oauth-actions">
@@ -305,6 +473,7 @@
                 <option value="antigravity" data-i18n="channels.oauth.providerAntigravity">Antigravity</option>
                 <option value="xai" data-i18n="channels.oauth.providerXAI">xAI</option>
                 <option value="anthropic" data-i18n="channels.oauth.providerAnthropic">Anthropic</option>
+                <option value="vertex" data-i18n="channels.oauth.providerVertex">Vertex</option>
               </select>
             </div>
             <div class="oauth-field">
@@ -379,6 +548,7 @@
                   <option value="cursor_oauth">Cursor</option>
                   <option value="zed_oauth">Zed</option>
                   <option value="zai_oauth">Z.ai</option>
+                  <option value="vertex_oauth">Vertex</option>
                 </select>
               </div>
               <div class="oauth-field">
@@ -2256,18 +2426,17 @@
       <td class="ch-col-name">
         <div class="ch-name-cell">
           <div class="ch-name-head">
-            <span class="ch-name-avatar channel-provider-avatar" data-auth-type="{{authType}}" aria-hidden="true">{{{avatarHtml}}}</span>
+            <span class="ch-name-avatar channel-provider-avatar" data-auth-type="{{avatarType}}" aria-hidden="true">{{{avatarHtml}}}</span>
             <div class="ch-name-text">
               <div class="ch-name-line">
                 <div class="ch-name-main"><strong title="{{name}}">{{name}}</strong>{{{nameMultiplierBadge}}}{{{oauthPlanBadge}}}</div>
               </div>
-              <div class="ch-url-line" title="{{url}}">{{url}}</div>
+              <div class="ch-url-line"><span class="ch-url-text" title="{{url}}">{{url}}</span>{{{modelsHtml}}}</div>
             </div>
           </div>
           <div class="ch-refresh-result-slot">{{{batchRefreshStatusHtml}}}</div>
         </div>
       </td>
-      <td class="ch-col-models {{modelsCellClass}}" data-mobile-label="{{mobileLabelModels}}">{{{modelsHtml}}}</td>
       <td class="ch-col-health {{healthCellClass}}" data-mobile-label="{{mobileLabelHealth}}"><div class="ch-health-cell">{{{healthHtml}}}</div></td>
       <td class="ch-col-quota {{quotaCellClass}}" data-mobile-label="{{mobileLabelQuota}}">{{{quotaHtml}}}</td>
       <td class="ch-col-priority" data-mobile-label="{{mobileLabelPriority}}">
@@ -2278,7 +2447,7 @@
           <button class="channel-enable-switch channel-action-btn {{toggleSwitchClass}}" data-action="toggle"
             data-channel-id="{{id}}" data-enabled="{{enabled}}" role="switch" aria-checked="{{enabled}}"
             title="{{toggleTitle}}" aria-label="{{toggleTitle}}">
-            <span class="channel-enable-switch__knob" aria-hidden="true"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><path d="M12 2v10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           </button>
           <span class="ch-actions-divider" aria-hidden="true"></span>
           <div class="ch-action-group">

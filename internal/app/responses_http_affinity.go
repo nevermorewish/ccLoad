@@ -5,8 +5,9 @@ import (
 	"sync"
 	"time"
 
-	"ccLoad/internal/protocol"
 	"github.com/tidwall/gjson"
+
+	"ccLoad/internal/protocol"
 )
 
 // HTTP response IDs belong to one upstream account. This bounded process-local

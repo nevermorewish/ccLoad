@@ -5,10 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tidwall/gjson"
+
 	"ccLoad/internal/protocol"
 	chatresponses "ccLoad/internal/protocol/cliproxy/codex/openai/chat-completions"
 	responses "ccLoad/internal/protocol/cliproxy/openai/openai/responses"
-	"github.com/tidwall/gjson"
 )
 
 func TestCompatibilityExplicitControls(t *testing.T) {

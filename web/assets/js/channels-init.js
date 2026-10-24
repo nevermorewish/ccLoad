@@ -165,6 +165,8 @@ function initChannelsPageActions() {
       boundKey: 'channelsPageActionsBound',
       click: {
         'show-add-modal': () => showAddModal(),
+        'open-opencode-channel': () => openOpenCodeChannelDialog(),
+        'close-opencode-channel': () => closeOpenCodeChannelDialog(),
         'show-add-system-one-modal': () => showAddModal('system_one'),
         'retry-load-channels': (button) => {
           button.disabled = true;
@@ -299,7 +301,7 @@ window.initPageBootstrap({
       }
     } else if (savedFilters) {
       filters.status = savedFilters.status || 'all';
-      filters.authType = ['codebuddy_oauth', 'api_key', 'system_one', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth'].includes(savedFilters.authType) ? savedFilters.authType : 'all';
+      filters.authType = ['codebuddy_oauth', 'api_key', 'system_one', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth', 'vertex_oauth'].includes(savedFilters.authType) ? savedFilters.authType : 'all';
       filters.model = savedFilters.model || 'all';
       filters.modelExact = filters.model !== 'all' && savedFilters.modelExact !== false;
       filters.search = savedFilters.search || '';

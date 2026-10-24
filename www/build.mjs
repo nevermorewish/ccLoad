@@ -8,6 +8,7 @@
  *
  * `node www/build.mjs --indexnow` 把全部页面 URL 提交给 IndexNow（Bing、Yandex 等），发布后由 make www-release 调用。
  */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -106,9 +107,9 @@ const LANG_ICON = '<path d="M12.87 15.07 10.33 12.56l.03-.03A17.52 17.52 0 0 0 1
 // 发布到站点的静态资源；语言包只在构建期使用，不发布
 const STATIC_FILES = ['favicon.svg', 'favicon.ico', 'apple-touch-icon.png', 'brand-mark.svg', 'brand-wordmark.svg'];
 const STATIC_DIRS = ['assets/css', 'assets/js', 'assets/images', 'assets/video'];
-// 只对这些相对资源路径加 ../ 前缀；页面间链接（*.html、./）在 /zh/ 下保持同级跳转
+// 只对这些相对资源路径加 ../ 前缀与版本号；页面间链接（*.html、./）在 /zh/ 下保持同级跳转
 const ASSET_URL = /^(assets\/|[\w-]+\.(?:svg|ico|png)(?:[?#]|$))/;
-const ATTR_KEYS = { content: 'content', alt: 'alt', 'aria-label': 'aria-label', title: 'title', src: 'src', poster: 'poster' };
+const ATTR_KEYS = { content: 'content', alt: 'alt', 'aria-label': 'aria-label', title: 'title', src: 'src', poster: 'poster', srclang: 'srclang', label: 'label' };
 
 function escapeHtml(value) {
   return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -214,7 +215,29 @@ export function translate(html, lookup, { strict }) {
   return out;
 }
 
-function renderNav(page, alternate, t) {
+// star 数在构建期取一次并按十位向下取整成 "420+"：上线后只会偏低，不会过期成假数字，也不引入运行时第三方请求
+async function fetchStarLabel() {
+  try {
+    const res = await fetch(GITHUB_URL.replace('https://github.com/', 'https://api.github.com/repos/'), {
+      headers: { Accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { stargazers_count: count } = await res.json();
+    return `${Math.floor(count / 10) * 10}+`;
+  } catch (err) {
+    console.warn(`⚠ GitHub star 数获取失败，导航只显示图标: ${err.message}`);
+    return null;
+  }
+}
+
+function renderGithubButton(t, stars) {
+  const label = stars ? t('www.nav.githubStars').replace('{count}', stars) : 'GitHub';
+  const count = stars ? `<span class="www-github-count"><span aria-hidden="true">${iconSvg('star')}</span>${stars}</span>` : '';
+  return `<a href="${GITHUB_URL}" target="_blank" rel="noopener" class="www-btn-secondary www-icon-button www-github-button" aria-label="${label}" title="${label}"><svg class="www-action-icon" viewBox="0 0 24 24" aria-hidden="true">${GITHUB_ICON}</svg>${count}</a>`;
+}
+
+function renderNav(page, alternate, t, stars) {
   const items = NAV_ITEMS.map(item => {
     const current = item.page === page;
     return `        <li><a href="${pageHref(item.page)}" class="www-nav-link${current ? ' active' : ''}"${current ? ' aria-current="page"' : ''}><svg class="www-nav-icon" viewBox="0 0 24 24" aria-hidden="true">${ICONS[item.icon]}</svg><span>${t(item.key)}</span></a></li>`;
@@ -224,15 +247,15 @@ function renderNav(page, alternate, t) {
     <div class="www-nav-container">
       <a href="./" class="www-nav-logo" aria-label="ccLoad">
         <img class="www-logo-icon" src="brand-mark.svg" alt="" width="36" height="36">
-        <svg class="www-logo-wordmark" viewBox="0 0 132 36" aria-hidden="true"><use href="brand-wordmark.svg#brand-wordmark" width="132" height="36"></use></svg>
+        <svg class="www-logo-wordmark" viewBox="0 0 132 24" aria-hidden="true"><use href="brand-wordmark.svg#brand-wordmark" width="132" height="36"></use></svg>
       </a>
       <ul class="www-nav-menu" id="www-nav-menu">
 ${items}
       </ul>
       <div class="www-nav-actions">
-        <a href="${GITHUB_URL}" target="_blank" rel="noopener" class="www-btn-secondary www-icon-button www-github-button" aria-label="GitHub" title="GitHub"><svg class="www-action-icon" viewBox="0 0 24 24" aria-hidden="true">${GITHUB_ICON}</svg></a>
+        ${renderGithubButton(t, stars)}
         <a href="${alternate.href}" hreflang="${alternate.locale.code}" lang="${alternate.locale.code}" data-locale="${alternate.locale.code}" id="www-lang-switch" class="www-btn-secondary www-icon-button www-lang-button" title="${t('www.nav.switchLanguage')}"><svg class="www-action-icon" viewBox="0 0 24 24" aria-hidden="true">${LANG_ICON}</svg><span>${alternate.locale.label}</span><svg class="www-action-chevron" viewBox="0 0 24 24" aria-hidden="true">${CHEVRON_ICON}</svg></a>
-        <button type="button" id="www-theme-switch" class="www-btn-secondary www-icon-button" aria-label="${t('www.nav.switchTheme')}" title="${t('www.nav.switchTheme')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></button>
+        <button type="button" id="www-theme-switch" class="www-btn-secondary www-icon-button" aria-label="${t('www.nav.theme.system')}" title="${t('www.nav.theme.system')}"${['system', 'light', 'dark'].map(mode => ` data-label-${mode}="${t(`www.nav.theme.${mode}`)}"`).join('')}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></button>
         <button type="button" class="www-nav-toggle" id="www-nav-toggle" aria-label="${t('www.nav.toggleMenu')}" aria-controls="www-nav-menu" aria-expanded="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
       </div>
     </div>
@@ -403,12 +426,38 @@ function renderLocaleRedirect(locale, alternate) {
   return `  <script>try{var l=localStorage.getItem('ccload_locale')${detect};if(l==='${alternate.locale.code}')location.replace('${alternate.href}'+location.hash)}catch(e){}</script>`;
 }
 
-function prefixAssets(html, prefix) {
-  if (!prefix) return html;
-  return html.replace(/(\s(?:src|href|poster)=")([^"]+)"/g, (whole, head, url) => ASSET_URL.test(url) ? `${head}${prefix}${url}"` : whole);
+// 构建期按文件内容生成版本号：内容不变 URL 不变，改了自动破缓存，源 HTML 不手写 ?v=
+const assetVersions = new Map();
+function assetVersion(file) {
+  if (!assetVersions.has(file)) {
+    const target = path.join(SRC_DIR, file);
+    // 介绍视频不入库，CI 中不存在时保持无版本号（发布前由 make www-release 校验存在）
+    assetVersions.set(file, fs.existsSync(target)
+      ? crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex').slice(0, 10)
+      : null);
+  }
+  return assetVersions.get(file);
 }
 
-export function renderPage(source, page, locale, messages) {
+function assetUrl(url, prefix) {
+  if (!ASSET_URL.test(url)) return url;
+  const [, file, query, fragment = ''] = url.match(/^([^?#]+)(\?[^#]*)?(#.*)?$/);
+  if (query) throw new Error(`asset URL must not carry a query, versions are added at build time: ${url}`);
+  const version = assetVersion(file);
+  return `${prefix}${file}${version ? `?v=${version}` : ''}${fragment}`;
+}
+
+// 本地资源：/zh/ 下补 ../ 前缀并附内容版本号；srcset 逐个候选处理
+function rewriteAssets(html, prefix) {
+  return html.replace(/(\s(src|href|poster|srcset)=")([^"]+)"/g, (_, head, attr, value) => {
+    const rewritten = attr === 'srcset'
+      ? value.split(',').map(candidate => candidate.trim().replace(/^\S+/, url => assetUrl(url, prefix))).join(', ')
+      : assetUrl(value, prefix);
+    return `${head}${rewritten}"`;
+  });
+}
+
+export function renderPage(source, page, locale, messages, stars = null) {
   const other = LOCALES.find(l => l !== locale);
   const alternate = { locale: other, href: localeHref(locale, other, page) };
   const dict = messages[locale.code] || {};
@@ -418,7 +467,7 @@ export function renderPage(source, page, locale, messages) {
   };
 
   let html = renderIcons(source.replace(/\r\n?/g, '\n'))
-    .replace(/(<body\b[^>]*>\n)/, `$1  ${renderNav(page, alternate, t)}\n`)
+    .replace(/(<body\b[^>]*>\n)/, `$1  ${renderNav(page, alternate, t, stars)}\n`)
     .replace(/(\n)<\/body>/, `$1  ${renderFooter(t)}\n</body>`)
     .replace(/<html lang="[^"]*">/, `<html lang="${locale.code}">`);
 
@@ -428,7 +477,7 @@ export function renderPage(source, page, locale, messages) {
   html = html.replace(/\shref="index\.html(#[^"]*)?"/g, (_, hash = '') => ` href="./${hash}"`);
   html = html.replace(/(<meta name="viewport"[^>]*>\n)/, `$1${renderLocaleRedirect(locale, alternate)}\n`);
   html = html.replace(/(\n)(\s*<\/head>)/, `$1${renderHead(page, locale, html)}\n$2`);
-  return prefixAssets(html, locale.dir ? '../' : '');
+  return rewriteAssets(html, locale.dir ? '../' : '');
 }
 
 export function siteUrls() {
@@ -443,7 +492,7 @@ function renderSitemap() {
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n${urls.join('\n')}\n</urlset>\n`;
 }
 
-export function build({ outDir = path.join(SRC_DIR, 'dist') } = {}) {
+export function build({ outDir = path.join(SRC_DIR, 'dist'), stars = null } = {}) {
   const messages = loadMessages();
 
   fs.rmSync(outDir, { recursive: true, force: true });
@@ -451,7 +500,7 @@ export function build({ outDir = path.join(SRC_DIR, 'dist') } = {}) {
     fs.mkdirSync(path.join(outDir, locale.dir), { recursive: true });
     for (const page of PAGES) {
       const source = fs.readFileSync(path.join(SRC_DIR, `${page}.html`), 'utf8');
-      fs.writeFileSync(path.join(outDir, locale.dir, `${page}.html`), renderPage(source, page, locale, messages));
+      fs.writeFileSync(path.join(outDir, locale.dir, `${page}.html`), renderPage(source, page, locale, messages, stars));
     }
   }
   for (const file of STATIC_FILES) {
@@ -490,6 +539,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const status = await submitIndexNow();
   console.log(`✓ IndexNow submitted ${siteUrls().length} URLs (HTTP ${status})`);
 } else if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const out = build({ outDir: process.argv[2] ? path.resolve(process.argv[2]) : undefined });
+  const out = build({ outDir: process.argv[2] ? path.resolve(process.argv[2]) : undefined, stars: await fetchStarLabel() });
   console.log(`✓ www built: ${out}`);
 }

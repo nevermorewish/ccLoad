@@ -1,0 +1,8 @@
+# Golden requests preserve raw JSON whitespace; keep fixtures stable on Windows.
+internal/protocol/cliproxy/claude/openai/responses/testdata/tool_search_disabled/*.json text eol=lf
+.agents/skills/sync-cliproxy-core/references/*.manifest text eol=lf
+
+# Generated bundles contain whitespace inside vendored template strings.
+web/assets/bundles/* -whitespace
+
+*.go text eol=lf

@@ -8,6 +8,7 @@ type ChannelMonitorSchedule struct {
 	Model           string `json:"model"`
 }
 
+// ChannelMonitorProbe records one scheduled channel probe.
 type ChannelMonitorProbe struct {
 	Time       JSONTime `json:"time"`
 	StatusCode int      `json:"status_code"`
@@ -15,6 +16,7 @@ type ChannelMonitorProbe struct {
 	Message    string   `json:"message,omitempty"`
 }
 
+// ChannelMonitorStats summarizes channel monitoring results.
 type ChannelMonitorStats struct {
 	ChannelID      int64                 `json:"channel_id"`
 	Model          string                `json:"model"`

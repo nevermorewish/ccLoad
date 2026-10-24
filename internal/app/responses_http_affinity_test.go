@@ -9,8 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"ccLoad/internal/model"
 	"github.com/tidwall/gjson"
+
+	"ccLoad/internal/model"
 )
 
 func TestResponsesHTTPRouteIsolationExpiryAndBound(t *testing.T) {

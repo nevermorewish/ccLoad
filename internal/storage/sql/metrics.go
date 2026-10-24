@@ -30,6 +30,24 @@ func (s *SQLStore) logsRangeIndexHint(rangeIndex string, filter *model.LogFilter
 	return " FORCE INDEX (" + rangeIndex + ", idx_logs_channel_time_id, idx_logs_channel_model_time_id)"
 }
 
+// 输出速度口径（统计页、渠道页、令牌页共用）：只算有输出的成功请求，速度 = 输出总量 / 生成总耗时。
+// 流式请求的生成耗时扣除首字，扣除后不足 1 秒时用总耗时；speedGenerationSeconds 是同一口径的增量版本。
+const (
+	speedSampleCondSQL   = `status_code >= 200 AND status_code < 300 AND output_tokens > 0 AND duration > 0`
+	speedOutputTokensSQL = `SUM(CASE WHEN ` + speedSampleCondSQL + ` THEN output_tokens ELSE 0 END)`
+	speedDurationSQL     = `SUM(CASE WHEN ` + speedSampleCondSQL + ` THEN
+				CASE WHEN is_streaming = 1 AND first_byte_time > 0 AND first_byte_time < duration AND duration - first_byte_time >= 1
+					THEN duration - first_byte_time ELSE duration END
+				ELSE 0 END)`
+)
+
+func speedGenerationSeconds(duration float64, isStreaming bool, firstByteTime float64) float64 {
+	if isStreaming && firstByteTime > 0 && firstByteTime < duration && duration-firstByteTime >= 1 {
+		return duration - firstByteTime
+	}
+	return duration
+}
+
 // executeStatsQuery 构建并执行统计 SQL，返回行结果与渠道 ID 集合（供后续批量补全）。
 // withLastSuccess=true 时额外 SELECT/扫描 last_success_at 列；isEmpty 表示渠道过滤后无候选。
 func (s *SQLStore) executeStatsQuery(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter, withLastSuccess bool) (stats []model.StatsEntry, channelIDsToFetch map[int64]bool, err error) {
@@ -46,14 +64,13 @@ func (s *SQLStore) executeStatsQuery(ctx context.Context, startTime, endTime tim
 			SUM(CASE WHEN (status_code < 200 OR status_code >= 300) AND status_code != 499 THEN 1 ELSE 0 END) AS error,
 			SUM(CASE WHEN status_code != 499 THEN 1 ELSE 0 END) AS total,
 			AVG(CASE WHEN is_streaming = 1 AND first_byte_time > 0 AND status_code >= 200 AND status_code < 300 THEN first_byte_time ELSE NULL END) as avg_first_byte_time,
-			AVG(CASE WHEN duration > 0 THEN duration ELSE NULL END) as avg_duration,
+			AVG(CASE WHEN duration > 0 AND status_code >= 200 AND status_code < 300 THEN duration ELSE NULL END) as avg_duration,
+			SUM(CASE WHEN is_streaming = 1 AND first_byte_time > 0 AND status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) as first_byte_count,
+			SUM(CASE WHEN duration > 0 AND status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) as duration_count,
 			` + lastSuccessCol + `SUM(COALESCE(input_tokens, 0)) as total_input_tokens,
 			SUM(COALESCE(output_tokens, 0)) as total_output_tokens,
-			SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND output_tokens > 0 AND duration > 0 THEN output_tokens ELSE 0 END) as speed_output_tokens,
-			SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND output_tokens > 0 AND duration > 0 THEN
-				CASE WHEN is_streaming = 1 AND first_byte_time > 0 AND first_byte_time < duration AND duration - first_byte_time >= 1
-					THEN duration - first_byte_time ELSE duration END
-				ELSE 0 END) as speed_duration,
+			` + speedOutputTokensSQL + ` as speed_output_tokens,
+			` + speedDurationSQL + ` as speed_duration,
 			SUM(COALESCE(cache_read_input_tokens, 0)) as total_cache_read_input_tokens,
 			SUM(COALESCE(cache_creation_input_tokens, 0)) as total_cache_creation_input_tokens,
 			SUM(COALESCE(cost, 0.0)) as total_cost,
@@ -102,6 +119,7 @@ func (s *SQLStore) executeStatsQuery(ctx context.Context, startTime, endTime tim
 			&entry.ChannelID, &entry.Model,
 			&entry.Success, &entry.Error, &entry.Total,
 			&avgFirstByteTime, &avgDuration,
+			&entry.FirstByteSampleCount, &entry.DurationSampleCount,
 		}
 		if withLastSuccess {
 			scanArgs = append(scanArgs, &lastSuccessAt)
@@ -665,73 +683,15 @@ func (s *SQLStore) GetStatsLite(ctx context.Context, startTime, endTime time.Tim
 	return stats, err
 }
 
-// GetClientProtocolStats 按客户端入口协议聚合首页统计。
-func (s *SQLStore) GetClientProtocolStats(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter) ([]model.ClientProtocolStats, error) {
-	baseQuery := `
+// GetUsageBreakdown 按入口协议×渠道×模型聚合用量，并带出渠道名称与认证类型。
+// 首页摘要的各维度汇总都由这一次扫描派生。先在 logs 上聚合再关联 channels：
+// 直接 JOIN 时 MySQL 会从 channels 出发按 channel_id 逐渠道回扫全部历史。
+func (s *SQLStore) GetUsageBreakdown(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter) ([]model.UsageBreakdownRow, error) {
+	aggregateQuery := `
 		SELECT
 			COALESCE(client_protocol, '') AS client_protocol,
-			SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) AS success,
-			SUM(CASE WHEN (status_code < 200 OR status_code >= 300) AND status_code != 499 THEN 1 ELSE 0 END) AS error,
-			SUM(COALESCE(input_tokens, 0)) AS total_input_tokens,
-			SUM(COALESCE(output_tokens, 0)) AS total_output_tokens,
-			SUM(COALESCE(cache_read_input_tokens, 0)) AS total_cache_read_tokens,
-			SUM(COALESCE(cache_creation_input_tokens, 0)) AS total_cache_creation_tokens,
-			SUM(COALESCE(cost, 0.0)) AS total_cost,
-			SUM(COALESCE(cost, 0.0) * COALESCE(cost_multiplier, 1)) AS effective_cost
-		FROM logs` + s.logsRangeIndexHint(logsTimeRangeIndex, filter)
-
-	qb := NewQueryBuilder(baseQuery).
-		Where("time >= ?", startTime.UnixMilli()).
-		Where("time <= ?", endTime.UnixMilli()).
-		Where("channel_id > 0")
-
-	isEmpty, err := s.applyChannelFilter(ctx, qb, filter)
-	if err != nil {
-		return nil, err
-	}
-	if isEmpty {
-		return []model.ClientProtocolStats{}, nil
-	}
-	qb.ApplyFilter(filter)
-
-	query, args := qb.BuildWithSuffix("GROUP BY client_protocol ORDER BY client_protocol ASC")
-	rows, err := s.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	stats := make([]model.ClientProtocolStats, 0)
-	for rows.Next() {
-		var entry model.ClientProtocolStats
-		if err := rows.Scan(
-			&entry.ClientProtocol,
-			&entry.SuccessRequests,
-			&entry.ErrorRequests,
-			&entry.TotalInputTokens,
-			&entry.TotalOutputTokens,
-			&entry.TotalCacheReadTokens,
-			&entry.TotalCacheCreationTokens,
-			&entry.TotalCost,
-			&entry.EffectiveCost,
-		); err != nil {
-			return nil, err
-		}
-		entry.TotalRequests = entry.SuccessRequests + entry.ErrorRequests
-		stats = append(stats, entry)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return stats, nil
-}
-
-// GetAuthTypeStats 按渠道认证类型聚合首页统计。
-// 先在 logs 上按渠道聚合再关联 channels：直接 JOIN 时 MySQL 会从 channels 出发按 channel_id 逐渠道回扫全部历史。
-func (s *SQLStore) GetAuthTypeStats(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter) ([]model.AuthTypeStats, error) {
-	byChannelQuery := `
-		SELECT
 			channel_id,
+			COALESCE(model, '') AS model,
 			SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) AS success,
 			SUM(CASE WHEN (status_code < 200 OR status_code >= 300) AND status_code != 499 THEN 1 ELSE 0 END) AS error,
 			SUM(COALESCE(input_tokens, 0)) AS input_tokens,
@@ -742,7 +702,7 @@ func (s *SQLStore) GetAuthTypeStats(ctx context.Context, startTime, endTime time
 			SUM(COALESCE(cost, 0.0) * COALESCE(cost_multiplier, 1)) AS effective_cost
 		FROM logs` + s.logsRangeIndexHint(logsTimeRangeIndex, filter)
 
-	qb := NewQueryBuilder(byChannelQuery).
+	qb := NewQueryBuilder(aggregateQuery).
 		Where("time >= ?", startTime.UnixMilli()).
 		Where("time <= ?", endTime.UnixMilli()).
 		Where("channel_id > 0")
@@ -752,56 +712,53 @@ func (s *SQLStore) GetAuthTypeStats(ctx context.Context, startTime, endTime time
 		return nil, err
 	}
 	if isEmpty {
-		return []model.AuthTypeStats{}, nil
+		return []model.UsageBreakdownRow{}, nil
 	}
 	qb.ApplyFilter(filter)
 
-	byChannel, args := qb.BuildWithSuffix("GROUP BY channel_id")
+	aggregate, args := qb.BuildWithSuffix("GROUP BY client_protocol, channel_id, model")
 	query := `
 		SELECT
-			channels.auth_type,
-			SUM(t.success),
-			SUM(t.error),
-			SUM(t.input_tokens),
-			SUM(t.output_tokens),
-			SUM(t.cache_read_tokens),
-			SUM(t.cache_creation_tokens),
-			SUM(t.total_cost),
-			SUM(t.effective_cost)
-		FROM (` + byChannel + `) t
-		INNER JOIN channels ON channels.id = t.channel_id
-		WHERE channels.auth_type <> ''
-		GROUP BY channels.auth_type
-		ORDER BY channels.auth_type ASC`
+			t.client_protocol, t.channel_id, t.model,
+			COALESCE(channels.name, ''), COALESCE(channels.auth_type, ''),
+			t.success, t.error,
+			t.input_tokens, t.output_tokens, t.cache_read_tokens, t.cache_creation_tokens,
+			t.total_cost, t.effective_cost
+		FROM (` + aggregate + `) t
+		LEFT JOIN channels ON channels.id = t.channel_id`
 	rows, err := s.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	stats := make([]model.AuthTypeStats, 0)
+	breakdown := make([]model.UsageBreakdownRow, 0)
 	for rows.Next() {
-		var entry model.AuthTypeStats
+		var row model.UsageBreakdownRow
 		if err := rows.Scan(
-			&entry.AuthType,
-			&entry.SuccessRequests,
-			&entry.ErrorRequests,
-			&entry.TotalInputTokens,
-			&entry.TotalOutputTokens,
-			&entry.TotalCacheReadTokens,
-			&entry.TotalCacheCreationTokens,
-			&entry.TotalCost,
-			&entry.EffectiveCost,
+			&row.ClientProtocol,
+			&row.ChannelID,
+			&row.Model,
+			&row.ChannelName,
+			&row.AuthType,
+			&row.SuccessRequests,
+			&row.ErrorRequests,
+			&row.TotalInputTokens,
+			&row.TotalOutputTokens,
+			&row.TotalCacheReadTokens,
+			&row.TotalCacheCreationTokens,
+			&row.TotalCost,
+			&row.EffectiveCost,
 		); err != nil {
 			return nil, err
 		}
-		entry.TotalRequests = entry.SuccessRequests + entry.ErrorRequests
-		stats = append(stats, entry)
+		row.TotalRequests = row.SuccessRequests + row.ErrorRequests
+		breakdown = append(breakdown, row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return stats, nil
+	return breakdown, nil
 }
 
 // GetRPMStats 获取RPM/QPS统计数据（峰值、平均、最近一分钟）
@@ -899,10 +856,11 @@ func (s *SQLStore) GetRPMStats(ctx context.Context, startTime, endTime time.Time
 	return stats, nil
 }
 
-// statsRPM 是按 channel_id+model 统计的峰值与最近一分钟 RPM。
+// statsRPM 是按 channel_id+model 统计的峰值与最近一分钟 RPM，以及按渠道合并的峰值。
 type statsRPM struct {
-	peak   map[statsRequestKey]float64
-	recent map[statsRequestKey]float64
+	peak        map[statsRequestKey]float64
+	recent      map[statsRequestKey]float64
+	channelPeak map[int]float64
 }
 
 // queryStatsRPM 查询每个channel_id+model组合的RPM统计数据
@@ -912,51 +870,42 @@ func (s *SQLStore) queryStatsRPM(ctx context.Context, startTime, endTime time.Ti
 	endBucket := endTime.UnixMilli() / minuteMs
 
 	rpm := statsRPM{
-		peak:   make(map[statsRequestKey]float64),
-		recent: make(map[statsRequestKey]float64),
+		peak:        make(map[statsRequestKey]float64),
+		recent:      make(map[statsRequestKey]float64),
+		channelPeak: make(map[int]float64),
 	}
 
 	// 1) 峰值RPM（分钟桶内最大请求数）
-	peakBaseQuery := `
-		SELECT channel_id, COALESCE(model, '') AS model, MAX(cnt) AS peak_rpm
-		FROM (
-			SELECT channel_id, COALESCE(model, '') AS model, COUNT(*) AS cnt
-			FROM logs` + s.logsRangeIndexHint(logsMinuteRangeIndex, filter)
-
-	peakQB := NewQueryBuilder(peakBaseQuery).
-		Where("minute_bucket >= ?", startBucket).
-		Where("minute_bucket <= ?", endBucket).
-		Where("channel_id > 0").
-		Where("status_code != 499")
-
-	isEmpty, err := s.applyChannelFilter(ctx, peakQB, filter)
-	if err != nil {
-		return statsRPM{}, fmt.Errorf("apply channel filter for peak: %w", err)
-	}
-
-	// 仅当渠道过滤非空时才执行查询
-	if !isEmpty {
-		peakQB.ApplyFilter(filter)
-		peakQuery, peakArgs := peakQB.BuildWithSuffix("GROUP BY channel_id, model, minute_bucket) t GROUP BY channel_id, model")
-
-		peakRows, err := s.QueryContext(ctx, peakQuery, peakArgs...)
-		if err != nil {
-			return statsRPM{}, fmt.Errorf("query peak RPM: %w", err)
-		}
-		defer func() { _ = peakRows.Close() }()
-
-		for peakRows.Next() {
+	err := s.queryStatsPeakRPM(ctx, startBucket, endBucket, filter,
+		"channel_id, COALESCE(model, '') AS model", "channel_id, model",
+		func(rows *sql.Rows) error {
 			var channelID int
 			var model string
 			var peakRPM float64
-			if err := peakRows.Scan(&channelID, &model, &peakRPM); err != nil {
-				return statsRPM{}, fmt.Errorf("scan peak RPM: %w", err)
+			if err := rows.Scan(&channelID, &model, &peakRPM); err != nil {
+				return err
 			}
 			rpm.peak[statsRequestKey{channelID, model}] = peakRPM
-		}
-		if err := peakRows.Err(); err != nil {
-			return statsRPM{}, fmt.Errorf("iterate peak RPM rows: %w", err)
-		}
+			return nil
+		})
+	if err != nil {
+		return statsRPM{}, err
+	}
+
+	// 渠道峰值必须按渠道合并分钟桶后再取最大值，不能由各模型峰值相加
+	err = s.queryStatsPeakRPM(ctx, startBucket, endBucket, filter,
+		"channel_id", "channel_id",
+		func(rows *sql.Rows) error {
+			var channelID int
+			var peakRPM float64
+			if err := rows.Scan(&channelID, &peakRPM); err != nil {
+				return err
+			}
+			rpm.channelPeak[channelID] = peakRPM
+			return nil
+		})
+	if err != nil {
+		return statsRPM{}, err
 	}
 
 	// 2) 最近一分钟RPM（仅本日有效）
@@ -1007,12 +956,64 @@ func (s *SQLStore) queryStatsRPM(ctx context.Context, startTime, endTime time.Ti
 	return rpm, nil
 }
 
+// queryStatsPeakRPM 按 groupCols 统计分钟桶内的最大请求数；selectCols 是 groupCols 的取值表达式，
+// scan 依次读取 groupCols 与峰值。
+func (s *SQLStore) queryStatsPeakRPM(ctx context.Context, startBucket, endBucket int64, filter *model.LogFilter, selectCols, groupCols string, scan func(*sql.Rows) error) error {
+	baseQuery := `
+		SELECT ` + groupCols + `, MAX(cnt) AS peak_rpm
+		FROM (
+			SELECT ` + selectCols + `, COUNT(*) AS cnt
+			FROM logs` + s.logsRangeIndexHint(logsMinuteRangeIndex, filter)
+
+	qb := NewQueryBuilder(baseQuery).
+		Where("minute_bucket >= ?", startBucket).
+		Where("minute_bucket <= ?", endBucket).
+		Where("channel_id > 0").
+		Where("status_code != 499")
+
+	isEmpty, err := s.applyChannelFilter(ctx, qb, filter)
+	if err != nil {
+		return fmt.Errorf("apply channel filter for peak: %w", err)
+	}
+	// 仅当渠道过滤非空时才执行查询
+	if isEmpty {
+		return nil
+	}
+
+	qb.ApplyFilter(filter)
+	query, args := qb.BuildWithSuffix("GROUP BY " + groupCols + ", minute_bucket) t GROUP BY " + groupCols)
+
+	rows, err := s.QueryContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("query peak RPM: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		if err := scan(rows); err != nil {
+			return fmt.Errorf("scan peak RPM: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate peak RPM rows: %w", err)
+	}
+	return nil
+}
+
 // fill 把 RPM 统计填充到 stats 中。
 func (rpm statsRPM) fill(stats []model.StatsEntry, startTime, endTime time.Time, isToday bool) {
 	// 计算时间跨度（秒）用于平均RPM
 	durationSeconds := endTime.Sub(startTime).Seconds()
 	if durationSeconds < 1 {
 		durationSeconds = 1
+	}
+
+	// 渠道最近一分钟请求数可按模型相加；峰值至少不低于它（与单条目口径一致）
+	channelRecent := make(map[int]float64)
+	if isToday {
+		for key, recentRPM := range rpm.recent {
+			channelRecent[key.channelID] += recentRPM
+		}
 	}
 
 	for i := range stats {
@@ -1039,6 +1040,11 @@ func (rpm statsRPM) fill(stats []model.StatsEntry, startTime, endTime time.Time,
 					entry.PeakRPM = &recentRPM
 				}
 			}
+		}
+
+		channelPeak := max(rpm.channelPeak[*entry.ChannelID], channelRecent[*entry.ChannelID])
+		if channelPeak > 0 {
+			entry.ChannelPeakRPM = &channelPeak
 		}
 	}
 }

@@ -21,6 +21,9 @@ type Store interface {
 	ListConfigs(ctx context.Context) ([]*model.Config, error)
 	GetConfig(ctx context.Context, id int64) (*model.Config, error)
 	CreateConfig(ctx context.Context, c *model.Config) (*model.Config, error)
+	CreateConfigWithAPIKeys(ctx context.Context, c *model.Config, keys []*model.APIKey) (*model.Config, error)
+	UpdateConfigWithAPIKeys(ctx context.Context, id int64, upd *model.Config, keys []*model.APIKey) (*model.Config, error)
+	UpdateModelStateAndAPIKeyScopesIfSnapshotMatches(ctx context.Context, expected *model.Config, modelEntries []model.ModelEntry, scheduledCheckModel string, keys []*model.APIKey, scopes map[int]model.APIKeyModelScope) (bool, error)
 	UpdateConfig(ctx context.Context, id int64, upd *model.Config) (*model.Config, error)
 	CompareAndSwapOAuthCredential(ctx context.Context, channelID int64, expectedAuthType, expectedCredential, nextCredential string) (bool, error)
 	// CompareAndSwapOAuthUsage persists a validated quota sample; costs come from OAuthQuotaCostViews.
@@ -115,8 +118,7 @@ type Store interface {
 	GetDistinctChannels(ctx context.Context, since, until time.Time, filter *model.LogFilter) ([]model.ChannelNameID, error)
 	GetStats(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter, isToday bool) ([]model.StatsEntry, error)
 	GetStatsLite(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter) ([]model.StatsEntry, error) // 轻量版：跳过RPM计算和渠道名填充
-	GetClientProtocolStats(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter) ([]model.ClientProtocolStats, error)
-	GetAuthTypeStats(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter) ([]model.AuthTypeStats, error)
+	GetUsageBreakdown(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter) ([]model.UsageBreakdownRow, error)
 	GetRPMStats(ctx context.Context, startTime, endTime time.Time, filter *model.LogFilter, isToday bool) (*model.RPMStats, error)
 	GetChannelSuccessRates(ctx context.Context, since time.Time) (map[int64]model.ChannelHealthStats, error)
 	GetHealthTimeline(ctx context.Context, params model.HealthTimelineParams) ([]model.HealthTimelineRow, error)

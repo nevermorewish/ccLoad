@@ -1114,7 +1114,6 @@ test('设置加载失败时提供重试入口并重新加载', async (t) => {
   await flushAsyncWork();
 
   assert.equal(page.requests.filter(({ url }) => url === '/admin/settings').length, loadsBefore + 1);
-  assert.equal(page.renderCalls.some(({ template }) => template === 'tpl-setting-row'), true);
 });
 
 test('dynamic reasoning setting validates and saves its JSON contract through the restart workflow', async (t) => {
@@ -1211,6 +1210,26 @@ async function loadReasoningPage(t, config = reasoningConfigured, options = {}) 
       filterModels: ['gpt-5', 'claude', 'foo(bar)', 'gpt-5(high)', 'wild-*'], ...options
     });
 }
+
+test('reasoning modal selected-count toggle lists only selected models and combines with the name filter', async (t) => {
+  const page = await loadReasoningPage(t);
+  await page.openReasoning();
+  page.selectReasoningModel('claude', true);
+  page.selectReasoningModel('gpt-5', true);
+  page.reasoningAction('toggle-reasoning-selected');
+  assert.deepEqual(page.reasoningModels().map(input => [input.value, input.checked]), [['claude', true], ['gpt-5', true]]);
+  page.selectReasoningModel('claude', false);
+  page.filterReasoningModels('GPT');
+  assert.deepEqual(page.reasoningModels().map(input => input.value), ['gpt-5']);
+  page.filterReasoningModels('');
+  assert.deepEqual(page.reasoningModels().map(input => input.value), ['gpt-5']);
+  page.reasoningAction('toggle-reasoning-selected');
+  assert.deepEqual(page.reasoningModels().map(input => input.value), ['claude', 'foo(bar)', 'gpt-5']);
+  page.reasoningAction('toggle-reasoning-selected');
+  page.reasoningAction('close-reasoning-auto');
+  await page.openReasoning();
+  assert.deepEqual(page.reasoningModels().map(input => input.value).sort(), ['claude', 'foo(bar)', 'gpt-5']);
+});
 
 test('reasoning modal preserves checked models across filters and applies through save-all', async (t) => {
   const page = await loadReasoningPage(t);

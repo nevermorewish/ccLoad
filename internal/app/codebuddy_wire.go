@@ -236,6 +236,12 @@ type codeBuddyChoice struct {
 // collectCodeBuddyCompletion shares the application's bounded SSE reader and
 // usage parser. It never writes a partial completion to the downstream client.
 func collectCodeBuddyCompletion(ctx context.Context, reader io.Reader, onEvent func(*sseUsageParser)) ([]byte, *sseUsageParser, error) {
+	return collectChatCompletion(ctx, reader, onEvent, normalizeCodeBuddySSEEvent, "CodeBuddy")
+}
+
+// collectChatCompletion assembles standard Chat Completions SSE. Provider
+// normalization stays with its caller so other upstreams retain their wire.
+func collectChatCompletion(ctx context.Context, reader io.Reader, onEvent func(*sseUsageParser), normalize func([]byte) []byte, provider string) ([]byte, *sseUsageParser, error) {
 	parser := newSSEUsageParser("openai")
 	choices := make(map[int]*codeBuddyChoice)
 	var id, responseModel string
@@ -246,9 +252,11 @@ func collectCodeBuddyCompletion(ctx context.Context, reader io.Reader, onEvent f
 	consume := func(raw []byte) error {
 		total += len(raw)
 		if total > maxCodexNonStreamOutputBytes {
-			return errors.New("CodeBuddy completion exceeds output limit")
+			return fmt.Errorf("%s completion exceeds output limit", provider)
 		}
-		raw = normalizeCodeBuddySSEEvent(raw)
+		if normalize != nil {
+			raw = normalize(raw)
+		}
 		if err := parser.Feed(raw); err != nil {
 			return err
 		}
@@ -256,7 +264,7 @@ func collectCodeBuddyCompletion(ctx context.Context, reader io.Reader, onEvent f
 			onEvent(parser)
 		}
 		if parser.GetLastError() != nil {
-			return errors.New("CodeBuddy upstream stream error")
+			return fmt.Errorf("%s upstream stream error", provider)
 		}
 		data := sseEventData(raw)
 		if len(data) == 0 {
@@ -283,7 +291,7 @@ func collectCodeBuddyCompletion(ctx context.Context, reader io.Reader, onEvent f
 			} `json:"choices"`
 		}
 		if json.Unmarshal(data, &chunk) != nil {
-			return errors.New("invalid CodeBuddy completion event")
+			return fmt.Errorf("invalid %s completion event", provider)
 		}
 		if chunk.ID != "" {
 			id = chunk.ID
@@ -336,7 +344,7 @@ func collectCodeBuddyCompletion(ctx context.Context, reader io.Reader, onEvent f
 		return nil, parser, err
 	}
 	if len(choices) == 0 || !parser.IsStreamComplete() {
-		return nil, parser, errors.New("CodeBuddy stream ended without completion")
+		return nil, parser, fmt.Errorf("%s stream ended without completion", provider)
 	}
 	indices := make([]int, 0, len(choices))
 	for index := range choices {
@@ -348,7 +356,7 @@ func collectCodeBuddyCompletion(ctx context.Context, reader io.Reader, onEvent f
 		choice := choices[index]
 		if choice.finish == "" {
 			if !done {
-				return nil, parser, errors.New("CodeBuddy choice did not finish")
+				return nil, parser, fmt.Errorf("%s choice did not finish", provider)
 			}
 			choice.finish = "stop"
 		}
@@ -380,11 +388,22 @@ func collectCodeBuddyCompletion(ctx context.Context, reader io.Reader, onEvent f
 }
 
 func (s *Server) handleCodeBuddyNonStream(reqCtx *requestContext, resp *http.Response, headers http.Header, w http.ResponseWriter, stats *streamReadStats) (*fwResult, float64, error) {
-	body, parser, err := collectCodeBuddyCompletion(reqCtx.ctx, resp.Body, func(parser *sseUsageParser) {
+	normalize := normalizeCodeBuddySSEEvent
+	summaryFinished := false
+	if reqCtx.responsesCompaction != nil {
+		normalize = func(raw []byte) []byte {
+			normalized := normalizeCodeBuddySSEEvent(raw)
+			if responsesCompactionSummaryComplete(protocol.OpenAI, sseEventData(normalized)) {
+				summaryFinished = true
+			}
+			return normalized
+		}
+	}
+	body, parser, err := collectChatCompletion(reqCtx.ctx, resp.Body, func(parser *sseUsageParser) {
 		if shouldMarkUpstreamFirstByte(parser) {
 			markFirstStreamResponse(reqCtx, stats)
 		}
-	})
+	}, normalize, "CodeBuddy")
 	result := &fwResult{Status: resp.StatusCode, UpstreamStatus: resp.StatusCode, Header: headers, FirstByteTime: responseFirstByteSec(reqCtx, stats), BytesReceived: stats.totalBytes}
 	populateFWResultFromUsageParser(result, parser)
 	if result.SSEErrorEvent != nil {
@@ -395,6 +414,22 @@ func (s *Server) handleCodeBuddyNonStream(reqCtx *requestContext, resp *http.Res
 			result.StreamDiagMsg = err.Error()
 		}
 		return result, reqCtx.Duration().Seconds(), err
+	}
+	if reqCtx.responsesCompaction != nil {
+		// The ordinary collector permits [DONE] without a finish_reason. A
+		// context capsule must only be produced after an actual successful stop.
+		if !parser.IsStreamComplete() || !summaryFinished {
+			result.StreamDiagMsg = "CodeBuddy compaction summary ended without a successful stop"
+			return result, reqCtx.Duration().Seconds(), errors.New(result.StreamDiagMsg)
+		}
+		_ = resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		resp.Header = headers.Clone()
+		resp.Header.Set("Content-Type", "application/json")
+		resp.Header.Del("Content-Encoding")
+		resp.Header.Del("Content-Length")
+		resp.ContentLength = int64(len(body))
+		return s.handleTranslatedNonStreamSuccessResponse(reqCtx, resp, resp.Header, w, string(protocol.OpenAI), stats)
 	}
 	plan := reqCtx.transformPlan
 	if plan.NeedsTransform {

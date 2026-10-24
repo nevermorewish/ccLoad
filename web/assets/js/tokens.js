@@ -429,9 +429,10 @@
             <th class="tokens-col-num">${t('tokens.table.callsSuccess')}</th>
             <th class="tokens-col-num" title="${t('tokens.table.rpmTitle')}">${t('tokens.table.rpm')}</th>
             <th class="tokens-col-num">${t('tokens.table.tokenUsage')}</th>
-            <th>${t('tokens.table.costLimit')}</th>
-            <th class="tokens-col-num">${t('tokens.table.concurrency')}</th>
             <th class="tokens-col-num" title="${t('tokens.table.latencyTitle')}">${t('tokens.table.latency')}</th>
+            <th class="tokens-col-num" title="${t('tokens.table.speedTitle')}">${t('tokens.table.speed')}</th>
+            <th class="tokens-col-cost">${t('tokens.table.costLimit')}</th>
+            <th class="tokens-col-num tokens-col-concurrency">${t('tokens.table.concurrency')}</th>
             <th>${t('tokens.table.lastUsed')}</th>
             <th class="tokens-col-actions">${t('tokens.table.actions')}</th>
           </tr>
@@ -440,7 +441,7 @@
 
       const tbody = document.createElement('tbody');
       if (tokens.length === 0) {
-        tbody.innerHTML = `<tr class="tokens-no-match-row"><td colspan="9">${escapeHtml(t('tokens.noMatchingTokens'))}</td></tr>`;
+        tbody.innerHTML = `<tr class="tokens-no-match-row"><td colspan="10">${escapeHtml(t('tokens.noMatchingTokens'))}</td></tr>`;
       } else {
         tokens.forEach((token) => {
           const row = createTokenRow(token);
@@ -472,7 +473,8 @@
         : t('tokens.expiryNever');
       const successCount = token.success_count || 0;
       const failureCount = token.failure_count || 0;
-      const hasLatency = Boolean(token.stream_count || token.non_stream_count);
+      const hasLatency = Boolean(token.stream_count || token.duration_count);
+      const speedHtml = buildSpeedHtml(token);
 
       return TemplateEngine.render('tpl-token-row', {
         id: token.id,
@@ -492,6 +494,8 @@
         concurrencyHtml: `${buildConcurrencyHtml(token.max_concurrency)} / ${buildConcurrencyHtml(token.rpm_limit)}`,
         latencyHtml: buildLatencyHtml(token),
         latencyCellClass: hasLatency ? '' : 'mobile-empty-cell',
+        speedHtml,
+        speedCellClass: speedHtml === MUTED_DASH_HTML ? 'mobile-empty-cell' : '',
         lastUsedHtml: formatLastUsedHtml(token.last_used_at, locale),
         toggleHtml: buildToggleHtml(token),
         mobileLabelCalls: t('tokens.table.callsSuccess'),
@@ -500,6 +504,7 @@
         mobileLabelCost: t('tokens.table.costLimit'),
         mobileLabelConcurrency: t('tokens.table.concurrency'),
         mobileLabelLatency: t('tokens.table.latency'),
+        mobileLabelSpeed: t('tokens.table.speed'),
         mobileLabelLastUsed: t('tokens.table.lastUsed')
       });
     }
@@ -515,7 +520,7 @@
       if (Number.isNaN(usedAt.getTime())) {
         return MUTED_DASH_HTML;
       }
-      return `<span class="token-last-used">${usedAt.toLocaleString(locale, { hour12: false })}</span>`;
+      return `<span class="token-last-used"><span>${usedAt.toLocaleDateString(locale)}</span><span>${usedAt.toLocaleTimeString(locale, { hour12: false })}</span></span>`;
     }
 
     /**
@@ -528,15 +533,11 @@
       }
 
       const ratio = successCount / totalCount;
-      let rateClass = 'success-rate-low';
-      if (ratio >= 0.95) rateClass = 'success-rate-high';
-      else if (ratio >= 0.8) rateClass = 'success-rate-medium';
-
       const title = `${t('tokens.successCall')}: ${successCount.toLocaleString()} · ${t('tokens.failedCall')}: ${failureCount.toLocaleString()}`;
       return `
         <div class="token-metric-stack" title="${escapeHtml(title)}">
           <span class="metric-value">${totalCount.toLocaleString()}</span>
-          <span class="token-success-rate ${rateClass}">${window.formatPercent(ratio)}</span>
+          <span class="token-success-rate" style="color: ${window.getSuccessRateColor(ratio)};">${window.formatPercent(ratio)}</span>
         </div>
       `;
     }
@@ -564,12 +565,7 @@
       const avgText = formatRpm(avgRPM);
       const recentText = isToday ? formatRpm(recentRPM) : '-';
 
-      // 低流量绿色，中等橙色，高流量红色
-      let rpmClass = 'token-rpm token-rpm--high';
-      if (peakRPM < 10) rpmClass = 'token-rpm token-rpm--low';
-      else if (peakRPM < 100) rpmClass = 'token-rpm token-rpm--medium';
-
-      return `<span class="${rpmClass}">${peakText}/${avgText}/${recentText}</span>`;
+      return `<span class="token-rpm">${peakText}/${avgText}/${recentText}</span>`;
     }
 
     function hasTokenUsage(token) {
@@ -587,29 +583,29 @@
         return MUTED_DASH_HTML;
       }
 
-      const items = [];
-      const pushUsageItem = (variant, label, title, count) => {
-        if (!count || count <= 0) return;
-        items.push(
-          `<span class="token-usage-item token-usage-item--${variant}" title="${title}">` +
-            `<span class="token-usage-label">${label}</span>` +
-            `<span class="token-usage-value">${window.formatNumber(count)}</span>` +
-          `</span>`
-        );
+      const usageItem = (variant, label, title, count) => {
+        const hasValue = count > 0;
+        // 缓存读/建标签用类型色，输入/输出保持默认色
+        const labelClass = hasValue && variant.startsWith('cache-') ? ` token-type--${variant}` : '';
+        return `<span class="token-usage-item token-usage-item--${variant}${hasValue ? '' : ' token-usage-item--empty'}" title="${title}">` +
+            `<span class="token-usage-label${labelClass}">${label}</span>` +
+            `<span class="token-usage-value">${hasValue ? window.formatNumber(count) : '-'}</span>` +
+          `</span>`;
       };
 
-      pushUsageItem('input', t('tokens.input'), t('tokens.inputTokens'), token.prompt_tokens_total || 0);
-      pushUsageItem('output', t('tokens.output'), t('tokens.outputTokens'), token.completion_tokens_total || 0);
-      pushUsageItem('cache-read', t('tokens.cacheRead'), t('tokens.cacheReadTokens'), token.cache_read_tokens_total || 0);
-      pushUsageItem('cache-create', t('tokens.cacheCreate'), t('tokens.cacheCreateTokens'), token.cache_creation_tokens_total || 0);
-
-      return `<div class="token-usage-metrics">${items.join('')}</div>`;
+      // 固定四格（行优先）：左列输入/输出，右列缓存读/缓存建；0 值占位，保证各行对齐
+      return '<div class="token-usage-metrics">' +
+        usageItem('input', t('tokens.input'), t('tokens.inputTokens'), token.prompt_tokens_total || 0) +
+        usageItem('cache-read', t('tokens.cacheRead'), t('tokens.cacheReadTokens'), token.cache_read_tokens_total || 0) +
+        usageItem('output', t('tokens.output'), t('tokens.outputTokens'), token.completion_tokens_total || 0) +
+        usageItem('cache-create', t('tokens.cacheCreate'), t('tokens.cacheCreateTokens'), token.cache_creation_tokens_total || 0) +
+        '</div>';
     }
 
     const COST_LIMIT_FIELDS = [
-      { labelKey: 'tokens.limitShortDaily', limit: 'cost_daily_limit_usd', used: 'cost_daily_used_usd' },
-      { labelKey: 'tokens.limitShortMonthly', limit: 'cost_monthly_limit_usd', used: 'cost_monthly_used_usd' },
-      { labelKey: 'tokens.limitShortTotal', limit: 'cost_limit_usd', used: 'cost_used_usd' }
+      { labelKey: 'tokens.limitShortDaily', titleKey: 'tokens.dailyCostLimitLabel', limit: 'cost_daily_limit_usd', used: 'cost_daily_used_usd' },
+      { labelKey: 'tokens.limitShortMonthly', titleKey: 'tokens.monthlyCostLimitLabel', limit: 'cost_monthly_limit_usd', used: 'cost_monthly_used_usd' },
+      { labelKey: 'tokens.limitShortTotal', titleKey: 'tokens.costLimitLabel', limit: 'cost_limit_usd', used: 'cost_used_usd' }
     ];
 
     function toNonNegativeNumber(value) {
@@ -626,7 +622,7 @@
         const used = toNonNegativeNumber(token[field.used]);
         const ratio = used / limit;
         if (!tightest || ratio > tightest.ratio) {
-          tightest = { labelKey: field.labelKey, limit, used, ratio };
+          tightest = { labelKey: field.labelKey, titleKey: field.titleKey, limit, used, ratio };
         }
       });
       return tightest;
@@ -646,19 +642,21 @@
     function buildCostHtml(token) {
       const totalCost = Number(token.total_cost_usd) || 0;
       const costHtml = totalCost > 0
-        ? `<div class="token-cost">${buildCostStackHtml(totalCost, token.effective_cost_usd, { tone: 'warning' })}</div>`
+        ? `<div class="token-cost">${buildCostStackHtml(totalCost, token.effective_cost_usd, { tone: 'warning', decimalPlaces: 2 })}</div>`
         : MUTED_DASH_HTML;
 
       const limit = getTightestCostLimit(token);
       if (!limit) {
         return `${costHtml}<div class="token-limit token-limit--none">${t('tokens.noCostLimit')}</div>`;
       }
+      // 列宽只容纳一个金额：行内显示上限，已用金额放进悬停提示
+      const title = `${t(limit.titleKey)} ${window.formatCost(limit.used, 2)} / ${window.formatCost(limit.limit, 2)}`;
       return `
         ${costHtml}
-        <div class="token-limit">
+        <div class="token-limit" title="${escapeHtml(title)}">
           <div class="token-limit__text">
             <span class="token-limit__label">${t(limit.labelKey)}</span>
-            <span>${window.formatCost(limit.used, 2)} / ${window.formatCost(limit.limit, 2)}</span>
+            <span>${window.formatCost(limit.limit, 2)}</span>
           </div>
           ${buildProgressHtml(limit.ratio)}
         </div>
@@ -681,7 +679,7 @@
         <button type="button" class="channel-enable-switch ${on ? 'channel-enable-switch--on' : 'channel-enable-switch--off'}"
           role="switch" aria-checked="${on}" data-action="toggle-token-active" data-token-id="${token.id}"
           title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
-          <span class="channel-enable-switch__knob" aria-hidden="true"></span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><path d="M12 2v10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </button>
         <span class="token-actions-divider" aria-hidden="true"></span>
       `;
@@ -740,15 +738,26 @@
     }
 
     /**
-     * 构建首字/非流耗时HTML
+     * 构建首字/耗时HTML
      */
     function buildLatencyHtml(token) {
-      if (!token.stream_count && !token.non_stream_count) {
+      if (!token.stream_count && !token.duration_count) {
         return MUTED_DASH_HTML;
       }
       const ttfb = buildTimingValueHtml(token.stream_avg_ttfb, token.stream_count, window.getFirstByteTimingColor);
-      const nonStream = buildTimingValueHtml(token.non_stream_avg_rt, token.non_stream_count, window.getDurationTimingColor);
-      return `<span class="token-latency">${ttfb}<span class="token-latency__sep">/</span>${nonStream}</span>`;
+      const duration = buildTimingValueHtml(token.avg_duration, token.duration_count, window.getDurationTimingColor);
+      return `<span class="token-latency">${ttfb}<span class="token-latency__sep">/</span>${duration}</span>`;
+    }
+
+    // 输出速度 = 有输出的成功请求的输出总量 / 生成总耗时，与统计页、渠道页同口径
+    function buildSpeedHtml(token) {
+      const outputTokens = Number(token.speed_output_tokens);
+      const seconds = Number(token.speed_duration_seconds);
+      if (!(outputTokens > 0) || !(seconds > 0)) {
+        return MUTED_DASH_HTML;
+      }
+      const speed = outputTokens / seconds;
+      return `<span class="metric-value" style="color: ${window.getSpeedColor(speed)};">${speed >= 100 ? speed.toFixed(0) : speed.toFixed(1)}</span>`;
     }
 
     async function toggleTokenActive(actionTarget) {

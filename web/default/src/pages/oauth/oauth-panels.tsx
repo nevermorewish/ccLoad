@@ -20,9 +20,11 @@ const PROVIDERS = [
   { value: 'cursor', label: 'Cursor' },
   { value: 'zed', label: 'Zed' },
   { value: 'codebuddy', label: 'CodeBuddy' },
+  { value: 'vertex', label: 'Vertex AI' },
 ]
 
 const METHODS: Record<string, Array<{ value: string; label: string }>> = {
+  vertex: [{ value: 'file', label: '服务账号密钥 JSON' }],
   codex: [{ value: 'oauth', label: '浏览器 OAuth' }, { value: 'pat', label: 'Personal Access Token' }],
   xai: [{ value: 'manual', label: '手动授权' }, { value: 'refresh_token', label: '刷新令牌' }, { value: 'sso', label: 'SSO Cookie' }],
   anthropic: [{ value: 'code', label: '授权码' }],
@@ -42,6 +44,7 @@ export function OAuthLoginPanel({ onChanged }: { onChanged?: () => void }) {
   const [callback, setCallback] = useState('')
   const [secret, setSecret] = useState('')
   const [systemID, setSystemID] = useState('')
+  const [vertexLocation, setVertexLocation] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -132,6 +135,12 @@ export function OAuthLoginPanel({ onChanged }: { onChanged?: () => void }) {
       } else if (provider === 'zai' || provider === 'cursor') {
         await postJSON(`/admin/${provider}/credentials/import`, { api_key: value })
         setNotice('已导入凭证')
+      } else if (provider === 'vertex') {
+        let content: unknown
+        try { content = JSON.parse(value) } catch { setError('服务账号密钥不是有效 JSON'); return }
+        const query = vertexLocation.trim() ? `?location=${encodeURIComponent(vertexLocation.trim())}` : ''
+        await postJSON(`/admin/vertex/credentials/import${query}`, content)
+        setNotice('已导入 Vertex AI 服务账号')
       } else if (provider === 'codebuddy') {
         let content: unknown
         try { content = JSON.parse(value) } catch { setError('认证文件内容不是有效 JSON'); return }
@@ -144,7 +153,7 @@ export function OAuthLoginPanel({ onChanged }: { onChanged?: () => void }) {
 
   const readFile = async (file: File | undefined) => { if (file) setSecret(await file.text()) }
 
-  const secretPlaceholder = provider === 'codex' ? 'at-...' : provider === 'xai' ? '每行一个凭证' : provider === 'codebuddy' ? '认证文件 JSON 内容' : 'API Key'
+  const secretPlaceholder = provider === 'codex' ? 'at-...' : provider === 'xai' ? '每行一个凭证' : provider === 'vertex' ? 'Google 服务账号密钥或 CLIProxyAPI Vertex 凭证 JSON' : provider === 'codebuddy' ? '认证文件 JSON 内容' : 'API Key'
   const pending = Boolean(flow?.state) && !TERMINAL.has(String(flow?.status ?? ''))
 
   return <div className="cell-stack">
@@ -155,7 +164,8 @@ export function OAuthLoginPanel({ onChanged }: { onChanged?: () => void }) {
     </div>
 
     {provider === 'zed' && usesBrowser && <label className="cell-stack">System ID（可选，试用账户需要）<input className="input" value={systemID} onChange={(event) => setSystemID(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /></label>}
-    {provider === 'cursor' && <p className="muted">在 Cursor Dashboard 生成 User API Key 后粘贴到下方。</p>}
+    {provider === 'vertex' && <label className="cell-stack">区域（可选）<input className="input" value={vertexLocation} onChange={(event) => setVertexLocation(event.target.value)} placeholder="us-central1 或 global" /></label>}
+    {provider === 'cursor' && <p className="muted">在 Cursor Dashboard 的 Integrations 页面创建 API Key 后粘贴到下方。</p>}
 
     {usesBrowser && provider !== 'cursor' ? <>
       <div className="toolbar">
@@ -176,7 +186,7 @@ export function OAuthLoginPanel({ onChanged }: { onChanged?: () => void }) {
         <button className="btn" disabled={busy || !callback.trim()} onClick={() => void submitCallback()}>提交</button>
       </div>}
     </> : <>
-      {provider === 'codebuddy' && <input className="input" type="file" accept=".info,.json,application/json" onChange={(event) => void readFile(event.target.files?.[0])} />}
+      {(provider === 'codebuddy' || provider === 'vertex') && <input className="input" type="file" accept=".info,.json,application/json" onChange={(event) => void readFile(event.target.files?.[0])} />}
       <textarea className="input wide advanced-textarea" rows={provider === 'codebuddy' ? 8 : 5} value={secret} onChange={(event) => setSecret(event.target.value)} placeholder={secretPlaceholder} autoComplete="off" spellCheck={false} />
       <p className="muted">提交后输入会立即清除，不会保存在浏览器中。</p>
       <button className="btn btn-primary" disabled={busy || !secret.trim()} onClick={() => void importSecret()}>导入</button>
@@ -251,7 +261,7 @@ export function OAuthImportPanel({ onChanged }: { onChanged?: () => void }) {
   return <div className="cell-stack">
     <p className="muted">接受 JSON / TXT / ZIP / tar.gz，可多选；支持 CLIProxyAPI 与 Sub2API 聚合凭证。</p>
     <div className="toolbar">
-      <SearchableSelect ariaLabel="凭证类型" className="combobox-inline" value={provider} options={[{ value: 'auto', label: '自动识别' }, { value: 'codebuddy', label: 'CodeBuddy' }, { value: 'codex', label: 'Codex' }, { value: 'antigravity', label: 'Antigravity' }, { value: 'xai', label: 'xAI' }, { value: 'anthropic', label: 'Anthropic' }]} onChange={setProvider} />
+      <SearchableSelect ariaLabel="凭证类型" className="combobox-inline" value={provider} options={[{ value: 'auto', label: '自动识别' }, { value: 'vertex', label: 'Vertex AI' }, { value: 'codebuddy', label: 'CodeBuddy' }, { value: 'codex', label: 'Codex' }, { value: 'antigravity', label: 'Antigravity' }, { value: 'xai', label: 'xAI' }, { value: 'anthropic', label: 'Anthropic' }]} onChange={setProvider} />
       <SearchableSelect ariaLabel="优先级递增" className="combobox-inline" value={increment} options={['0', '10', '20', '50'].map((value) => ({ value, label: `优先级递增 ${value}` }))} onChange={setIncrement} />
     </div>
     <input className="input" type="file" multiple accept=".json,.txt,.zip,.tar.gz,.tgz,application/json" onChange={(event) => setFiles(Array.from(event.target.files ?? []))} />

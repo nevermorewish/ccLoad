@@ -22,6 +22,7 @@ import (
 	"ccLoad/internal/model"
 	"ccLoad/internal/oauthcost"
 	"ccLoad/internal/util"
+	"ccLoad/internal/vertexauth"
 	"ccLoad/internal/xaiauth"
 	"ccLoad/internal/zaiauth"
 	"ccLoad/internal/zedauth"
@@ -314,20 +315,11 @@ func (s *Server) computeChannelPriorities(cfgs []*model.Config, healthEnabled bo
 		return priorityMap, successRateMap, healthStatsMap
 	}
 	hcfg := s.healthCache.Config()
-	samples := make([]float64, 0, len(cfgs))
-	statsByID := make(map[int64]model.ChannelHealthStats, len(cfgs))
+	snapshot := s.healthCache.snapshot.Load()
 	for _, cfg := range cfgs {
-		stats := s.healthCache.GetHealthStats(cfg.ID)
-		statsByID[cfg.ID] = stats
+		stats := snapshot.healthStats(cfg.ID)
 		healthStatsMap[cfg.ID] = stats
-		if stats.FirstByteSampleCount > 0 && stats.AvgFirstByteSeconds > 0 {
-			samples = append(samples, stats.AvgFirstByteSeconds)
-		}
-	}
-	medianTTFB := medianFloat64(samples)
-	for _, cfg := range cfgs {
-		stats := statsByID[cfg.ID]
-		priorityMap[cfg.ID] = s.calculateEffectivePriority(cfg, stats, hcfg, medianTTFB)
+		priorityMap[cfg.ID] = snapshot.effectivePriority(cfg, hcfg)
 		if stats.SampleCount > 0 {
 			successRateMap[cfg.ID] = stats.SuccessRate
 		}
@@ -806,22 +798,13 @@ func (s *Server) handleCreateChannel(c *gin.Context) {
 		RespondErrorMsg(c, http.StatusConflict, "OAuth channels cannot use management_account")
 		return
 	}
+	if req.managementAccountSet && hasOpenCodeURL(req.URLs) {
+		RespondErrorMsg(c, http.StatusConflict, "OpenCode channels cannot use management_account")
+		return
+	}
 	if !model.UsesAPIKeyCredentials(req.AuthType) {
 		RespondErrorMsg(c, http.StatusBadRequest, "OAuth channels must be created by login or credential import")
 		return
-	}
-	// 创建渠道（不包含API Key）
-	created, err := s.store.CreateConfig(c.Request.Context(), req.ToConfig())
-	if err != nil {
-		RespondError(c, http.StatusInternalServerError, err)
-		return
-	}
-	if req.managementAccountSet {
-		if _, err := s.channelManagement.SaveSettings(c.Request.Context(), created, req.ManagementAccount); err != nil {
-			s.rollbackCreatedChannel(c.Request.Context(), created.ID)
-			respondChannelManagementError(c, err)
-			return
-		}
 	}
 
 	keyStrategy := strings.TrimSpace(req.KeyStrategy)
@@ -834,12 +817,12 @@ func (s *Server) handleCreateChannel(c *gin.Context) {
 	keysToCreate := make([]*model.APIKey, 0, len(apiKeyEntries))
 	for i, entry := range apiKeyEntries {
 		keysToCreate = append(keysToCreate, &model.APIKey{
-			ChannelID:       created.ID,
 			KeyIndex:        i,
 			APIKey:          entry.APIKey,
 			Note:            entry.Note,
 			AllowedModels:   append([]string(nil), entry.AllowedModels...),
 			DetectedModels:  append([]string(nil), entry.DetectedModels...),
+			ModelScopeAuto:  entry.ModelScopeAuto,
 			ModelScopeEmpty: entry.ModelScopeEmpty,
 			KeyStrategy:     keyStrategy,
 			Disabled:        entry.ModelScopeEmpty,
@@ -849,14 +832,19 @@ func (s *Server) handleCreateChannel(c *gin.Context) {
 			UpdatedAt:       model.JSONTime{Time: now},
 		})
 	}
-	if len(keysToCreate) > 0 {
-		if err := s.store.CreateAPIKeysBatch(c.Request.Context(), keysToCreate); err != nil {
-			log.Printf("[WARN] 批量创建API Key失败 (channel=%d): %v", created.ID, err)
+	created, err := s.store.CreateConfigWithAPIKeys(c.Request.Context(), req.ToConfig(), keysToCreate)
+	if err != nil {
+		RespondError(c, http.StatusInternalServerError, err)
+		return
+	}
+	defer s.InvalidateChannelListCache()
+	if req.managementAccountSet {
+		if _, err := s.channelManagement.SaveSettings(c.Request.Context(), created, req.ManagementAccount); err != nil {
+			s.rollbackCreatedChannel(c.Request.Context(), created.ID)
+			respondChannelManagementError(c, err)
+			return
 		}
 	}
-
-	// 新增渠道后，失效渠道列表缓存使选择器立即可见
-	s.InvalidateChannelListCache()
 
 	RespondJSON(c, http.StatusCreated, created)
 }
@@ -1022,6 +1010,12 @@ func oauthSyntheticKeyFields(cfg *model.Config) (accessToken, note string, err e
 			return "", "", err
 		}
 		return credential.AccessToken, "Zed LLM JWT", nil
+	case cfg.UsesVertexOAuth():
+		credential, err := vertexauth.ParseCredential([]byte(cfg.OAuthCredential))
+		if err != nil {
+			return "", "", err
+		}
+		return credential.Email, "Vertex Service Account", nil
 	}
 	return "", "", nil
 }
@@ -1169,6 +1163,7 @@ func (s *Server) handleAPIKeyToggle(c *gin.Context, disable bool) {
 		scope := model.APIKeyModelScope{
 			AllowedModels:   append([]string(nil), key.AllowedModels...),
 			DetectedModels:  append([]string(nil), key.DetectedModels...),
+			ModelScopeAuto:  key.ModelScopeAuto,
 			ModelScopeEmpty: false,
 			Disabled:        true,
 		}
@@ -1184,6 +1179,7 @@ func (s *Server) handleAPIKeyToggle(c *gin.Context, disable bool) {
 		scope := model.APIKeyModelScope{
 			AllowedModels:   append([]string(nil), key.AllowedModels...),
 			DetectedModels:  append([]string(nil), key.DetectedModels...),
+			ModelScopeAuto:  key.ModelScopeAuto,
 			ModelScopeEmpty: false,
 			Disabled:        false,
 		}
@@ -1395,6 +1391,11 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 		RespondErrorMsg(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Judge the normalized URLs: percent-encoded raw paths must not bypass this guard.
+	if req.managementAccountSet && hasOpenCodeURL(req.URLs) {
+		RespondErrorMsg(c, http.StatusConflict, "OpenCode channels cannot use management_account")
+		return
+	}
 	managementChanged := false
 	if req.managementAccountSet {
 		// Sub2API login creates a real upstream session. Run it only after every
@@ -1453,10 +1454,11 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 				multipliersByIndex[oldKey.KeyIndex] = *newKeys[i].CostMultiplier
 			}
 			if !slices.Equal(oldKey.AllowedModels, newKeys[i].AllowedModels) ||
-				!slices.Equal(oldKey.DetectedModels, newKeys[i].DetectedModels) || oldKey.ModelScopeEmpty != newKeys[i].ModelScopeEmpty {
+				!slices.Equal(oldKey.DetectedModels, newKeys[i].DetectedModels) || oldKey.ModelScopeEmpty != newKeys[i].ModelScopeEmpty || oldKey.ModelScopeAuto != newKeys[i].ModelScopeAuto {
 				scopesByIndex[oldKey.KeyIndex] = model.APIKeyModelScope{
 					AllowedModels:   append([]string(nil), newKeys[i].AllowedModels...),
 					DetectedModels:  append([]string(nil), newKeys[i].DetectedModels...),
+					ModelScopeAuto:  newKeys[i].ModelScopeAuto,
 					ModelScopeEmpty: newKeys[i].ModelScopeEmpty,
 					// Only preserve a manually disabled key. A key disabled because
 					// its previous scope became empty is re-enabled by an explicit
@@ -1502,19 +1504,8 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 		req.SortOverride = existing.SortOverride
 	}
 
-	upd, err := s.store.UpdateConfig(c.Request.Context(), id, req.ToConfig())
-	if err != nil {
-		RespondError(c, http.StatusNotFound, err)
-		return
-	}
-	if existing.UsesXAIOAuth() && s.xaiCredentials != nil {
-		s.xaiCredentials.invalidate(id)
-	}
-
-	// Key或策略变化时更新API Keys
-	if existing.UsesOAuth() {
-		// OAuth 凭证只由登录、导入和刷新链路维护。
-	} else if keyChanged {
+	var apiKeys []*model.APIKey
+	if keyChanged {
 		existingByValue := make(map[string][]*model.APIKey, len(oldKeys))
 		for _, oldKey := range oldKeys {
 			if oldKey != nil {
@@ -1523,15 +1514,9 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 		}
 		nextOccurrence := make(map[string]int, len(existingByValue))
 
-		// Key内容/数量变化：删除旧Key并重建
-		if err := s.store.DeleteAllAPIKeys(c.Request.Context(), id); err != nil {
-			RespondError(c, http.StatusInternalServerError, fmt.Errorf("delete old API keys before rebuild: %w", err))
-			return
-		}
-
 		// 批量创建新的API Keys（优化：单次事务插入替代循环单条插入）
 		now := time.Now()
-		apiKeys := make([]*model.APIKey, 0, len(newKeys))
+		apiKeys = make([]*model.APIKey, 0, len(newKeys))
 		for i, key := range newKeys {
 			var wasDisabled bool
 			occurrence := nextOccurrence[key.APIKey]
@@ -1546,6 +1531,7 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 				Note:            key.Note,
 				AllowedModels:   append([]string(nil), key.AllowedModels...),
 				DetectedModels:  append([]string(nil), key.DetectedModels...),
+				ModelScopeAuto:  key.ModelScopeAuto,
 				ModelScopeEmpty: key.ModelScopeEmpty,
 				KeyStrategy:     keyStrategy,
 				Disabled:        wasDisabled || key.ModelScopeEmpty,
@@ -1555,11 +1541,24 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 				UpdatedAt:       model.JSONTime{Time: now},
 			})
 		}
-		if err := s.store.CreateAPIKeysBatch(c.Request.Context(), apiKeys); err != nil {
-			RespondError(c, http.StatusInternalServerError, fmt.Errorf("rebuild API keys: %w", err))
-			return
-		}
+	}
+	var upd *model.Config
+	if keyChanged {
+		upd, err = s.store.UpdateConfigWithAPIKeys(c.Request.Context(), id, req.ToConfig(), apiKeys)
 	} else {
+		upd, err = s.store.UpdateConfig(c.Request.Context(), id, req.ToConfig())
+	}
+	if err != nil {
+		RespondError(c, http.StatusInternalServerError, err)
+		return
+	}
+	// Later metadata/account writes may fail after the channel has committed.
+	defer s.InvalidateChannelListCache()
+	defer s.InvalidateAPIKeysCache(id)
+	if existing.UsesXAIOAuth() && s.xaiCredentials != nil {
+		s.xaiCredentials.invalidate(id)
+	}
+	if !existing.UsesOAuth() && !keyChanged {
 		// Key内容未变化：策略和备注都是独立元数据，不能重建 Key 导致禁用状态丢失。
 		if strategyChanged {
 			if err := s.store.UpdateAPIKeysStrategy(c.Request.Context(), id, keyStrategy); err != nil {
@@ -1609,16 +1608,11 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 		reflect.DeepEqual(before, after)
 	if !priorityOnly {
 		s.clearAllChannelCooldowns(c.Request.Context(), id)
-	} else {
-		s.InvalidateAPIKeysCache(id)
 	}
 	if keyChanged || protocolCapabilityConfigChanged(existing, upd) {
 		// URL、协议声明、转换模式或 Key 等可能已变化，只重新探测本渠道。
 		s.protocolCapabilities.clearChannels(id)
 	}
-
-	// 渠道更新后刷新缓存，确保选择器立即生效
-	s.InvalidateChannelListCache()
 
 	// URL 更新后立即清理失效的 URL 状态（内存+数据库同步）
 	if s.urlSelector != nil {
@@ -1645,6 +1639,14 @@ func preserveOmittedAPIKeyMetadata(submitted []ChannelAPIKeyRequest, existing []
 			oldKey = existing[i]
 		}
 		if oldKey != nil {
+			// Old clients omit the source marker. Preserve it only when they
+			// leave the scope intact; an explicit range edit is manual policy.
+			if !submitted[i].modelScopeAutoSet {
+				allowedChanged := submitted[i].allowedModelsSet &&
+					(!slices.Equal(submitted[i].AllowedModels, oldKey.AllowedModels) || submitted[i].ModelScopeEmpty != oldKey.ModelScopeEmpty)
+				detectedChanged := submitted[i].detectedModelsSet && !slices.Equal(submitted[i].DetectedModels, oldKey.DetectedModels)
+				submitted[i].ModelScopeAuto = oldKey.ModelScopeAuto && !allowedChanged && !detectedChanged
+			}
 			if submitted[i].Priority == nil {
 				priority := oldKey.Priority
 				submitted[i].Priority = &priority
@@ -2021,6 +2023,7 @@ const (
 	channelPriorityMax = 9999999
 )
 
+// HandleBatchUpdatePriority updates priorities for a channel batch.
 // POST /admin/channels/batch-priority
 // 使用单条批量 UPDATE 语句更新多个渠道优先级
 func (s *Server) HandleBatchUpdatePriority(c *gin.Context) {
@@ -2487,5 +2490,8 @@ func (s *Server) removeDeletedChannelRuntimeState(cfg *model.Config) {
 	}
 	if s.zedCredentials != nil {
 		s.zedCredentials.invalidate(id)
+	}
+	if s.vertexCredentials != nil {
+		s.vertexCredentials.invalidate(id)
 	}
 }

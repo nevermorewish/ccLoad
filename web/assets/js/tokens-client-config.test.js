@@ -5,7 +5,7 @@ const { buildClientConfigSnippets } = require('./tokens.js');
 
 function parseToml(value) {
   // Python's standard TOML parser avoids adding a frontend runtime dependency.
-  for (const command of ['python3', 'python3.14', 'python3.13', 'python3.12', 'python3.11']) {
+  for (const command of (process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python3.14', 'python3.13', 'python3.12', 'python3.11'])) {
     const result = spawnSync(command, ['-c', 'import json, sys, tomllib; print(json.dumps(tomllib.loads(sys.stdin.read())))'], {
       input: value, encoding: 'utf8'
     });
@@ -38,7 +38,7 @@ test('JSON, TOML and shell escaping preserve special characters without executin
   assert.equal(JSON.parse(snippets.claudeCode).env.ANTHROPIC_BASE_URL, origin);
   assert.equal(parseToml(snippets.codexToml).model_providers.ccload.base_url, origin + '/v1');
   // A shell function stands in for Codex and returns exactly the login command's stdin.
-  const result = spawnSync('/bin/sh', ['-c', 'codex() { cat; }; ' + snippets.codexLogin], { encoding: 'utf8' });
+  const result = spawnSync(process.platform === 'win32' ? 'sh' : '/bin/sh', ['-c', 'codex() { cat; }; ' + snippets.codexLogin], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, token + '\n');
 });

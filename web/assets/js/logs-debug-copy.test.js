@@ -226,6 +226,8 @@ async function withLoadedLogsPage(options, assertions) {
     },
     readFilterControlValues: () => ({ range: 'today', clientProtocol: '', authToken: '' }),
     getDurationTimingColor: () => '',
+    calculateCacheHitRate: () => null,
+    getCacheHitRateColor: () => '',
     isAPITokenRole: () => isTokenRole,
     shouldHideChannels: () => isTokenRole && !showChannels
   });
@@ -346,7 +348,8 @@ test('token channel visibility also controls actual model text and hover', async
   }
 });
 
-test('small request costs keep significant digits instead of rounding to $0.000', () => {
+// 在最小浏览器桩环境中加载 ui.js，把挂到 window 上的格式化函数交给 fn 断言
+function withUiFormatters(fn) {
   const previousGlobals = new Map();
   const setGlobal = (key, value) => {
     previousGlobals.set(key, Object.getOwnPropertyDescriptor(global, key));
@@ -385,15 +388,7 @@ test('small request costs keep significant digits instead of rounding to $0.000'
   try {
     delete require.cache[require.resolve('./ui.js')];
     require('./ui.js');
-    const { formatCost } = global.window;
-
-    assert.equal(formatCost(0.0002), '$0.0002');
-    assert.equal(formatCost(0.00012345), '$0.00012');
-    assert.equal(formatCost(0.005), '$0.005');
-    assert.equal(formatCost(0.0000004), '<$0.000001');
-    assert.equal(formatCost(1.23456), '$1.235');
-    assert.equal(formatCost(0), '$0');
-    assert.equal(formatCost(0.0002, 2), '$0.00');
+    fn(global.window);
   } finally {
     delete require.cache[require.resolve('./ui.js')];
     for (const [key, descriptor] of previousGlobals) {
@@ -401,6 +396,38 @@ test('small request costs keep significant digits instead of rounding to $0.000'
       else Object.defineProperty(global, key, descriptor);
     }
   }
+}
+
+test('small request costs keep significant digits instead of rounding to $0.000', () => {
+  withUiFormatters(({ formatCost }) => {
+    assert.equal(formatCost(0.0002), '$0.0002');
+    assert.equal(formatCost(0.00012345), '$0.00012');
+    assert.equal(formatCost(0.005), '$0.005');
+    assert.equal(formatCost(0.0000004), '<$0.000001');
+    assert.equal(formatCost(1.23456), '$1.235');
+    assert.equal(formatCost(0), '$0');
+    assert.equal(formatCost(0.0002, 2), '$0.00');
+  });
+});
+
+test('compact numbers carry into the next unit instead of showing 1000.0K', () => {
+  withUiFormatters(({ formatNumber }) => {
+    assert.equal(formatNumber(999), '999');
+    assert.equal(formatNumber(999949), '999.9K');
+    assert.equal(formatNumber(999999), '1.0M');
+    assert.equal(formatNumber(43900000), '43.9M');
+    assert.equal(formatNumber(999999999), '1.0B');
+    assert.equal(formatNumber(1532200000), '1.5B');
+    assert.equal(formatNumber(2500000000000), '2500.0B');
+    assert.equal(formatNumber('abc'), '0');
+  });
+});
+
+test('cache hit rate includes cache creation and stays unknown without cache reads', () => {
+  withUiFormatters(({ calculateCacheHitRate }) => {
+    assert.equal(calculateCacheHitRate(10, 85, 5), 0.85);
+    assert.equal(calculateCacheHitRate(100, 0, 20), null);
+  });
 });
 
 test('reasoning logs show a level change on the model badge and the judgment in the message', async () => {
@@ -416,7 +443,7 @@ test('reasoning logs show a level change on the model badge and the judgment in 
         reasoning_decision: {status: 'decided', suggested_effort: 'xhigh', confidence: 0.554, duration_ms: 12, cost_unknown: true}},
       {time: Date.now(), model: 'judge', status_code: 504, duration: 0, log_source: 'proxy', client_protocol: 'system_one',
         reasoning_decision: {status: 'fallback', reason: 'timeout'}}]}, ({tbody}) => {
-      const badges = [...tbody.innerHTML.matchAll(/<sup[^>]*>([^<]*)<\/sup>/g)].map(match => match[1]);
+      const badges = [...tbody.innerHTML.matchAll(/<sup[^>]*>(.*?)<\/sup>/g)].map(match => match[1].replace(/<[^>]+>/g, ''));
       assert.deepEqual(badges, ['xhigh→low 72', 'high', 'max→xhigh', 'medium']);
       assert.doesNotMatch(tbody.innerHTML, /logs\.reasoning\.changed/);
       assert.match(tbody.innerHTML, /logs.reasoning.judged xhigh(logs.reasoning.confidence 0.55)?/);
@@ -432,4 +459,78 @@ test('unknown decision cost does not replace known business request cost', async
     assert.doesNotMatch(tbody.innerHTML, /logs.costUnknown/);
     assert.match(tbody.innerHTML, /0.25/);
   });
+});
+
+test('narrow desktop hides IP and token columns by default while explicit choices persist', () => {
+  const previousGlobals = new Map();
+  const setGlobal = (key, value) => {
+    if (!previousGlobals.has(key)) previousGlobals.set(key, Object.getOwnPropertyDescriptor(global, key));
+    Object.defineProperty(global, key, { configurable: true, writable: true, value });
+  };
+  const noop = () => {};
+  const storage = new Map();
+  const loadPage = (narrow) => {
+    const styles = [];
+    const menuItems = [];
+    const element = () => {
+      const listeners = {};
+      return {
+        dataset: {},
+        addEventListener: (type, handler) => { listeners[type] = handler; },
+        click: () => listeners.click({ preventDefault: noop, stopPropagation: noop })
+      };
+    };
+    const list = { set innerHTML(_) { menuItems.length = 0; }, appendChild: item => menuItems.push(item) };
+    setGlobal('window', {
+      t: key => key,
+      initPageBootstrap: noop,
+      addEventListener: noop,
+      matchMedia: query => ({ matches: narrow && query.includes('max-width: 1439px'), addEventListener: noop })
+    });
+    setGlobal('document', {
+      addEventListener: noop,
+      getElementById: id => id === 'colToggleList' ? list : null,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      createElement: element,
+      head: { appendChild: style => styles.push(style) }
+    });
+    setGlobal('localStorage', {
+      getItem: key => storage.get(key) ?? null,
+      setItem: (key, value) => storage.set(key, value),
+      removeItem: key => storage.delete(key)
+    });
+    delete require.cache[require.resolve('./logs.js')];
+    const logs = require('./logs.js');
+    logs.applyColVisibility();
+    logs.renderColToggleMenu();
+    const hiddenColumns = () => [...styles[0].textContent.matchAll(/\.logs-table \.logs-col-([\w-]+) \{ display: none !important; \}/g)].map(m => m[1]);
+    const toggle = key => menuItems.find(item => item.dataset.colKey === key).click();
+    return { hiddenColumns, toggle };
+  };
+
+  try {
+    let page = loadPage(true);
+    assert.deepEqual(page.hiddenColumns(), ['ip', 'token-desc']);
+
+    page.toggle('ip');
+    assert.deepEqual(page.hiddenColumns(), ['token-desc']);
+    assert.deepEqual(JSON.parse(storage.get('ccload_logs_columns')), { ip: true });
+
+    page.toggle('ip');
+    assert.deepEqual(page.hiddenColumns(), ['ip', 'token-desc']);
+    assert.equal(storage.has('ccload_logs_columns'), false);
+
+    storage.set('ccload_logs_columns', JSON.stringify({ ip: true, cost: false }));
+    page = loadPage(true);
+    assert.deepEqual(page.hiddenColumns(), ['token-desc', 'cost']);
+    page = loadPage(false);
+    assert.deepEqual(page.hiddenColumns(), ['cost']);
+  } finally {
+    delete require.cache[require.resolve('./logs.js')];
+    for (const [key, descriptor] of previousGlobals) {
+      if (descriptor === undefined) delete global[key];
+      else Object.defineProperty(global, key, descriptor);
+    }
+  }
 });

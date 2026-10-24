@@ -18,6 +18,7 @@ import (
 	"ccLoad/internal/model"
 	"ccLoad/internal/protocol"
 	"ccLoad/internal/storage"
+	sqlstore "ccLoad/internal/storage/sql"
 
 	"github.com/gin-gonic/gin"
 )
@@ -2722,18 +2723,6 @@ func TestChannelRequestValidate(t *testing.T) {
 			expectNormalize: "https://api.com/v1/messages#",
 		},
 		{
-			name: "URL以#结尾不再依赖协议处理配置",
-			req: ChannelRequest{
-				Name:     "Test",
-				APIKey:   "sk-test",
-				URLs:     model.ChannelURLs{{URL: "https://api.com/v1/messages", Exact: true}},
-				Priority: 100,
-				Models:   []model.ModelEntry{{Model: "model-1", RedirectModel: ""}},
-			},
-			wantError:       false,
-			expectNormalize: "https://api.com/v1/messages#",
-		},
-		{
 			name: "URL包含/api路径（允许）",
 			req: ChannelRequest{
 				Name:     "Test",
@@ -3072,5 +3061,144 @@ func TestHandleUpdateChannelOAuthQuotaPassthrough(t *testing.T) {
 		if len(list.Data) != 1 || list.Data[0].OAuthQuotaPassthrough != tc.want {
 			t.Fatalf("list did not return actual value: %s", listW.Body.String())
 		}
+	}
+}
+
+func TestHandleChannelModelScopeSource(t *testing.T) {
+	server, store, cleanup := setupAdminTestServer(t)
+	defer cleanup()
+	ctx := context.Background()
+	models := []model.ModelEntry{{Model: "a"}, {Model: "b"}}
+	payload := map[string]any{
+		"name": "scope-source", "enabled": true,
+		"urls": model.ChannelURLs{{URL: "https://example.com"}}, "models": models,
+		"api_keys": []map[string]any{{"api_key": "k", "allowed_models": []string{"a"}, "detected_models": []string{"a"}, "model_scope_auto": true}},
+	}
+	c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels", payload))
+	server.HandleChannels(c)
+	if w.Code != http.StatusOK && w.Code != http.StatusCreated {
+		t.Fatalf("create failed: %d %s", w.Code, w.Body.String())
+	}
+	var created model.Config
+	mustUnmarshalAPIResponseData(t, w.Body.Bytes(), &created)
+	assertSource := func(want bool) {
+		t.Helper()
+		keys, err := store.GetAPIKeys(ctx, created.ID)
+		if err != nil || len(keys) == 0 {
+			t.Fatalf("read keys: %v", err)
+		}
+		if keys[0].ModelScopeAuto != want {
+			t.Fatalf("model_scope_auto=%v, want %v", keys[0].ModelScopeAuto, want)
+		}
+	}
+	assertSource(true)
+	for _, tc := range []struct {
+		name      string
+		key       map[string]any
+		appendKey bool
+		want      bool
+	}{
+		{"old client note edit", map[string]any{"api_key": "k", "note": "edited"}, false, true},
+		{"old client unchanged scope", map[string]any{"api_key": "k", "allowed_models": []string{"a"}, "detected_models": []string{"a"}}, false, true},
+		{"old client manual allowlist", map[string]any{"api_key": "k", "allowed_models": []string{"b"}}, false, false},
+		{"explicit discovery", map[string]any{"api_key": "k", "allowed_models": []string{"a"}, "detected_models": []string{"a"}, "model_scope_auto": true}, false, true},
+		{"old client rebuild", map[string]any{"api_key": "k"}, true, true},
+		{"explicit manual with same range", map[string]any{"api_key": "k", "model_scope_auto": false}, true, false},
+		{"discovery with same range", map[string]any{"api_key": "k", "model_scope_auto": true}, true, true},
+		{"old client upstream range edit", map[string]any{"api_key": "k", "detected_models": []string{"b"}}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keys := []map[string]any{tc.key}
+			if tc.appendKey {
+				keys = append(keys, map[string]any{"api_key": "new"})
+			}
+			payload["api_keys"] = keys
+			path := "/admin/channels/" + strconv.FormatInt(created.ID, 10)
+			c, w := newTestContext(t, newJSONRequest(t, http.MethodPut, path, payload))
+			c.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(created.ID, 10)}}
+			server.HandleChannelByID(c)
+			if w.Code != http.StatusOK {
+				t.Fatalf("update failed: %d %s", w.Code, w.Body.String())
+			}
+			assertSource(tc.want)
+		})
+	}
+}
+
+func TestChannelKeyWriteFailureRollsBackChannelAndKeys(t *testing.T) {
+	for _, update := range []bool{false, true} {
+		t.Run(fmt.Sprintf("update=%v", update), func(t *testing.T) {
+			server, store, cleanup := setupAdminTestServer(t)
+			defer cleanup()
+			ctx := context.Background()
+			var original *model.Config
+			var originalKey *model.APIKey
+			if update {
+				var err error
+				original, err = store.CreateConfig(ctx, &model.Config{Name: "original", URLs: model.ChannelURLs{{URL: "https://example.com"}}, Enabled: true, ModelEntries: []model.ModelEntry{{Model: "a"}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: original.ID, KeyIndex: 0, APIKey: "old-key", Disabled: true, CooldownUntil: 12345}}); err != nil {
+					t.Fatal(err)
+				}
+				originalKey, err = store.GetAPIKey(ctx, original.ID, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := store.(*sqlstore.SQLStore).ExecContext(ctx, `CREATE TRIGGER reject_key BEFORE INSERT ON api_keys WHEN NEW.api_key = 'reject-key' BEGIN SELECT RAISE(FAIL, 'injected key insert failure'); END`); err != nil {
+				t.Fatal(err)
+			}
+			// Force failure in the second insert batch, after the first batch wrote rows.
+			keys := make([]map[string]any, 101)
+			for i := range keys {
+				keys[i] = map[string]any{"api_key": fmt.Sprintf("new-key-%d", i)}
+			}
+			keys[100]["api_key"] = "reject-key"
+			payload := map[string]any{"name": "changed", "urls": []map[string]any{{"url": "https://example.com"}}, "models": []map[string]any{{"model": "b"}}, "api_keys": keys, "enabled": true}
+			method, path := http.MethodPost, "/admin/channels"
+			if update {
+				method, path = http.MethodPut, fmt.Sprintf("/admin/channels/%d", original.ID)
+			}
+			c, w := newTestContext(t, newJSONRequest(t, method, path, payload))
+			if update {
+				c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(original.ID)}}
+				server.HandleChannelByID(c)
+			} else {
+				server.HandleChannels(c)
+			}
+			response := mustParseAPIResponse[json.RawMessage](t, w.Body.Bytes())
+			if w.Code != http.StatusInternalServerError || response.Success {
+				t.Fatalf("status=%d response=%s", w.Code, w.Body.String())
+			}
+			configs, err := store.ListConfigs(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !update {
+				if len(configs) != 0 {
+					t.Fatalf("failed creation persisted channels: %+v", configs)
+				}
+				allKeys, err := store.GetAllAPIKeys(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(allKeys) != 0 {
+					t.Fatalf("failed creation persisted keys: %+v", allKeys)
+				}
+				return
+			}
+			if len(configs) != 1 || configs[0].Name != original.Name || !slices.EqualFunc(configs[0].ModelEntries, original.ModelEntries, func(a, b model.ModelEntry) bool { return a.Model == b.Model }) {
+				t.Fatalf("failed update changed channel: %+v", configs)
+			}
+			got, err := store.GetAPIKeys(ctx, original.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ID != originalKey.ID || got[0].APIKey != originalKey.APIKey || !got[0].Disabled || got[0].CooldownUntil != originalKey.CooldownUntil {
+				t.Fatalf("failed update changed existing key: %+v", got)
+			}
+		})
 	}
 }

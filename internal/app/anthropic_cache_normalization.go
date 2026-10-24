@@ -162,7 +162,7 @@ func (b *anthropicCacheBody) Read(p []byte) (int, error) {
 		if !b.stream {
 			raw, err := io.ReadAll(io.LimitReader(b.reader, int64(config.DefaultMaxBodyBytes)+1))
 			if len(raw) > config.DefaultMaxBodyBytes {
-				b.err = fmt.Errorf("Anthropic response exceeds normalization size limit")
+				b.err = fmt.Errorf("anthropic response exceeds normalization size limit")
 				break
 			}
 			if err != nil {
@@ -177,7 +177,7 @@ func (b *anthropicCacheBody) Read(p []byte) (int, error) {
 		for {
 			line, err := b.reader.ReadSlice('\n')
 			if len(event)+len(line) > config.DefaultMaxBodyBytes {
-				b.err = fmt.Errorf("Anthropic SSE event exceeds normalization size limit")
+				b.err = fmt.Errorf("anthropic SSE event exceeds normalization size limit")
 				break
 			}
 			event = append(event, line...)

@@ -543,6 +543,11 @@ func classifyHTTPResponseWithMetaAt(statusCode int, headers map[string][]string,
 			Level:       level,
 			ModelScoped: true,
 		}
+		// 每分钟限流与订阅窗口无关：统一 reset 是代表窗口的重置时间，按它冷却会把
+		// 几十秒的限流拉长到数小时并锁住同渠道的其他 Key，此时走普通 429 退避。
+		if anthropicPerMinuteRateLimit(headers, responseBody) {
+			return classification
+		}
 		if until, ok := parseAnthropicRateLimitReset(headers, now); ok {
 			classification.PreventKeyFallback = true
 			classification.ModelCooldownUntil = until
@@ -569,10 +574,7 @@ func classifyHTTPResponseWithMetaAt(statusCode int, headers map[string][]string,
 	// 413 必须与 400 同级：否则 auto 协议探测把 Anthropic 400 交给下一个候选后，
 	// 候选网关的 RequestTooLarge 会 ActionReturnClient，客户端直接中断、后面的匹配渠道进不去。
 	if statusCode == 400 || statusCode == http.StatusRequestEntityTooLarge {
-		return HTTPResponseClassification{
-			Level:       ErrorLevelKey,
-			ModelScoped: true,
-		}
+		return requestRejectedClassification
 	}
 
 	// 410 Gone 通常表示资源已永久移除。只有响应明确指向模型退役时才切换渠道并
@@ -618,6 +620,12 @@ func classifyHTTPResponseWithMetaAt(statusCode int, headers map[string][]string,
 	}
 
 	bodyLower := strings.ToLower(string(responseBody))
+
+	// Gemini 对不存在、已过期或属于其他项目的 cachedContent 统一返回此 403。缓存名由客户端
+	// 指定且不绑定 Key，换 Key/渠道无意义；按 Key 级处理会让任意请求冷却健康 Key。
+	if statusCode == http.StatusForbidden && strings.Contains(bodyLower, "cachedcontent not found") {
+		return HTTPResponseClassification{Level: ErrorLevelClient}
+	}
 
 	// 渠道级错误特征:**仅限账户级不可逆错误**
 	// 设计原则:保守策略,只有明确是渠道级错误时才返回ErrorLevelChannel
@@ -741,6 +749,36 @@ func anthropicRateLimitDeadline(headers map[string][]string, name, value string,
 	return until, true
 }
 
+// anthropicPerMinuteRateLimit 识别不涉及配额窗口的 Anthropic 每分钟限流（RPM/ITPM/OTPM）。
+// 只认完整的官方措辞：子串匹配会误伤否定说法或与配额耗尽并存的提示；
+// 任一窗口状态为 rejected 时以窗口语义为准。
+func anthropicPerMinuteRateLimit(headers map[string][]string, body []byte) bool {
+	var payload struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &payload) != nil || payload.Error.Type != "rate_limit_error" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(payload.Error.Message)) {
+	case "this request would exceed the requests per minute rate limit. please try again later.",
+		"this request would exceed the input tokens per minute rate limit. please try again later.",
+		"this request would exceed the output tokens per minute rate limit. please try again later.":
+	default:
+		return false
+	}
+	for _, window := range []string{"", "5h-", "7d-", "7d_oi-", "Overage-"} {
+		for _, status := range headerValuesFold(headers, "Anthropic-Ratelimit-Unified-"+window+"Status") {
+			if strings.EqualFold(strings.TrimSpace(status), "rejected") {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // anthropicUnifiedWindowRejected 判断 Anthropic 是否明确拒绝了共享 5h/7d 订阅窗口。
 // 仅 overage/7d_oi 被拒而共享窗口仍可用时属于模型级，不能冷却整个凭证。
 func anthropicUnifiedWindowRejected(headers map[string][]string) bool {
@@ -828,6 +866,17 @@ func anthropicFastModeCreditsRequired(body []byte) bool {
 	return strings.Contains(message, "fast request rejected") ||
 		(strings.Contains(message, "fast") &&
 			(strings.Contains(message, "usage credits") || strings.Contains(message, "credits are required")))
+}
+
+// requestRejectedClassification 是 400/413 的通用兜底：当前模型/上游拒绝这份请求，
+// 响应体里没有凭证、配额、上下文或连接槽等更具体的信号。
+var requestRejectedClassification = HTTPResponseClassification{Level: ErrorLevelKey, ModelScoped: true}
+
+// IsGenericRequestRejection 判断 400 是否只落到通用兜底分类。Key/凭证终态、
+// 配额、上下文超限等专门分类返回 false，调用方应按正常冷却路径处理。
+func IsGenericRequestRejection(statusCode int, headers map[string][]string, responseBody []byte) bool {
+	return statusCode == http.StatusBadRequest &&
+		ClassifyHTTPResponseWithMeta(statusCode, headers, responseBody) == requestRejectedClassification
 }
 
 // anthropicAccountUnusable 识别 Anthropic 用 400 报告的账号终态：组织被禁用、

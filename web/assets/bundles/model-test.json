@@ -17,6 +17,8 @@
     "/web/assets/js/model-test-image.js?v=__VERSION__",
     "/web/assets/js/model-entry-parser.js?v=__VERSION__",
     "/web/assets/js/token-model-test.js?v=__VERSION__",
+    "/web/assets/js/oauth-plan-badge.js?v=__VERSION__",
+    "/web/assets/js/model-test-route-preview.js?v=__VERSION__",
     "/web/assets/js/model-test.js?v=__VERSION__",
     "/web/assets/js/logs-channel-editor.js?v=__VERSION__",
     "/web/assets/js/marked.min.js?v=__VERSION__",
