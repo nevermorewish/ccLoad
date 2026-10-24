@@ -3174,6 +3174,24 @@ func (s *Server) forwardAttempt(
 	deferChannelCooldown bool, // 多URL场景下，非最后一个URL不应触发渠道级冷却
 	antigravityCapacityRetries int,
 ) (*proxyResult, cooldown.Action, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return buildCtxDoneResult(cfg, ctxErr), cooldown.ActionReturnClient, nil
+	}
+	// Candidate and credential snapshots can outlive an admin disable/delete
+	// while another upstream is slow. Recheck at the shared attempt boundary so
+	// channel, Key, URL, protocol and same-channel retries all honor that change.
+	// GetConfig bypasses the routing cache; retain cfg's request-local overrides.
+	current, loadErr := s.store.GetConfig(ctx, cfg.ID)
+	if loadErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return buildCtxDoneResult(cfg, ctxErr), cooldown.ActionReturnClient, nil
+		}
+		log.Printf("[WARN] Cannot verify channel state before forwarding (channel=%d): %v", cfg.ID, loadErr)
+		return nil, cooldown.ActionRetryChannel, fmt.Errorf("verify channel %d before forwarding: %w", cfg.ID, loadErr)
+	}
+	if current == nil || !current.Enabled {
+		return nil, cooldown.ActionRetryChannel, errChannelDisabled
+	}
 	// 记录渠道尝试开始时间（用于日志记录，每次渠道/Key切换时更新）
 	reqCtx.attemptStartTime = time.Now()
 	reqCtx.baseURL = baseURL

@@ -50,6 +50,10 @@ var ErrAllKeysExhausted = errors.New("all keys exhausted")
 // It must not be promoted to a channel cooldown: another model can still use the channel.
 var ErrNoAPIKeyForModel = errors.New("no API key available for model")
 
+// errChannelDisabled skips stale candidates without treating an operator action
+// as an upstream failure or applying a cooldown.
+var errChannelDisabled = errors.New("channel is no longer enabled")
+
 // ErrChannelRPMExceeded 表示渠道RPM限制已达到
 var ErrChannelRPMExceeded = errors.New("channel rpm limit exceeded")
 
@@ -947,6 +951,9 @@ func (s *Server) runProxyAttemptLoopWithFailureBoundary(
 			}
 		}
 		result, err := s.tryChannelWithSameChannelRetries(ctx, cfg, reqCtx, w)
+		if errors.Is(err, errChannelDisabled) {
+			continue
+		}
 		if errors.Is(err, errNoAvailableModelRow) {
 			continue
 		}
