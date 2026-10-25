@@ -80,3 +80,5 @@
 - API Key 渠道高级设置的 `custom_request_rules.force_upstream_stream` 默认关闭，仅作用于 Chat Completions、Messages、Responses 和 Gemini 内容生成端点。OAuth、System One、计数、嵌入、图片与压缩端点不适用。
 - 开启后在上游发送边界强制流式（Gemini 使用 `:streamGenerateContent?alt=sse`），客户端流式标记保持独立。非流式客户端使用有大小限制的协议收集器聚合完整 JSON，再执行普通响应转换；工具调用、思考与 usage 保留，上游错误或缺失终态进入既有重试/冷却路径，不能把半截输出当成功。
 - 管理后台渠道测试使用相同开关；旧版请求规则编辑器保存时也必须保留该字段。
+- OpenAI 仅在非流式客户端需要聚合时注入 `stream_options.include_usage=true`；客户端已流式时保留原有 `stream_options`。强制 body 改写必须早于原生 Anthropic 调用方 CCH 重签，代理与管理测试顺序一致。
+- 强制流式的非流式客户端仍受实际协议的 `NonStreamTimeout` 总时长限制（默认 600 秒，有效值为 0 时禁用），同时执行上游流式首字节、总时长与空闲限制，先到者生效。代理中上游明确返回 `application/json` 时，首个响应字节停止首字节计时，不等完整 JSON 读完。

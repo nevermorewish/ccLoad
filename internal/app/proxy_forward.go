@@ -346,6 +346,12 @@ func (s *Server) buildProxyRequest(
 		// Complete replay and incremental WS bodies must share the same aliases.
 		body, reqCtx.openCodeResponses = prepareOpenCodeResponsesRequest(parsedUpstreamURL, upstreamProtocol, requestPath, body, reqCtx.openCodeResponses)
 	}
+	if reqCtx != nil && reqCtx.forceUpstreamStream {
+		body, err = forceStreamRequestBody(body, upstreamProtocol, reqCtx.isStreaming)
+		if err != nil {
+			return nil, err
+		}
+	}
 	body, err = refreshAnthropicCallerCCH(body, callerBody, callerWire)
 	if err != nil {
 		return nil, err
@@ -385,13 +391,6 @@ func (s *Server) buildProxyRequest(
 			return nil, err
 		}
 		upstreamStreaming = true
-	}
-
-	if reqCtx != nil && reqCtx.forceUpstreamStream {
-		body, err = forceStreamRequestBody(body, upstreamProtocol)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	// 2. 创建带上下文的请求
@@ -2102,6 +2101,12 @@ func attachFirstByteDetector(
 			return reqCtx.startTime
 		}(),
 		onFirstRead: func() {
+			// A forced-stream upstream may answer with JSON. Its first byte still
+			// satisfies the first-byte deadline; do not wait for the whole body.
+			mediaType, _, _ := strings.Cut(resp.Header.Get("Content-Type"), ";")
+			if reqCtx.forceUpstreamStream && !reqCtx.isStreaming && strings.EqualFold(strings.TrimSpace(mediaType), "application/json") {
+				reqCtx.stopFirstByteTimer()
+			}
 			if (reqCtx.isStreaming || reqCtx.codeBuddyOAuth || reqCtx.openCodeFree || reqCtx.forceUpstreamStream) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				return
 			}
@@ -2564,7 +2569,13 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 	openCodeFree := isOpenCodeFreeRequest(cfg, baseURL, plan.UpstreamProtocol, openCodePath, plan.RequestModel())
 	forceUpstreamStream := compaction == nil && shouldForceUpstreamStream(cfg, plan.UpstreamProtocol, openCodePath)
 	upstreamStreaming := isStreamingRequest(plan.UpstreamPath, plan.TranslatedBody) || isCodeBuddyChatRequest(cfg, plan.UpstreamProtocol) || openCodeFree || forceUpstreamStream
-	reqCtx := newRequestContextForStreaming(ctx, upstreamStreaming, s.resolveProtocolTimeouts(plan))
+	timeouts := s.resolveProtocolTimeouts(plan)
+	if forceUpstreamStream && !plan.Streaming && timeouts.NonStreamTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeouts.NonStreamTimeout)
+		defer cancel()
+	}
+	reqCtx := newRequestContextForStreaming(ctx, upstreamStreaming, timeouts)
 	if isCodeBuddyChatRequest(cfg, plan.UpstreamProtocol) || openCodeFree || forceUpstreamStream {
 		reqCtx.isStreaming = plan.Streaming
 	}

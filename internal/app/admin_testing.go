@@ -2328,6 +2328,22 @@ func (s *Server) buildTestUpstreamRequestPlan(
 	requestPlan.requestBody, requestPlan.openCodeResponses = prepareOpenCodeResponsesRequest(
 		parsedTestURL, upstreamProtocolValue, requestPath, requestPlan.requestBody, nil,
 	)
+	requestPlan.forceUpstreamStream = shouldForceUpstreamStream(cfgForBuild, upstreamProtocolValue, requestPath)
+	if requestPlan.forceUpstreamStream {
+		requestPlan.requestBody, err = forceStreamRequestBody(requestPlan.requestBody, upstreamProtocolValue, testReq.Stream)
+		if err != nil {
+			return nil, nil, err
+		}
+		requestPath = forceStreamRequestPath(requestPath, upstreamProtocolValue)
+		if upstreamProtocolValue == protocol.Gemini {
+			parsedTestURL.Path = forceStreamRequestPath(parsedTestURL.Path, upstreamProtocolValue)
+			query := parsedTestURL.Query()
+			query.Set("alt", "sse")
+			parsedTestURL.RawQuery = query.Encode()
+			requestPlan.fullURL = parsedTestURL.String()
+		}
+		requestPlan.upstreamStreaming = true
+	}
 	requestPlan.requestBody, err = refreshAnthropicCallerCCH(requestPlan.requestBody, callerBody, callerWire)
 	if err != nil {
 		return nil, nil, fmt.Errorf("refresh test request CCH: %w", err)
@@ -2372,22 +2388,6 @@ func (s *Server) buildTestUpstreamRequestPlan(
 		}
 		requestPlan.upstreamStreaming = true
 	}
-	requestPlan.forceUpstreamStream = shouldForceUpstreamStream(cfgForBuild, upstreamProtocolValue, requestPath)
-	if requestPlan.forceUpstreamStream {
-		requestPlan.requestBody, err = forceStreamRequestBody(requestPlan.requestBody, upstreamProtocolValue)
-		if err != nil {
-			return nil, nil, err
-		}
-		requestPath = forceStreamRequestPath(requestPath, upstreamProtocolValue)
-		if upstreamProtocolValue == protocol.Gemini {
-			parsedTestURL.Path = forceStreamRequestPath(parsedTestURL.Path, upstreamProtocolValue)
-			query := parsedTestURL.Query()
-			query.Set("alt", "sse")
-			parsedTestURL.RawQuery = query.Encode()
-			requestPlan.fullURL = parsedTestURL.String()
-		}
-		requestPlan.upstreamStreaming = true
-	}
 	requestPlan.endpointPath = requestPath
 	requestPlan.codeBuddyOAuth = cfgForBuild.UsesCodeBuddyOAuth()
 	// Same model source as prepareTranslatedUpstreamBody, so body shaping and transport agree.
@@ -2401,9 +2401,19 @@ func (s *Server) newTestUpstreamRequest(
 	testReq *testutil.TestChannelRequest,
 	requestPlan *channelTestRequestPlan,
 ) (*http.Request, context.CancelFunc, error) {
-	ctx, timeout := s.newChannelTestTimeoutContextWithTimeouts(reqCtx, testReq.Stream || cfgForBuild.UsesCodeBuddyOAuth() || requestPlan.openCodeFree || requestPlan.forceUpstreamStream, s.resolveProtocolTimeouts(protocol.TransformPlan{
+	timeouts := s.resolveProtocolTimeouts(protocol.TransformPlan{
 		UpstreamProtocol: protocol.Protocol(requestPlan.upstreamProtocol),
-	}))
+	})
+	deadlineCancel := context.CancelFunc(func() {})
+	if requestPlan.forceUpstreamStream && !testReq.Stream && timeouts.NonStreamTimeout > 0 {
+		reqCtx, deadlineCancel = context.WithTimeout(reqCtx, timeouts.NonStreamTimeout)
+	}
+	ctx, timeout := s.newChannelTestTimeoutContextWithTimeouts(reqCtx, testReq.Stream || cfgForBuild.UsesCodeBuddyOAuth() || requestPlan.openCodeFree || requestPlan.forceUpstreamStream, timeouts)
+	cancel := timeout.cancel
+	timeout.cancel = func() {
+		cancel()
+		deadlineCancel()
+	}
 	requestPlan.timeout = timeout
 	req, err := http.NewRequestWithContext(ctx, "POST", requestPlan.fullURL, bytes.NewReader(requestPlan.requestBody))
 	if err != nil {

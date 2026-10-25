@@ -31,12 +31,13 @@ func shouldForceUpstreamStream(cfg *model.Config, upstream protocol.Protocol, pa
 	}
 }
 
-func forceStreamRequestBody(body []byte, upstream protocol.Protocol) ([]byte, error) {
+func forceStreamRequestBody(body []byte, upstream protocol.Protocol, clientStreaming bool) ([]byte, error) {
 	if upstream == protocol.Gemini {
 		return sjson.DeleteBytes(body, "stream")
 	}
 	body, err := sjson.SetBytes(body, "stream", true)
-	if err != nil || upstream != protocol.OpenAI {
+	// Only aggregation needs an extra usage event; preserve streaming clients' options.
+	if err != nil || upstream != protocol.OpenAI || clientStreaming {
 		return body, err
 	}
 	return sjson.SetBytes(body, "stream_options.include_usage", true)
