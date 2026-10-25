@@ -5,6 +5,7 @@ import { SearchableSelect } from '../components/searchable-select'
 import { ApiError, deleteJSON, getJSON, getPaginated, postJSON } from '../lib/api'
 import { isAPITokenRole, shouldHideChannels } from '../lib/auth'
 import { cacheHitRate, formatCompact, formatDateTime, formatSeconds, formatUSD } from '../lib/format'
+import { debugLogUnavailableHint } from '../lib/debug-log'
 import { useSession } from '../lib/session-context'
 import { readQuery, readStored, writeQuery } from '../lib/url-state'
 import { ChannelEditorDialog } from './channels/channel-editor-dialog'
@@ -83,7 +84,7 @@ export function LogsPage() {
   const [notice, setNotice] = useState('')
   const [hidden, setHidden] = useState<string[]>(() => { try { const raw = JSON.parse(localStorage.getItem(COLUMN_KEY) ?? '{}') as Record<string, boolean>; return Object.entries(raw).filter(([, visible]) => visible === false).map(([key]) => key) } catch { return [] } })
   const [columnMenu, setColumnMenu] = useState(false)
-  const [debug, setDebug] = useState<{ logId?: number; activeId?: number } | null>(null)
+  const [debug, setDebug] = useState<{ logId?: number; activeId?: number; message?: string } | null>(null)
   const [keyTest, setKeyTest] = useState<LogRow | null>(null)
   const [editChannel, setEditChannel] = useState<{ id: number; name: string } | null>(null)
   const [aborting, setAborting] = useState<Record<number, number>>({})
@@ -246,7 +247,7 @@ export function LogsPage() {
       })}
       {!rows.length && !visibleActive.length && <tr><td colSpan={visibleColumns.length} className="muted">{loading ? '加载中…' : '暂无日志'}</td></tr>}
       {rows.map((row) => <LogTableRow key={row.id} row={row} show={show} tokenLabel={tokenOptions?.find((option) => option.value === String(row.auth_token_id))?.label} readOnly={readOnly}
-        onChannel={() => clickChannel(row)} onDebug={canDebug(row) ? () => setDebug({ logId: row.id }) : undefined}
+        onChannel={() => clickChannel(row)} onDebug={canDebug(row) ? () => setDebug({ logId: row.id, message: row.message }) : undefined}
         onTestKey={!readOnly && num(row.status_code) !== 200 && row.api_key_used && row.channel_id && row.model ? () => setKeyTest(row) : undefined}
         onDeleteKey={!readOnly && (row.status_code === 401 || row.status_code === 403) && row.api_key_used && row.channel_id ? () => void deleteKey(row) : undefined} />)}
     </tbody></table></div>
@@ -331,7 +332,7 @@ function LogTableRow({ row, show, tokenLabel, readOnly, onChannel, onDebug, onTe
     {show('cost') && <td title={costTip || undefined} className="cell-stack">{num(row.cost) || effective ? <><span>{formatUSD(effective)}</span>{Math.abs(effective - num(row.cost)) > 1e-9 && <span className="table-note">标准 {formatUSD(row.cost)}</span>}{row.service_tier && <span className="badge">{row.service_tier}</span>}</> : ''}</td>}
     {show('info') && <td className="log-message">
       {row.log_source && row.log_source !== 'proxy' && <span className="badge badge-muted">{SOURCE_LABEL[row.log_source] ?? row.log_source}</span>}
-      {onDebug ? <button className="link-button" title="查看调试日志" onClick={onDebug}>{summarizeMessage(row) || '查看详情'}</button> : <span title={row.message}>{summarizeMessage(row) || '-'}</span>}
+      {onDebug ? <button className="link-button" title="查看完整日志与调试详情" onClick={onDebug}>{summarizeMessage(row) || '查看详情'}</button> : <span title={row.message}>{summarizeMessage(row) || '-'}</span>}
     </td>}
   </tr>
 }
@@ -363,7 +364,7 @@ const formatHeaders = (raw: unknown) => {
 
 type Tab = 'original_request' | 'request' | 'response' | 'translated_response'
 
-function DebugLogDialog({ target, onClose }: { target: { logId?: number; activeId?: number } | null; onClose: () => void }) {
+export function DebugLogDialog({ target, onClose }: { target: { logId?: number; activeId?: number; message?: string } | null; onClose: () => void }) {
   const [data, setData] = useState<DebugData | null>(null)
   const [unavailable, setUnavailable] = useState<{ message: string; detail?: Record<string, unknown> } | null>(null)
   const [ended, setEnded] = useState(false)
@@ -428,7 +429,7 @@ function DebugLogDialog({ target, onClose }: { target: { logId?: number; activeI
   const current = isResponse && mergedOn[tab] ? mergedText : sections[tab]
   const tabs: Array<[Tab, string, boolean]> = [['original_request', '原始请求', transformed], ['request', transformed ? '转换后请求' : '请求', true], ['response', '原始响应', true], ['translated_response', '转换后响应', transformed]]
 
-  return <Dialog open={target !== null} onClose={onClose} size="xl" title={target?.activeId != null ? `调试日志 · 进行中请求 #${target.activeId}` : `调试日志 · #${target?.logId ?? ''}`}
+  return <Dialog open={target !== null} onClose={onClose} size="xl" title={target?.activeId != null ? `调试日志 · 进行中请求 #${target.activeId}` : `日志详情 · #${target?.logId ?? ''}`}
     description={target?.activeId != null ? (ended ? '请求已结束，显示最后一次快照' : '正在实时更新…') : undefined}
     footer={<>
       <label className="muted"><input type="checkbox" checked={wrap} onChange={(event) => setWrap(event.target.checked)} /> 自动换行</label>
@@ -436,9 +437,13 @@ function DebugLogDialog({ target, onClose }: { target: { logId?: number; activeI
       <button className="btn" disabled={!current} onClick={() => void navigator.clipboard?.writeText(current)}>复制</button>
       <button className="btn" onClick={onClose}>关闭</button>
     </>}>
+    {target?.message && <section className="cell-stack">
+      <div className="toolbar"><strong>完整日志信息</strong><button className="btn" onClick={() => void navigator.clipboard?.writeText(target.message!)}>复制日志信息</button></div>
+      <pre className="result-pre debug-pre" style={{ whiteSpace: wrap ? 'pre-wrap' : 'pre' }}>{target.message}</pre>
+    </section>}
     {unavailable ? <div className="cell-stack">
-      <p className="error-text">调试日志不可用：{unavailable.message}</p>
-      {unavailable.detail && <p className="muted">{unavailable.detail.reason ? `原因：${String(unavailable.detail.reason)}；` : ''}调试日志{unavailable.detail.debug_log_enabled ? '已开启' : '未开启'}{unavailable.detail.debug_log_retention_minutes != null ? `，保留 ${String(unavailable.detail.debug_log_retention_minutes)} 分钟` : ''}。可在设置页调整 debug_log_enabled 与保留时长。</p>}
+      <p className="error-text">{unavailable.detail?.reason === 'debug_log_not_found' ? '该请求的原始请求/响应未保存或已过期。' : `调试日志加载失败：${unavailable.message}`}</p>
+      {unavailable.detail?.reason === 'debug_log_not_found' && <p className="muted">{debugLogUnavailableHint(unavailable.detail)}</p>}
     </div> : !data ? <p className="muted">加载中…</p> : <>
       <div className="dialog-tabs" role="tablist">{tabs.filter(([, , visible]) => visible).map(([key, label]) => <button key={key} role="tab" aria-selected={tab === key} className={`dialog-tab${tab === key ? ' active' : ''}`} onClick={() => setTab(key)}>{label}</button>)}</div>
       <pre ref={preRef} className="result-pre debug-pre" style={{ whiteSpace: wrap ? 'pre-wrap' : 'pre' }}>{current || '（空）'}</pre>

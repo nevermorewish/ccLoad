@@ -7,7 +7,7 @@ const { buildSync } = require('esbuild');
 // Exercise the actual React page's serializers, including their imported helpers.
 function loadPage(relative) {
   const entry = path.resolve(__dirname, '../src', relative);
-  const result = buildSync({ entryPoints: [entry], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false });
+  const result = buildSync({ entryPoints: [entry], bundle: true, platform: 'node', format: 'cjs', jsx: 'automatic', packages: 'external', write: false });
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', result.outputFiles[0].text)(createRequire(entry), mod, mod.exports);
   return mod.exports;
@@ -27,6 +27,34 @@ test('channel force-upstream-stream switch persists without body rules and can b
 });
 const tokens = loadPage('pages/tokens-page.tsx');
 const reasoning = loadPage('pages/reasoning-settings-dialog.tsx');
+const { debugLogUnavailableHint } = loadPage('lib/debug-log.ts');
+const { DebugLogDialog } = loadPage('pages/logs-page.tsx');
+
+test('debug unavailable settings use SystemSetting values rather than object truthiness', () => {
+  const hint = debugLogUnavailableHint({
+    debug_log_enabled: { key: 'debug_log_enabled', value: 'false' },
+    debug_log_retention_minutes: { key: 'debug_log_retention_minutes', value: '2' },
+  });
+  assert.match(hint, /未开启，保留 2 分钟/);
+  assert.doesNotMatch(hint, /已开启|\[object Object\]/);
+  assert.match(hint, /无法补回/);
+  assert.match(debugLogUnavailableHint({ debug_log_enabled: { value: 'true' }, debug_log_retention_minutes: { value: '15' } }), /已开启，保留 15 分钟/);
+  for (const detail of [undefined, {}, { debug_log_enabled: {}, debug_log_retention_minutes: {} }]) {
+    assert.match(debugLogUnavailableHint(detail), /无法读取/);
+    assert.doesNotMatch(debugLogUnavailableHint(detail), /已开启|未开启|\[object Object\]|NaN/);
+  }
+});
+
+test('log details display the complete persisted error before debug data loads', () => {
+  const pageRequire = createRequire(path.resolve(__dirname, '../src/pages/logs-page.tsx'));
+  const React = pageRequire('react');
+  const { renderToStaticMarkup } = pageRequire('react-dom/server');
+  const message = 'upstream status 400: ' + 'x'.repeat(200) + ' ValidationException: invalid beta flag';
+  const html = renderToStaticMarkup(React.createElement(DebugLogDialog, { target: { logId: 79915, message }, onClose() {} }));
+  assert.ok(html.includes(message));
+  assert.match(html, /完整日志信息/);
+  assert.match(html, /复制日志信息/);
+});
 const routing = loadPage('pages/route-preview-dialog.tsx');
 
 test('System One edit and duplicate retain every key and its scope, priority and multiplier', () => {
