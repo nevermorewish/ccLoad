@@ -644,7 +644,7 @@ func (s *Server) selectChannelModelRow(ctx context.Context, cfg *modelpkg.Config
 }
 
 func possibleUpstreamProtocols(cfg *modelpkg.Config, client protocol.Protocol) []protocol.Protocol {
-	if cfg == nil {
+	if cfg == nil || channelRequiresProtocolBridge(cfg) {
 		return nil
 	}
 	if cfg.IsSystemOne() {
@@ -663,19 +663,16 @@ func possibleUpstreamProtocols(cfg *modelpkg.Config, client protocol.Protocol) [
 		result = append(result, candidate)
 	}
 
-	switch cfg.GetProtocolTransformMode() {
-	case modelpkg.ProtocolTransformModeUpstream:
-		appendProtocol(client)
-	case modelpkg.ProtocolTransformModeLocal:
+	if client == "" {
+		// Model listing has no client request to convert. Keep all declared
+		// native protocols eligible until an actual request chooses one.
 		for _, candidate := range localUpstreamProtocolOrder(cfg.URLs) {
 			appendProtocol(candidate)
 		}
-	default:
+	} else {
 		appendProtocol(client)
-		for _, candidate := range automaticFallbackProtocolOrder {
-			appendProtocol(candidate)
-		}
 	}
+
 	return result
 }
 

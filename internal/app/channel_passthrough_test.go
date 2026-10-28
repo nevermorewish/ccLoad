@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -93,5 +94,125 @@ func TestChannelPassthroughAdminAndWebsocket(t *testing.T) {
 	plan := protocol.TransformPlan{ClientProtocol: protocol.Codex, UpstreamProtocol: protocol.Codex, RequestFamily: protocol.RequestFamilyResponses}
 	if got := responsesBodyForHTTPTransport(&model.Config{}, plan, []byte(`{"generate":true}`)); string(got) != `{"generate":true}` {
 		t.Fatalf("HTTP body changed: %s", got)
+	}
+}
+
+func TestChannelPassthroughLegacyModesIgnoreLearnedProtocols(t *testing.T) {
+	for _, tc := range []struct {
+		mode    string
+		cached  protocol.Protocol
+		status  int
+		failure string
+	}{
+		{"", protocol.Codex, 500, `{"error":{"message":"field messages is required","type":"new_api_error"}}`},
+		{model.ProtocolTransformModeAuto, protocol.Codex, 404, `{"error":{"message":"endpoint not found"}}`},
+		{model.ProtocolTransformModeLocal, protocolUnsupported, 400, `{"error":{"message":"unsupported anthropic-beta"}}`},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			const body = `{ "model":"claude-sonnet-4-6", "messages":[{"role":"user","content":"hello"}], "stream":false,"custom_option":{"keep":true} }`
+			env := setupProxyTestEnv(t, []testChannel{
+				{name: "legacy", upstreamProtocol: "anthropic", protocolTransformMode: tc.mode, models: "claude-sonnet-4-6", customRequestRules: &model.CustomRequestRules{AnthropicPassthrough: true}},
+				{name: "native", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6"},
+			}, map[int]string{0: "https://first.example", 1: "https://second.example"})
+			configs, err := env.store.ListConfigs(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, cfg := range configs {
+				if cfg.Name != "legacy" {
+					continue
+				}
+				// The fixture defaults empty modes to local; restore the actual
+				// legacy value without changing the URL's native protocol.
+				cfg.ProtocolTransformMode = tc.mode
+				if _, err := env.store.UpdateConfig(context.Background(), cfg.ID, cfg); err != nil {
+					t.Fatal(err)
+				}
+				env.server.protocolCapabilities.set(protocolCapabilityKey{
+					channelID: cfg.ID, baseURL: "https://first.example", clientProtocol: protocol.Anthropic,
+					requestFamily: protocol.RequestFamilyMessages, upstreamModel: "claude-sonnet-4-6",
+				}, tc.cached)
+			}
+			var hosts []string
+			env.server.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				hosts = append(hosts, req.URL.Host)
+				wire, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(wire) != body || req.URL.Path != "/v1/messages" || req.URL.RawQuery != "caller=1" {
+					t.Errorf("request changed: url=%s body=%s", req.URL, wire)
+				}
+				status, response := http.StatusOK, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`
+				if req.URL.Host == "first.example" {
+					status, response = tc.status, tc.failure
+				}
+				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(response))}, nil
+			})}
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages?caller=1", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer test-api-key")
+			w := httptest.NewRecorder()
+			env.engine.ServeHTTP(w, req)
+			if w.Code != http.StatusOK || gjson.Get(w.Body.String(), "content.0.text").String() != "ok" {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			if want := []string{"first.example", "second.example"}; !reflect.DeepEqual(hosts, want) {
+				t.Fatalf("hosts=%v, want %v; protocol probing must not retry the first channel", hosts, want)
+			}
+		})
+	}
+}
+
+func TestChannelPassthroughRejectsCrossProtocolPlans(t *testing.T) {
+	srv := newInMemoryServer(t)
+	cfg := &model.Config{URLs: model.ChannelURLs{{URL: "https://gateway.example"}}}
+	input := &testutil.TestChannelRequest{Model: "claude-sonnet-4-6", Content: "hello"}
+	for _, mode := range []string{"", model.ProtocolTransformModeAuto, model.ProtocolTransformModeLocal} {
+		cfg.ProtocolTransformMode = mode
+		if _, _, err := srv.buildTestUpstreamRequestPlan(context.Background(), cfg, "key", input, input.Model, "anthropic", "codex", cfg.GetURLs()[0]); err == nil {
+			t.Fatalf("mode=%q: admin builder accepted protocol conversion", mode)
+		}
+		candidates := resolveConfiguredURLUpstreamProtocols(cfg, model.ChannelURL{URL: cfg.GetURLs()[0], Protocols: []string{"codex"}}, "anthropic")
+		if len(candidates) != 0 {
+			t.Fatalf("mode=%q: incompatible URL accepted: %v", mode, candidates)
+		}
+		candidates = resolveConfiguredURLUpstreamProtocols(cfg, model.ChannelURL{URL: cfg.GetURLs()[0]}, "anthropic")
+		if !reflect.DeepEqual(candidates, []string{"anthropic"}) {
+			t.Fatalf("mode=%q: candidates=%v", mode, candidates)
+		}
+	}
+	srv.client = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("cross-protocol plan reached the network")
+		return nil, nil
+	})}
+	plan := protocol.TransformPlan{ClientProtocol: protocol.Anthropic, UpstreamProtocol: protocol.Codex, NeedsTransform: true}
+	_, _, err := srv.forwardOnceAsyncWithNativeCodexWebsocket(context.Background(), cfg, "key", http.MethodPost, plan, nil, "", cfg.GetURLs()[0], httptest.NewRecorder(), nil, nil, "", nil, false, upstreamWireAliases{})
+	if err == nil || !strings.Contains(err.Error(), "protocol conversion is disabled") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestChannelPassthroughDoesNotTranslateUpstreamResponse(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "json", true: "sse"}[stream], func(t *testing.T) {
+			env := setupProxyTestEnv(t, []testChannel{{name: "native", upstreamProtocol: "openai", models: "test-model"}}, map[int]string{0: "https://gateway.example"})
+			payload := `{"id":"msg_1","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`
+			contentType := "application/json"
+			if stream {
+				contentType = "text/event-stream"
+				payload = "event: message_start\ndata: " + payload + "\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+			}
+			env.server.client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path != "/v1/chat/completions" {
+					t.Errorf("path=%s", req.URL.Path)
+				}
+				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(payload))}, nil
+			})}
+			w := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{"model": "test-model", "messages": []map[string]string{{"role": "user", "content": "hi"}}, "stream": stream}, nil)
+			if w.Code != 200 || w.Body.String() != payload {
+				t.Fatalf("status=%d response=%s, want original=%s", w.Code, w.Body.String(), payload)
+			}
+		})
 	}
 }

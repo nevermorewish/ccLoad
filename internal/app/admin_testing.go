@@ -270,6 +270,9 @@ func newChannelTester(protocolName string) testutil.ChannelTester {
 // validateTestClientProtocol 校验测试请求的客户端协议：决策渠道固定发原生 POST /v1/systemone，
 // 不模拟客户端协议；其余渠道必须声明。
 func validateTestClientProtocol(cfg *model.Config, testReq *testutil.TestChannelRequest) error {
+	if channelRequiresProtocolBridge(cfg) {
+		return errors.New("channel requires protocol conversion, which is disabled")
+	}
 	if cfg.IsSystemOne() {
 		if testReq.ClientProtocol != "" {
 			return errors.New("client_protocol is not supported for System One channels")
@@ -492,6 +495,9 @@ func (s *Server) buildChannelTestRequestPlan(
 	requestedModel string,
 	clientProtocol, upstreamProtocol string,
 ) (*channelTestRequestPlan, error) {
+	if channelRequiresProtocolBridge(cfgForBuild) || clientProtocol != upstreamProtocol {
+		return nil, fmt.Errorf("protocol conversion is disabled: %s -> %s", clientProtocol, upstreamProtocol)
+	}
 	clientTester := newChannelTester(clientProtocol)
 
 	fullURL, headers, body, err := clientTester.Build(cfgForBuild, apiKey, testReq)
@@ -1386,6 +1392,9 @@ func configuredURLAt(cfg *model.Config, index int, runtimeURL string) model.Chan
 
 // 测试渠道API连通性
 func (s *Server) testChannelAPI(reqCtx context.Context, cfg *model.Config, apiKey string, testReq *testutil.TestChannelRequest) map[string]any {
+	if channelRequiresProtocolBridge(cfg) {
+		return map[string]any{"success": false, "error": "channel requires protocol conversion, which is disabled"}
+	}
 	return s.testChannelAPIWithCooldownTarget(reqCtx, cfg, apiKey, testReq, cooldown.NoKeyIndex, false)
 }
 

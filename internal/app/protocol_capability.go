@@ -38,8 +38,10 @@ var localFallbackProtocolOrder = [...]protocol.Protocol{
 	protocol.Gemini,
 }
 
-func supportsProtocolCandidate(client, upstream protocol.Protocol, family protocol.RequestFamily) bool {
-	return client == upstream || protocol.SupportsTransformFamily(client, upstream, family)
+// channelRequiresProtocolBridge identifies transports that cannot send the
+// client's HTTP protocol unchanged, even when their URL advertises it.
+func channelRequiresProtocolBridge(cfg *model.Config) bool {
+	return cfg != nil && (cfg.UsesCursorOAuth() || cfg.UsesZedOAuth() || cfg.UsesAntigravityOAuth())
 }
 
 func configCanUseUpstreamProtocol(cfg *model.Config, upstream protocol.Protocol) bool {
@@ -74,20 +76,6 @@ func localUpstreamProtocolOrder(urls model.ChannelURLs) []protocol.Protocol {
 		return ordered
 	}
 	return append([]protocol.Protocol(nil), localFallbackProtocolOrder[:]...)
-}
-
-func prioritizeProtocolCandidate(candidates []protocol.Protocol, preferred protocol.Protocol) []protocol.Protocol {
-	for idx, candidate := range candidates {
-		if candidate != preferred || idx == 0 {
-			continue
-		}
-		ordered := make([]protocol.Protocol, 0, len(candidates))
-		ordered = append(ordered, candidate)
-		ordered = append(ordered, candidates[:idx]...)
-		ordered = append(ordered, candidates[idx+1:]...)
-		return ordered
-	}
-	return candidates
 }
 
 // nativeProtocolCandidates 只保留不需要协议转换的候选；见 proxyRequestContext.nativeProtocolOnly。
@@ -133,68 +121,20 @@ func protocolCandidatesForURL(
 	)
 }
 
-// protocolCandidatesForURLWithPreference applies an optional native Codex
-// preference for official Codex clients. The preference only changes ordering
-// when the request itself is Codex Responses; it never makes an URL that does
-// not advertise Codex eligible for a native request.
+// protocolCandidatesForURLWithPreference only permits the original client
+// protocol. Legacy transform modes, protocol preferences, and fallback orders
+// cannot enable cross-protocol forwarding.
 func protocolCandidatesForURLWithPreference(
 	entry model.ChannelURL,
-	transformMode string,
+	_ string,
 	clientProtocol protocol.Protocol,
-	requestFamily protocol.RequestFamily,
-	localProtocolOrder []protocol.Protocol,
-	preferNativeCodex bool,
+	_ protocol.RequestFamily,
+	_ []protocol.Protocol,
+	_ bool,
 ) (candidates []protocol.Protocol, declared bool) {
 	declared = !entry.UsesAutomaticProtocolDetection()
-	appendIfSupported := func(upstream protocol.Protocol) {
-		if entry.SupportsProtocol(string(upstream)) &&
-			supportsProtocolCandidate(clientProtocol, upstream, requestFamily) {
-			candidates = append(candidates, upstream)
-		}
-	}
-	nativeCodexPreferred := preferNativeCodex &&
-		clientProtocol == protocol.Codex &&
-		requestFamily == protocol.RequestFamilyResponses
-
-	switch transformMode {
-	case model.ProtocolTransformModeUpstream:
-		if protocol.IsValid(clientProtocol) {
-			appendIfSupported(clientProtocol)
-		}
-	case model.ProtocolTransformModeLocal:
-		if declared {
-			if nativeCodexPreferred {
-				appendIfSupported(protocol.Codex)
-			}
-			for _, configured := range entry.Protocols {
-				upstream := protocol.Protocol(configured)
-				if nativeCodexPreferred && upstream == protocol.Codex {
-					continue
-				}
-				appendIfSupported(upstream)
-			}
-		} else {
-			order := localProtocolOrder
-			if nativeCodexPreferred {
-				order = prioritizeProtocolCandidate(order, protocol.Codex)
-			}
-			for _, upstream := range order {
-				appendIfSupported(upstream)
-			}
-		}
-	default:
-		if protocol.IsValid(clientProtocol) {
-			appendIfSupported(clientProtocol)
-		}
-		for _, upstream := range automaticFallbackProtocolOrder {
-			if upstream == clientProtocol {
-				continue
-			}
-			appendIfSupported(upstream)
-		}
-		if declared && len(candidates) > 1 {
-			candidates = candidates[:1]
-		}
+	if protocol.IsValid(clientProtocol) && entry.SupportsProtocol(string(clientProtocol)) {
+		candidates = []protocol.Protocol{clientProtocol}
 	}
 	return candidates, declared
 }

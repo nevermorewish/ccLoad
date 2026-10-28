@@ -1119,97 +1119,6 @@ func decodeSSEPayload(data []byte) (map[string]any, bool) {
 	return payload, true
 }
 
-func maybePrepareDynamicStreamTransform(reqCtx *requestContext, resp *http.Response) (protocol.Protocol, bool, error) {
-	if reqCtx == nil || resp == nil || resp.Body == nil {
-		return "", false, nil
-	}
-	if !reqCtx.isStreaming {
-		return "", false, nil
-	}
-	// Images responses have a known wire format and may start with a multi-MiB
-	// image. Protocol probing must not buffer that entire first event.
-	if reqCtx.transformPlan.RequestFamily == protocol.RequestFamilyImages {
-		return "", false, nil
-	}
-	if !responseIsSSE(resp, true) {
-		return "", false, nil
-	}
-	resp.Header.Set("Content-Type", "text/event-stream")
-	// Repair before locating the first event. Glued Codex frames have no \n\n
-	// until a later event; wrapping first lets firstSSEEventEnd see a real
-	// boundary. Known Anthropic/OpenAI upstreams skip the filter.
-	if reqCtx.transformPlan.UpstreamProtocol == "" || reqCtx.transformPlan.UpstreamProtocol == protocol.Codex {
-		resp.Body = wrapCodexSSEBody(resp.Body)
-	}
-
-	prefix, err := readSSEPrefixThroughFirstEvent(resp.Body)
-	if len(prefix) > 0 {
-		prependToBody(resp, prefix)
-	}
-	if err != nil {
-		return "", false, err
-	}
-
-	return applyDetectedResponseProtocol(reqCtx, detectProtocolFromSSEPrefix(prefix))
-}
-
-func maybePrepareDynamicNonStreamTransform(reqCtx *requestContext, resp *http.Response) (protocol.Protocol, bool, error) {
-	if reqCtx == nil || resp == nil || resp.Body == nil || reqCtx.isStreaming {
-		return "", false, nil
-	}
-	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	if !strings.Contains(contentType, "application/json") && !strings.Contains(contentType, "text/plain") {
-		return "", false, nil
-	}
-
-	rawBody, err := io.ReadAll(resp.Body)
-	if len(rawBody) > 0 {
-		prependToBody(resp, rawBody)
-	}
-	if err != nil {
-		return "", false, err
-	}
-
-	detected := detectProtocolFromJSONBody(rawBody)
-	return applyDetectedResponseProtocol(reqCtx, detected)
-}
-
-func applyDetectedResponseProtocol(reqCtx *requestContext, detected protocol.Protocol) (protocol.Protocol, bool, error) {
-	if detected == "" {
-		return "", false, nil
-	}
-	clientProtocol := reqCtx.transformPlan.ClientProtocol
-	if clientProtocol == "" {
-		clientProtocol = reqCtx.clientProtocol
-	}
-	if clientProtocol == "" {
-		return detected, false, nil
-	}
-	if detected == clientProtocol {
-		plan := reqCtx.transformPlan
-		plan.ClientProtocol = clientProtocol
-		plan.UpstreamProtocol = detected
-		plan.NeedsTransform = false
-		reqCtx.transformPlan = plan
-		reqCtx.clientProtocol = clientProtocol
-		reqCtx.upstreamProtocol = detected
-		return detected, false, nil
-	}
-	if !protocol.SupportsTransform(detected, clientProtocol) {
-		return detected, false, fmt.Errorf("no response transform for detected protocol mismatch: %s -> %s", detected, clientProtocol)
-	}
-
-	plan := reqCtx.transformPlan
-	plan.ClientProtocol = clientProtocol
-	plan.UpstreamProtocol = detected
-	plan.NeedsTransform = true
-	reqCtx.transformPlan = plan
-	reqCtx.clientProtocol = clientProtocol
-	reqCtx.upstreamProtocol = detected
-
-	return detected, true, nil
-}
-
 func readSSEPrefixThroughFirstEvent(r io.Reader) ([]byte, error) {
 	var buf bytes.Buffer
 	tmp := make([]byte, SSEBufferSize)
@@ -1262,18 +1171,6 @@ func detectProtocolFromSSEEvent(event []byte) protocol.Protocol {
 	}
 	payload, ok := decodeSSEPayload(data)
 	if !ok {
-		return ""
-	}
-	return detectProtocolFromJSONPayload(payload)
-}
-
-func detectProtocolFromJSONBody(raw []byte) protocol.Protocol {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 {
-		return ""
-	}
-	var payload map[string]any
-	if err := sonic.Unmarshal(raw, &payload); err != nil {
 		return ""
 	}
 	return detectProtocolFromJSONPayload(payload)
@@ -1431,74 +1328,8 @@ func (s *Server) handleSuccessResponse(
 	if reqCtx.transformPlan.Streaming && isImagesResponsesPlan(reqCtx.transformPlan) {
 		return finishStreaming(s.handleImagesResponsesStreamSuccessResponse(reqCtx, resp, hdrClone, w, readStats, observer))
 	}
-	if reqCtx.isStreaming && s.protocolRegistry != nil {
-		detectedProtocol, transform, err := maybePrepareDynamicStreamTransform(reqCtx, resp)
-		if detectedProtocol != "" {
-			upstreamProtocol = string(detectedProtocol)
-		}
-		if detectedProtocol == protocol.Codex && !isSSE {
-			// maybePrepareDynamicStreamTransform may have already wrapped it
-			// when UpstreamProtocol was Codex; wrapCodexSSEBody is idempotent.
-			resp.Body = wrapCodexSSEBody(resp.Body)
-			isSSE = true
-		}
-		if err != nil {
-			// Protocol probing reads the upstream stream before the normal
-			// forwarding loop. If an operator abort closes that read, preserve
-			// the cancellation cause and classify it as an incomplete upstream
-			// stream so Responses WebSocket can terminate the turn.
-			if cause := context.Cause(reqCtx.ctx); cause != nil {
-				err = cause
-			}
-			result := &fwResult{
-				Status:         resp.StatusCode,
-				UpstreamStatus: resp.StatusCode,
-				Header:         hdrClone,
-				FirstByteTime:  responseFirstByteSec(reqCtx, readStats),
-				BytesReceived:  readStats.totalBytes,
-			}
-			if diagMsg := buildStreamDiagnostics(err, readStats, false, upstreamProtocol, resp.Header.Get("Content-Type")); diagMsg != "" {
-				result.StreamDiagMsg = diagMsg
-			}
-			return finishStreaming(result, reqCtx.Duration().Seconds(), err)
-		}
-		if transform {
-			return finishStreaming(s.handleTranslatedStreamSuccessResponse(reqCtx, resp, hdrClone, w, string(detectedProtocol), readStats, observer))
-		}
-	}
-
-	if !reqCtx.isStreaming && s.protocolRegistry != nil {
-		detectedProtocol, transform, err := maybePrepareDynamicNonStreamTransform(reqCtx, resp)
-		if detectedProtocol != "" {
-			upstreamProtocol = string(detectedProtocol)
-		}
-		if err != nil {
-			return &fwResult{
-				Status:         resp.StatusCode,
-				UpstreamStatus: resp.StatusCode,
-				Header:         hdrClone,
-				FirstByteTime:  responseFirstByteSec(reqCtx, readStats),
-				BytesReceived:  readStats.totalBytes,
-			}, reqCtx.Duration().Seconds(), err
-		}
-		if transform {
-			return s.handleTranslatedNonStreamSuccessResponse(reqCtx, resp, hdrClone, w, string(detectedProtocol), readStats)
-		}
-	}
-
-	if reqCtx.isStreaming &&
-		s.protocolRegistry != nil &&
-		(reqCtx.transformPlan.NeedsTransform || reqCtx.antigravityOAuth) &&
-		(strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") ||
-			strings.Contains(resp.Header.Get("Content-Type"), "text/plain")) {
-		return finishStreaming(s.handleTranslatedStreamSuccessResponse(reqCtx, resp, hdrClone, w, upstreamProtocol, readStats, observer))
-	}
-
-	if !reqCtx.isStreaming &&
-		s.protocolRegistry != nil &&
-		(reqCtx.transformPlan.NeedsTransform || reqCtx.antigravityOAuth || reqCtx.responsesCompaction != nil) {
-		return s.handleTranslatedNonStreamSuccessResponse(reqCtx, resp, hdrClone, w, upstreamProtocol, readStats)
-	}
+	// Forward successful responses in the original protocol. Never infer a
+	// different response protocol and silently translate it for the client.
 
 	// [FIX] 流式请求：禁用 WriteTimeout，避免长时间流被服务器自己切断
 	// Go 1.20+ http.ResponseController 支持动态调整 WriteDeadline
@@ -2508,6 +2339,12 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 	wireAliases upstreamWireAliases,
 ) (*fwResult, float64, error) {
 	clientBody := plan.OriginalBody
+	if channelRequiresProtocolBridge(cfg) || plan.NeedsTransform || (plan.ClientProtocol != "" && plan.ClientProtocol != plan.UpstreamProtocol) {
+		return nil, 0, &protocol.RequestTranslationError{
+			From: plan.ClientProtocol, To: plan.UpstreamProtocol,
+			Err: errors.New("protocol conversion is disabled"),
+		}
+	}
 	var compaction *responsesCompactionRequest
 	if plan.ClientProtocol == protocol.Codex {
 		expanded, err := expandResponsesCompaction(plan.TranslatedBody)
@@ -4365,7 +4202,6 @@ func (s *Server) attemptKeyAcrossURLs(
 	var urlPolicy channelURLAttemptPolicy
 	var deferredFallbackLog *model.LogEntry
 	var keyTargetSkipped bool
-	capabilityModel := s.protocolCapabilityModel(cfg, reqCtx, requestFamily)
 	defer func() {
 		if deferredFallbackLog != nil {
 			s.AddLogAsync(deferredFallbackLog)
@@ -4401,45 +4237,19 @@ func (s *Server) attemptKeyAcrossURLs(
 		})
 
 		shouldDeferChannelCooldown := urlIdx < len(sortedURLs)-1
-		capabilityKey := protocolCapabilityKey{
-			channelID: cfg.ID, baseURL: attemptBaseURL,
-			clientProtocol: clientProtocol, requestFamily: requestFamily,
-			upstreamModel: capabilityModel,
-		}
+
 		if urlEntry.idx < 0 || urlEntry.idx >= len(cfg.URLs) {
 			return nil, nil, fmt.Errorf("invalid URL selector index %d for channel %d", urlEntry.idx, cfg.ID)
 		}
-		protocolCandidates, declared := protocolCandidatesForURLWithPreference(
+		protocolCandidates, _ := protocolCandidatesForURLWithPreference(
 			cfg.URLs[urlEntry.idx], transformMode, clientProtocol, requestFamily, localProtocolOrder,
 			reqCtx.codexClient,
 		)
-		if _, bridge := s.imagesResponsesModel(cfg, reqCtx); bridge &&
-			cfg.URLs[urlEntry.idx].SupportsProtocol(string(protocol.Codex)) {
-			// Hosted image tools are a provider-specific Images -> Responses
-			// bridge, not a general protocol conversion capability.
-			protocolCandidates = []protocol.Protocol{protocol.Codex}
-			declared = true
-		}
-		if _, direct := s.codexDirectImagesModel(cfg, reqCtx); direct &&
-			cfg.URLs[urlEntry.idx].SupportsProtocol(string(protocol.Codex)) {
-			protocolCandidates = []protocol.Protocol{protocol.Codex}
-			declared = true
-		}
 		if cfg.IsSystemOne() {
 			// System One 渠道不声明聊天协议，只原样透传 /v1/systemone。
 			protocolCandidates = []protocol.Protocol{protocol.SystemOne}
-			declared = true
 		}
-		learnCapability := transformMode == model.ProtocolTransformModeAuto && !declared
-		if learnCapability {
-			if cachedProtocol, known := s.protocolCapabilities.get(capabilityKey); known {
-				if cachedProtocol == protocolUnsupported {
-					protocolCandidates = nil
-				} else {
-					protocolCandidates = prioritizeProtocolCandidate(protocolCandidates, cachedProtocol)
-				}
-			}
-		}
+
 		if selectedAPIKey != nil && len(selectedAPIKey.DetectedModels) > 0 {
 			eligible := protocolCandidates[:0]
 			for _, upstreamProtocol := range protocolCandidates {
@@ -4454,9 +4264,7 @@ func (s *Server) attemptKeyAcrossURLs(
 			}
 			protocolCandidates = eligible
 		}
-		if reqCtx.nativeProtocolOnly {
-			protocolCandidates = nativeProtocolCandidates(protocolCandidates, clientProtocol)
-		}
+		protocolCandidates = nativeProtocolCandidates(protocolCandidates, clientProtocol)
 		if reqCtx.preserveSamplingParameters {
 			protocolCandidates = samplingProtocolCandidates(protocolCandidates, clientProtocol, cfg)
 		}
@@ -4477,8 +4285,6 @@ func (s *Server) attemptKeyAcrossURLs(
 
 		var result *proxyResult
 		var nextAction cooldown.Action
-		stableEndpointUnsupported := true
-		requestScopedMiss := false
 		for protocolIdx, upstreamProtocol := range protocolCandidates {
 			s.activeRequests.SetUpstreamProtocol(reqCtx.activeReqID, string(upstreamProtocol))
 			var attemptErr error
@@ -4495,25 +4301,18 @@ func (s *Server) attemptKeyAcrossURLs(
 				return result, nil, nil
 			}
 			if cfg.AntigravityCredits || result == nil || !result.protocolCapabilityMissing {
-				// 前一协议只是不适配本次请求时，回退结果不能代表端点能力：
-				// 写入会把同一渠道/模型的其他会话也钉到回退协议上。
-				if learnCapability && !requestScopedMiss {
-					s.protocolCapabilities.set(capabilityKey, upstreamProtocol)
-				}
 				break
 			}
-			requestScopedMiss = requestScopedMiss || result.requestScopedProtocolMiss
-			if !shouldCacheProtocolUnsupported(result.status) {
-				stableEndpointUnsupported = false
+			if requestFamily == protocol.RequestFamilyAlphaSearch && shouldCacheProtocolUnsupported(result.status) {
+				s.protocolCapabilities.set(protocolCapabilityKey{
+					channelID: cfg.ID, baseURL: attemptBaseURL,
+					clientProtocol: clientProtocol, requestFamily: requestFamily,
+				}, protocolUnsupported)
 			}
 			if protocolIdx < len(protocolCandidates)-1 {
 				s.activeRequests.Retry(reqCtx.activeReqID)
-				continue
 			}
-			if (learnCapability || requestFamily == protocol.RequestFamilyAlphaSearch) &&
-				stableEndpointUnsupported {
-				s.protocolCapabilities.set(capabilityKey, protocolUnsupported)
-			}
+
 		}
 
 		if result != nil {
@@ -4663,6 +4462,13 @@ func prioritizePinnedCodexWebsocketURL(
 }
 
 func (s *Server) tryChannelWithKeys(ctx context.Context, cfg *model.Config, reqCtx *proxyRequestContext, w http.ResponseWriter) (result *proxyResult, err error) {
+	if channelRequiresProtocolBridge(cfg) {
+		return &proxyResult{
+			status: http.StatusBadRequest, channelID: &cfg.ID,
+			body:       []byte(`{"error":{"message":"channel requires protocol conversion, which is disabled","type":"invalid_request_error"}}`),
+			nextAction: cooldown.ActionRetryChannel, protocolCapabilityMissing: true,
+		}, nil
+	}
 	defer func() { filterOAuthQuotaResult(cfg, result) }()
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
