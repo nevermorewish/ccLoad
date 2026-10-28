@@ -567,8 +567,8 @@ func applyAnthropicTestOptions(body []byte, req *TestChannelRequest) ([]byte, er
 	type anthropicRequestBody struct {
 		Model        sonic.NoCopyRawMessage `json:"model"`
 		Messages     sonic.NoCopyRawMessage `json:"messages"`
-		System       sonic.NoCopyRawMessage `json:"system"`
-		Tools        sonic.NoCopyRawMessage `json:"tools"`
+		System       sonic.NoCopyRawMessage `json:"system,omitempty"`
+		Tools        sonic.NoCopyRawMessage `json:"tools,omitempty"`
 		MaxTokens    int                    `json:"max_tokens,omitempty"`
 		Temperature  *float64               `json:"temperature,omitempty"`
 		TopP         *float64               `json:"top_p,omitempty"`
@@ -597,8 +597,10 @@ func applyAnthropicTestOptions(body []byte, req *TestChannelRequest) ([]byte, er
 
 	appendRawArrayItem := func(raw sonic.NoCopyRawMessage, item any) (sonic.NoCopyRawMessage, error) {
 		var items []sonic.NoCopyRawMessage
-		if err := sonic.Unmarshal(raw, &items); err != nil {
-			return nil, err
+		if len(raw) > 0 {
+			if err := sonic.Unmarshal(raw, &items); err != nil {
+				return nil, err
+			}
 		}
 		encoded, err := sonic.Marshal(item)
 		if err != nil {
@@ -1025,7 +1027,11 @@ func (t *AnthropicTester) Build(cfg *model.Config, apiKey string, req *TestChann
 	testContent := req.Content
 	sessionID := req.ResolveSessionID()
 
-	body, err := buildRequestFromTemplate("anthropic", map[string]any{
+	template := "anthropic"
+	if cfg.PassthroughEnabled() {
+		template = "anthropic-passthrough"
+	}
+	body, err := buildRequestFromTemplate(template, map[string]any{
 		"MODEL":   req.Model,
 		"STREAM":  req.Stream,
 		"CONTENT": testContent,
@@ -1046,7 +1052,9 @@ func (t *AnthropicTester) Build(cfg *model.Config, apiKey string, req *TestChann
 	h.Set("Content-Type", "application/json")
 	h.Set("Authorization", "Bearer "+apiKey)
 	h.Set("anthropic-version", "2023-06-01")
-	h.Set("X-Claude-Code-Session-Id", sessionID)
+	if !cfg.PassthroughEnabled() {
+		h.Set("X-Claude-Code-Session-Id", sessionID)
+	}
 	if req.Stream {
 		h.Set("Accept", "text/event-stream")
 	}

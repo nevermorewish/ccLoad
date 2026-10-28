@@ -551,9 +551,12 @@ type CustomBodyRule struct {
 
 // CustomRequestRules 渠道级自定义请求改写规则集
 type CustomRequestRules struct {
-	ForceUpstreamStream bool               `json:"force_upstream_stream,omitempty"`
-	Headers             []CustomHeaderRule `json:"headers,omitempty"`
-	Body                []CustomBodyRule   `json:"body,omitempty"`
+	ForceUpstreamStream bool  `json:"force_upstream_stream,omitempty"`
+	Passthrough         *bool `json:"passthrough,omitempty"`
+	// Deprecated: old Anthropic-only clients may still send this field.
+	AnthropicPassthrough bool               `json:"anthropic_passthrough,omitempty"`
+	Headers              []CustomHeaderRule `json:"headers,omitempty"`
+	Body                 []CustomBodyRule   `json:"body,omitempty"`
 }
 
 // IsEmpty 当两类规则均为空时返回 true
@@ -561,7 +564,7 @@ func (r *CustomRequestRules) IsEmpty() bool {
 	if r == nil {
 		return true
 	}
-	return !r.ForceUpstreamStream && len(r.Headers) == 0 && len(r.Body) == 0
+	return !r.ForceUpstreamStream && r.Passthrough == nil && !r.AnthropicPassthrough && len(r.Headers) == 0 && len(r.Body) == 0
 }
 
 // Clone returns an independent copy suitable for config-cache boundaries.
@@ -570,9 +573,14 @@ func (r *CustomRequestRules) Clone() *CustomRequestRules {
 		return nil
 	}
 	out := &CustomRequestRules{
-		ForceUpstreamStream: r.ForceUpstreamStream,
-		Headers:             append([]CustomHeaderRule(nil), r.Headers...),
-		Body:                make([]CustomBodyRule, len(r.Body)),
+		ForceUpstreamStream:  r.ForceUpstreamStream,
+		AnthropicPassthrough: r.AnthropicPassthrough,
+		Headers:              append([]CustomHeaderRule(nil), r.Headers...),
+		Body:                 make([]CustomBodyRule, len(r.Body)),
+	}
+	if r.Passthrough != nil {
+		enabled := *r.Passthrough
+		out.Passthrough = &enabled
 	}
 	for i, rule := range r.Body {
 		out.Body[i] = rule
@@ -1303,6 +1311,13 @@ func extractVersionNumbers(model string) []int {
 	}
 
 	return nums
+}
+
+// PassthroughEnabled preserves API-key request wire by default, including old
+// channels without rules. OAuth transports retain their provider contracts.
+func (c *Config) PassthroughEnabled() bool {
+	return c != nil && c.GetAuthType() == AuthTypeAPIKey &&
+		(c.CustomRequestRules == nil || c.CustomRequestRules.Passthrough == nil || *c.CustomRequestRules.Passthrough)
 }
 
 // HeaderRules 返回自定义请求头规则，nil-safe

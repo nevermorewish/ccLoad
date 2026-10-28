@@ -226,8 +226,9 @@ func (s *Server) buildProxyRequest(
 		callerBody = body
 	}
 	callerBodyIsAnthropic := reqCtx == nil || !reqCtx.transformPlan.NeedsTransform
+	passthrough := cfg.PassthroughEnabled()
 	var callerWire anthropicCallerWire
-	if isAnthropicMessagesRequest(upstreamProtocol, requestPath) || isAnthropicCountTokensRequest(upstreamProtocol, requestPath) {
+	if !passthrough && (isAnthropicMessagesRequest(upstreamProtocol, requestPath) || isAnthropicCountTokensRequest(upstreamProtocol, requestPath)) {
 		callerWire = classifyAnthropicRequestCallerWire(callerBody, hdr, upstreamProtocol, requestPath, callerBodyIsAnthropic)
 	}
 	callerOwnsAnthropicWire := callerWire.ownsWire()
@@ -254,7 +255,7 @@ func (s *Server) buildProxyRequest(
 	if upstreamProtocol == protocol.SystemOne {
 		upstreamURL = systemOneURL(baseURL)
 	}
-	if !isOpenCodeAPIKeyEndpoint(cfg, baseURL) && (isAnthropicClaudeCodeMessagesRequest(cfg, upstreamProtocol, requestPath) ||
+	if !passthrough && !isOpenCodeAPIKeyEndpoint(cfg, baseURL) && (isAnthropicClaudeCodeMessagesRequest(cfg, upstreamProtocol, requestPath) ||
 		isAnthropicCountTokensRequest(upstreamProtocol, requestPath)) {
 		upstreamURL = buildAnthropicClaudeCodeURL(baseURL, requestPath, upstreamQuery)
 	}
@@ -342,7 +343,7 @@ func (s *Server) buildProxyRequest(
 			return nil, err
 		}
 	}
-	if reqCtx != nil {
+	if reqCtx != nil && !passthrough {
 		// Complete replay and incremental WS bodies must share the same aliases.
 		body, reqCtx.openCodeResponses = prepareOpenCodeResponsesRequest(parsedUpstreamURL, upstreamProtocol, requestPath, body, reqCtx.openCodeResponses)
 	}
@@ -358,7 +359,7 @@ func (s *Server) buildProxyRequest(
 	}
 
 	anthropicClaudeCodeWire := isAnthropicClaudeCodeMessagesRequest(cfg, upstreamProtocol, requestPath) && !isOpenCodeAPIKeyEndpoint(cfg, parsedUpstreamURL.String())
-	if isAnthropicMessagesRequest(upstreamProtocol, requestPath) {
+	if !passthrough && isAnthropicMessagesRequest(upstreamProtocol, requestPath) {
 		if err = validateAnthropicLegacySystemRequestForUpstream(body, callerOwnsAnthropicWire, parsedUpstreamURL); err != nil {
 			return nil, err
 		}
@@ -366,7 +367,7 @@ func (s *Server) buildProxyRequest(
 
 	// 1.8 Codex Responses 缓存提示：向 body 注入 prompt_cache_key
 	codexSessionID := ""
-	if !cfg.UsesXAIOAuth() {
+	if !passthrough && !cfg.UsesXAIOAuth() {
 		codexSessionID = resolveCodexSessionHint(reqCtx, body, apiKey, hdr)
 		if codexSessionID != "" {
 			body = injectCodexPromptCacheKey(body, codexSessionID)
@@ -400,8 +401,8 @@ func (s *Server) buildProxyRequest(
 	}
 
 	// 3. Codex 使用专用白名单；其他上游继续执行通用反代复制。
-	if upstreamProtocol == protocol.Codex || (cfg.UsesCodexOAuth() &&
-		(requestPath == "/images/generations" || requestPath == "/images/edits")) {
+	if !passthrough && (upstreamProtocol == protocol.Codex || (cfg.UsesCodexOAuth() &&
+		(requestPath == "/images/generations" || requestPath == "/images/edits"))) {
 		copyCodexHTTPHeaders(req.Header, hdr)
 		// 只映射客户端原始头；自定义规则稍后写入的值按运维配置原样发送。
 		scopeCodexAccountIdentityHeaders(req.Header, codexIdentityNamespace)
@@ -411,7 +412,7 @@ func (s *Server) buildProxyRequest(
 
 	// 4. 注入普通渠道的静态认证头。Codex 的认证与官方客户端身份必须在
 	// 自定义 Header 规则之后重建，否则规则可以篡改渠道身份。
-	if !cfg.UsesOAuth() && upstreamProtocol != protocol.Codex {
+	if !cfg.UsesOAuth() && (passthrough || upstreamProtocol != protocol.Codex) {
 		injectAPIKeyHeaders(req, apiKey, runtimeUpstreamProtocol(reqCtx))
 	}
 
@@ -453,8 +454,8 @@ func (s *Server) buildProxyRequest(
 		} else {
 			injectXAIResponsesHeaders(req, apiKey, reqCtx.executionIdentity)
 		}
-	} else if upstreamProtocol == protocol.Codex || (cfg.UsesCodexOAuth() &&
-		(requestPath == "/images/generations" || requestPath == "/images/edits")) {
+	} else if !passthrough && (upstreamProtocol == protocol.Codex || (cfg.UsesCodexOAuth() &&
+		(requestPath == "/images/generations" || requestPath == "/images/edits"))) {
 		if isCodexOAuthResponsesRequest(cfg, upstreamProtocol, requestPath) {
 			upstreamStreaming = true
 		}
@@ -463,13 +464,13 @@ func (s *Server) buildProxyRequest(
 		// injectAntigravityOAuthHeaders 整体替换 req.Header，同样属于重建路径。
 		injectAntigravityOAuthHeaders(req, cfg, s.antigravityUserAgent())
 		wireRebuilt = true
-	} else if isAnthropicCountTokensRequest(upstreamProtocol, requestPath) {
+	} else if !passthrough && isAnthropicCountTokensRequest(upstreamProtocol, requestPath) {
 		injectAnthropicCountTokensHeadersWithFingerprint(req, cfg, apiKey, body, callerOwnsAnthropicWire, oauthFingerprint, hdr)
 		wireRebuilt = true
 	} else if isAnthropicOAuthMessagesRequest(cfg, upstreamProtocol, requestPath) {
 		injectAnthropicOAuthHeadersWithFingerprint(req, cfg, apiKey, body, callerOwnsAnthropicWire, oauthFingerprint, hdr)
 		wireRebuilt = true
-	} else if isZAICodingPlanRequest(cfg, upstreamProtocol, requestPath) {
+	} else if !passthrough && isZAICodingPlanRequest(cfg, upstreamProtocol, requestPath) {
 		injectZAICodingPlanHeaders(req, cfg, apiKey, body, hdr)
 		wireRebuilt = true
 	} else if anthropicClaudeCodeWire {
@@ -480,7 +481,7 @@ func (s *Server) buildProxyRequest(
 		anthropicSessionIDFromBody(body) == mappedAnthropicSessionID {
 		setRawHeader(req.Header, "X-Claude-Code-Session-Id", mappedAnthropicSessionID)
 	}
-	if isAnthropicCountTokensRequest(upstreamProtocol, requestPath) && isOfficialAnthropicURL(parsedUpstreamURL) {
+	if !passthrough && isAnthropicCountTokensRequest(upstreamProtocol, requestPath) && isOfficialAnthropicURL(parsedUpstreamURL) {
 		req.Header.Del("X-Claude-Code-Session-Id")
 	}
 
@@ -500,18 +501,18 @@ func (s *Server) buildProxyRequest(
 
 	// 6.2 anyrouter 渠道：确保 anthropic-beta 包含 context-1m。必须排在指纹重建
 	// 之后——重建清空了整个请求头，之前注入的 beta flag 会随之丢失。
-	if runtimeUpstreamProtocol(reqCtx) == util.ProtocolAnthropic &&
+	if !passthrough && runtimeUpstreamProtocol(reqCtx) == util.ProtocolAnthropic &&
 		isAnyrouterChannel(cfg) {
 		injectAnthropicBetaFlag(req, "context-1m-2025-08-07")
 	}
-	if isOpenCodeAPIKeyEndpoint(cfg, req.URL.String()) {
+	if !passthrough && isOpenCodeAPIKeyEndpoint(cfg, req.URL.String()) {
 		executionIdentity := ""
 		if reqCtx != nil {
 			executionIdentity = reqCtx.executionIdentity
 		}
 		injectOpenCodeHeaders(req, cfg, upstreamProtocol, apiKey, hdr, executionIdentity)
 	}
-	if isAnthropicClaudeCodeMessagesRequest(cfg, upstreamProtocol, requestPath) || isAnthropicCountTokensRequest(upstreamProtocol, requestPath) {
+	if !passthrough && (isAnthropicClaudeCodeMessagesRequest(cfg, upstreamProtocol, requestPath) || isAnthropicCountTokensRequest(upstreamProtocol, requestPath)) {
 		// Header rules and the OpenCode wire have the last word on anthropic-beta.
 		// Strip fields gated by absent tokens from the actual wire body, then
 		// refresh any legacy CCH.
@@ -551,6 +552,14 @@ func (s *Server) prepareTranslatedUpstreamBody(
 	wireBodyRulesApplied bool,
 	callerBodyIsAnthropic bool,
 ) ([]byte, string, error) {
+	if cfg.PassthroughEnabled() {
+		// Keep native bytes (or the protocol converter's output). Only explicit
+		// operator body rules apply; do not inject/normalize Claude Code fields.
+		if !wireBodyRulesApplied {
+			body = applyBodyRules(headers.Get("Content-Type"), body, cfg.BodyRules())
+		}
+		return body, "", nil
+	}
 	if isOpenCodeInferencePath(upstreamProtocol, requestPath) && target != nil && isOpenCodeAPIKeyEndpoint(cfg, target.String()) {
 		if wireBodyRulesApplied {
 			return body, "", nil
@@ -2566,7 +2575,7 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 			openCodePath = buildGeminiGeneratePath(plan.RequestModel(), plan.Streaming)
 		}
 	}
-	openCodeFree := isOpenCodeFreeRequest(cfg, baseURL, plan.UpstreamProtocol, openCodePath, plan.RequestModel())
+	openCodeFree := !cfg.PassthroughEnabled() && isOpenCodeFreeRequest(cfg, baseURL, plan.UpstreamProtocol, openCodePath, plan.RequestModel())
 	forceUpstreamStream := compaction == nil && shouldForceUpstreamStream(cfg, plan.UpstreamProtocol, openCodePath)
 	upstreamStreaming := isStreamingRequest(plan.UpstreamPath, plan.TranslatedBody) || isCodeBuddyChatRequest(cfg, plan.UpstreamProtocol) || openCodeFree || forceUpstreamStream
 	timeouts := s.resolveProtocolTimeouts(plan)
@@ -2689,7 +2698,9 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 			wsHeaderSource = hdr.Clone()
 			scopeCodexAccountIdentityHeaders(wsHeaderSource, namespace)
 		}
-		prepareCodexWebsocketInputHeaders(replayReq.Header, wsHeaderSource, cfg.HeaderRules())
+		if !cfg.PassthroughEnabled() {
+			prepareCodexWebsocketInputHeaders(replayReq.Header, wsHeaderSource, cfg.HeaderRules())
+		}
 		incrementalSourceBody := bytes.Clone(native.incrementalBody)
 		// The replay request and the incremental request do not necessarily share
 		// the same body provenance. A retry replay is built from an already
@@ -2708,7 +2719,9 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 		if errBuild != nil {
 			return nil, 0, errBuild
 		}
-		prepareCodexWebsocketInputHeaders(incrementalReq.Header, wsHeaderSource, cfg.HeaderRules())
+		if !cfg.PassthroughEnabled() {
+			prepareCodexWebsocketInputHeaders(incrementalReq.Header, wsHeaderSource, cfg.HeaderRules())
+		}
 		// buildProxyRequest applies body rules and prompt_cache_key; send the
 		// resulting wire body, not the pre-normalized caller input.
 		incrementalBody := stripInjectedCodexOAuthInstructionsForWebsocket(
@@ -2946,6 +2959,9 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 // unknown/unsupported-parameter response may trigger a type-scoped retry.
 // prepareCodexOAuthHTTPBody removes HTTP-only fields; WS continuation needs them.
 func responsesBodyForHTTPTransport(cfg *model.Config, plan protocol.TransformPlan, body []byte) []byte {
+	if cfg.PassthroughEnabled() {
+		return body
+	}
 	body = prepareCodexOAuthHTTPBody(cfg, plan.UpstreamProtocol, plan.UpstreamPath, body)
 	if plan.ClientProtocol != protocol.Codex || plan.UpstreamProtocol != protocol.Codex ||
 		plan.RequestFamily != protocol.RequestFamilyResponses {
@@ -3768,6 +3784,9 @@ func retryBodyForRejectedRequest(
 	plan protocol.TransformPlan,
 	res *fwResult,
 ) ([]byte, string, bool) {
+	if cfg.PassthroughEnabled() {
+		return nil, "", false
+	}
 	if retryBody, strategy, ok := usageSemanticsRetryBodyFor400(upstreamProtocol, plan, res); ok {
 		return retryBody, strategy, true
 	}
@@ -4011,6 +4030,9 @@ func codexBodyWithoutThinking(body []byte) ([]byte, bool) {
 }
 
 func prepareCodexResponsesBodyForUpstream(cfg *model.Config, upstreamProtocol protocol.Protocol, requestPath string, body []byte) []byte {
+	if cfg.PassthroughEnabled() {
+		return body
+	}
 	if upstreamProtocol != protocol.Codex ||
 		protocol.DetectRequestFamily(requestPath) != protocol.RequestFamilyResponses {
 		return body

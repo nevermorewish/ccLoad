@@ -50,7 +50,7 @@ func TestProxy_OpenAIChatMaxCompletionTokens(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			env := setupProxyTestEnv(t, []testChannel{{
+			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 				name: "openai-max-tokens", upstreamProtocol: "openai", models: test.model,
 			}}, map[int]string{0: upstream.URL})
 			w := doProxyRequest(t, env.engine, "/v1/messages", map[string]any{

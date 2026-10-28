@@ -884,11 +884,24 @@ func isCodexWebsocketHandshakeFallbackError(err error) bool {
 		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET)
 }
 
+type codexPassthroughContextKey struct{}
+
+func codexPassthroughContext(ctx context.Context) bool {
+	enabled, _ := ctx.Value(codexPassthroughContextKey{}).(bool)
+	return enabled
+}
+
 func buildCodexWebsocketRequestBody(body []byte) ([]byte, error) {
+	return buildCodexWebsocketBody(body, false)
+}
+
+func buildCodexWebsocketBody(body []byte, passthrough bool) ([]byte, error) {
 	if !sonic.Valid(body) {
 		return nil, errors.New("invalid Codex websocket request JSON")
 	}
-	body = sanitizeCodexInputItemIDs(body)
+	if !passthrough {
+		body = sanitizeCodexInputItemIDs(body)
+	}
 	prepared, err := sjson.SetBytes(body, "type", responsesWebsocketRequestCreate)
 	if err != nil {
 		return nil, fmt.Errorf("set Codex websocket request type: %w", err)
@@ -1240,7 +1253,7 @@ func (s *codexUpstreamWebsocketSession) reconnectWithReplay(
 	replayBody []byte,
 	timeouts codexWebsocketTimeouts,
 ) (*websocket.Conn, http.Header, error) {
-	prepared, err := buildCodexWebsocketRequestBody(replayBody)
+	prepared, err := buildCodexWebsocketBody(replayBody, codexPassthroughContext(ctx))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1356,7 +1369,7 @@ func (s *codexUpstreamWebsocketSession) streamResponse(
 				_ = writer.CloseWithError(errRetry)
 				return
 			}
-			if !semanticOutput && ctx.Err() == nil &&
+			if !codexPassthroughContext(ctx) && !semanticOutput && ctx.Err() == nil &&
 				missingStoredItemRetries < responsesMissingStoredItemRetryLimit {
 				if retryReplay, ok := codexWebsocketMissingStoredInputRetryBody(replayBody, payload); ok {
 					missingStoredItemRetries++
@@ -1479,7 +1492,7 @@ func (s *codexUpstreamWebsocketSession) roundTrip(
 	if reuse && incrementalReq != nil && len(incrementalBody) > 0 {
 		usedReq, usedBody = incrementalReq, incrementalBody
 	}
-	preparedBody, err := buildCodexWebsocketRequestBody(usedBody)
+	preparedBody, err := buildCodexWebsocketBody(usedBody, codexPassthroughContext(ctx))
 	if err != nil {
 		return nil, usedReq, usedBody, err
 	}
@@ -1514,7 +1527,7 @@ func (s *codexUpstreamWebsocketSession) roundTrip(
 	if err != nil {
 		s.invalidate(conn)
 		s.recordReconnect("write: " + err.Error())
-		preparedReplay, errPrepare := buildCodexWebsocketRequestBody(replayBody)
+		preparedReplay, errPrepare := buildCodexWebsocketBody(replayBody, codexPassthroughContext(ctx))
 		if errPrepare == nil {
 			connRetry, respRetry, errDial := s.dial(ctx, dialer, target, replayReq, timeouts)
 			if errDial == nil {
@@ -1563,6 +1576,7 @@ func (s *Server) doCodexWebsocketRequest(
 	incrementalBody []byte,
 	baseURL string,
 ) (*http.Response, *http.Request, []byte, error) {
+	ctx = context.WithValue(ctx, codexPassthroughContextKey{}, cfg.PassthroughEnabled())
 	// Keep status on both replay and incremental input. Compatibility stripping
 	// is allowed only after this upstream explicitly rejects that item's type.
 	if replayReq != nil {

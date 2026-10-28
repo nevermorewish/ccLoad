@@ -28,7 +28,7 @@ func TestProxyOpenCodeResponsesNamespaceRoundTrip(t *testing.T) {
 		t.Run(fmt.Sprintf("stream=%v/retry=%v/json=%v", tc.streaming, tc.retry, tc.jsonResponse), func(t *testing.T) {
 			streaming := tc.streaming
 			const modelName = "muse-spark-1.3-contributor"
-			env := setupProxyTestEnv(t, []testChannel{{name: "muse", upstreamProtocol: "codex", protocolTransformMode: model.ProtocolTransformModeLocal, models: modelName, apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen/go"})
+			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "muse", upstreamProtocol: "codex", protocolTransformMode: model.ProtocolTransformModeLocal, models: modelName, apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen/go"})
 			tool := func(name string) map[string]any {
 				return map[string]any{"type": "function", "name": name, "strict": true, "parameters": map[string]any{"type": "object", "properties": map[string]any{"keyword": map[string]any{"type": "string"}}, "required": []string{"keyword"}, "additionalProperties": false}}
 			}
@@ -161,7 +161,7 @@ func TestProxyOpenCodeResponsesNamespaceRoundTrip(t *testing.T) {
 
 func TestProxyOpenCodeResponsesPreservesInvalidArgumentsWithDiagnostic(t *testing.T) {
 	const modelName = "muse-spark-1.3-contributor"
-	env := setupProxyTestEnv(t, []testChannel{{name: "muse", upstreamProtocol: "codex", protocolTransformMode: model.ProtocolTransformModeLocal, models: modelName, apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen/go"})
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "muse", upstreamProtocol: "codex", protocolTransformMode: model.ProtocolTransformModeLocal, models: modelName, apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen/go"})
 	var logs bytes.Buffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
@@ -422,7 +422,7 @@ func TestOpenCodeSessionHeaderFallsBackToUUID(t *testing.T) {
 
 func TestOpenCodeSessionHeaderIsUsedByProxyAndAdminBuilders(t *testing.T) {
 	const endpoint = "https://opencode.ai/zen/go"
-	cfg := &model.Config{
+	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		ID:   4,
 		Name: "OpenCode Go",
 		URLs: model.ChannelURLs{{URL: endpoint}},
@@ -529,7 +529,7 @@ func TestOpenCodeRequestBodyResponsesBudget(t *testing.T) {
 	for _, endpoint := range []string{"https://opencode.ai/zen", "https://opencode.ai/zen/go"} {
 		for _, budget := range []string{"", "1", "15.5", "0", "-1", "16", "100", `"1"`} {
 			t.Run(endpoint+"/budget="+budget, func(t *testing.T) {
-				env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", upstreamProtocol: "codex", protocolTransformMode: model.ProtocolTransformModeLocal, models: "gpt-test", apiKey: "test-key"}}, map[int]string{0: endpoint})
+				env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", upstreamProtocol: "codex", protocolTransformMode: model.ProtocolTransformModeLocal, models: "gpt-test", apiKey: "test-key"}}, map[int]string{0: endpoint})
 				request := map[string]any{"model": "gpt-test", "input": "hi", "stream": false, "provider_extension": json.Number("9007199254740993"), "tools": []any{map[string]any{"type": "function", "name": "custom", "parameters": map[string]any{"type": "object"}}}}
 				if budget != "" {
 					request["max_output_tokens"] = json.RawMessage(budget)
@@ -584,7 +584,7 @@ func TestOpenCodeRequestBodyChatReasoning(t *testing.T) {
 		{"native", "other-model", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", upstreamProtocol: "openai", protocolTransformMode: model.ProtocolTransformModeLocal, models: tc.model, apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen/go"})
+			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", upstreamProtocol: "openai", protocolTransformMode: model.ProtocolTransformModeLocal, models: tc.model, apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen/go"})
 			var request map[string]any
 			raw := `{"model":"` + tc.model + `","stream":false,"provider_extension":{"opaque":true},"tools":[{"type":"function","function":{"name":"custom","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"custom","arguments":"{}"}}]},{"role":"assistant","reasoning":" original ","tool_calls":[{"id":"b","type":"function","function":{"name":"custom","arguments":"{}"}}]},{"role":"assistant","reasoning_content":" keep ","tool_calls":[{"id":"c","type":"function","function":{"name":"custom","arguments":"{}"}}]},{"role":"assistant","content":"plain"}]`
 			if tc.setting != "" {
@@ -625,7 +625,7 @@ func TestOpenCodeRequestBodyChatReasoning(t *testing.T) {
 func TestOpenCodeRequestBodyAnthropicThinking(t *testing.T) {
 	for _, modelName := range []string{"deepseek-test", "kimi-test", "moonshot-test", "mimo-test", "claude-test"} {
 		t.Run(modelName, func(t *testing.T) {
-			env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", upstreamProtocol: "anthropic", protocolTransformMode: model.ProtocolTransformModeLocal, models: modelName, apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen"})
+			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", upstreamProtocol: "anthropic", protocolTransformMode: model.ProtocolTransformModeLocal, models: modelName, apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen"})
 			var request map[string]any
 			if err := json.Unmarshal([]byte(`{"model":"`+modelName+`","max_tokens":64,"stream":false,"thinking":{"type":"enabled","budget_tokens":16},"provider_extension":{"opaque":true},"context_management":{"edits":[]},"tools":[{"name":"custom","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"kept","signature":"signed","provider_extension":"kept"},{"type":"tool_use","id":"a","name":"custom","input":{}}]},{"role":"assistant","content":[{"type":"thinking","thinking":" "},{"type":"tool_use","id":"b","name":"custom","input":{}}]},{"role":"assistant","content":[{"type":"redacted_thinking","data":"opaque"},{"type":"tool_use","id":"c","name":"custom","input":{}}]},{"role":"assistant","content":[{"type":"tool_use","id":"d","name":"custom","input":{}}]},{"role":"assistant","content":[{"type":"thinking","thinking":"plain","signature":"untouched"},{"type":"text","text":"plain"}]}]}`), &request); err != nil {
 				t.Fatal(err)
@@ -678,7 +678,7 @@ func TestOpenCodeRequestBodyAndHeadersEndpointScope(t *testing.T) {
 	for _, target := range []string{"https://opencode.ai/zen", "https://opencode.ai/zen/go", "https://example.test/v1"} {
 		t.Run(target, func(t *testing.T) {
 			srv := newInMemoryServer(t)
-			cfg := &model.Config{ID: 4, URLs: model.ChannelURLs{{URL: "https://opencode.ai/zen/go"}, {URL: "https://example.test/v1"}}}
+			cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, ID: 4, URLs: model.ChannelURLs{{URL: "https://opencode.ai/zen/go"}, {URL: "https://example.test/v1"}}}
 			body := []byte(`{"model":"gpt-test","input":"hi","max_output_tokens":1}`)
 			reqCtx := &requestContext{ctx: context.Background(), startTime: time.Now(), clientProtocol: protocol.Codex, upstreamProtocol: protocol.Codex,
 				transformPlan: protocol.TransformPlan{ClientProtocol: protocol.Codex, UpstreamProtocol: protocol.Codex, RequestFamily: protocol.RequestFamilyResponses, OriginalBody: body, TranslatedBody: body, ActualModel: "gpt-test"}}
@@ -771,7 +771,7 @@ func TestOpenCodeRequestBodyFreeToolsAndStreaming(t *testing.T) {
 				if strings.HasSuffix(endpoint, "/inference") {
 					modelName = "unlisted-model"
 				}
-				env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", upstreamProtocol: tc.upstream, protocolTransformMode: model.ProtocolTransformModeLocal, models: modelName, apiKey: "test-key"}}, map[int]string{0: endpoint})
+				env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", upstreamProtocol: tc.upstream, protocolTransformMode: model.ProtocolTransformModeLocal, models: modelName, apiKey: "test-key"}}, map[int]string{0: endpoint})
 				tool := func(name string) any {
 					params := map[string]any{"type": "object", "properties": map[string]any{"opaque": map[string]any{"type": "integer", "default": json.Number("9007199254740993")}}}
 					definition := map[string]any{"name": name, "description": "client stub", "parameters": params}
@@ -886,7 +886,7 @@ func TestOpenCodeRequestBodyFreeToolsAndStreaming(t *testing.T) {
 func TestOpenCodeRequestBodyFreeRejectsMalformedTools(t *testing.T) {
 	for _, tools := range []any{map[string]any{"name": "broken"}, []any{"broken"}, []any{nil}} {
 		t.Run(fmt.Sprintf("%v", tools), func(t *testing.T) {
-			env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", upstreamProtocol: "openai", protocolTransformMode: model.ProtocolTransformModeLocal, models: "model-free", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen"})
+			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", upstreamProtocol: "openai", protocolTransformMode: model.ProtocolTransformModeLocal, models: "model-free", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen"})
 			called := false
 			env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 				called = true
@@ -912,7 +912,7 @@ func TestOpenCodeRequestBodyFreeWithoutTools(t *testing.T) {
 		upstream := tc.upstream
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newInMemoryServer(t)
-			cfg := &model.Config{ID: 4, URLs: model.ChannelURLs{{URL: "https://opencode.ai/zen/go"}}}
+			cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, ID: 4, URLs: model.ChannelURLs{{URL: "https://opencode.ai/zen/go"}}}
 			path := "/v1/chat/completions"
 			switch upstream {
 			case protocol.Codex:
@@ -981,7 +981,7 @@ func TestOpenCodeFreeNonStreamToolsAndUsageAcrossProtocols(t *testing.T) {
 		{protocol.Gemini, protocol.Gemini}, {protocol.OpenAI, protocol.Gemini}, {protocol.Codex, protocol.Gemini}, {protocol.Anthropic, protocol.Gemini},
 	} {
 		t.Run(string(tc.client)+"->"+string(tc.upstream), func(t *testing.T) {
-			env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", upstreamProtocol: string(tc.upstream), protocolTransformMode: model.ProtocolTransformModeLocal, models: "model-free", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen"})
+			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", upstreamProtocol: string(tc.upstream), protocolTransformMode: model.ProtocolTransformModeLocal, models: "model-free", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen"})
 			prefix, suffix := openCodeFreeToolStreamFixture(tc.upstream)
 			called := false
 			env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
@@ -1061,7 +1061,7 @@ func TestOpenCodeFreeNonStreamRejectsFailedOrTruncatedSSE(t *testing.T) {
 	for _, upstream := range []protocol.Protocol{protocol.OpenAI, protocol.Codex, protocol.Anthropic, protocol.Gemini} {
 		for _, failure := range []string{"truncated", "rate-limit"} {
 			t.Run(string(upstream)+"/"+failure, func(t *testing.T) {
-				env := setupProxyTestEnvWithSettings(t, []testChannel{{name: "OpenCode", upstreamProtocol: string(upstream), protocolTransformMode: model.ProtocolTransformModeLocal, models: "model-free", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/inference"}, map[string]string{"cooldown_fallback_enabled": "false"})
+				env := setupProxyTestEnvWithSettings(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", upstreamProtocol: string(upstream), protocolTransformMode: model.ProtocolTransformModeLocal, models: "model-free", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/inference"}, map[string]string{"cooldown_fallback_enabled": "false"})
 				prefix, _ := openCodeFreeToolStreamFixture(upstream)
 				wire := prefix
 				if failure == "rate-limit" {
@@ -1092,7 +1092,7 @@ func TestOpenCodeFreeNonStreamRejectsFailedOrTruncatedSSE(t *testing.T) {
 func TestOpenCodeFreeNonStreamStopsFirstByteDeadlineAfterEvent(t *testing.T) {
 	for _, upstream := range []protocol.Protocol{protocol.OpenAI, protocol.Codex, protocol.Anthropic, protocol.Gemini} {
 		t.Run(string(upstream), func(t *testing.T) {
-			env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", upstreamProtocol: string(upstream), protocolTransformMode: model.ProtocolTransformModeLocal, models: "model-free", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/inference"})
+			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", upstreamProtocol: string(upstream), protocolTransformMode: model.ProtocolTransformModeLocal, models: "model-free", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/inference"})
 			const firstByteTimeout = 100 * time.Millisecond
 			const completionDelay = 3 * firstByteTimeout
 			env.server.firstByteTimeout = firstByteTimeout
@@ -1129,7 +1129,7 @@ func TestOpenCodeFreeNonStreamStopsFirstByteDeadlineAfterEvent(t *testing.T) {
 }
 
 func TestOpenCodeFreeResponsesPreservesOpaqueToolsWithCoreNames(t *testing.T) {
-	env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", upstreamProtocol: "codex", protocolTransformMode: model.ProtocolTransformModeLocal, models: "model-free", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/inference"})
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", upstreamProtocol: "codex", protocolTransformMode: model.ProtocolTransformModeLocal, models: "model-free", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/inference"})
 	called := false
 	env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		called = true
@@ -1190,7 +1190,7 @@ func TestProxyOpenCodeAutoNegotiatesProtocolPerModel(t *testing.T) {
 		for _, streaming := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%v", endpoint, streaming), func(t *testing.T) {
 				const muse = "muse-spark-1.3-contributor-free"
-				env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", protocolTransformMode: model.ProtocolTransformModeAuto, apiKey: "personal-key", modelEntries: []model.ModelEntry{
+				env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", protocolTransformMode: model.ProtocolTransformModeAuto, apiKey: "personal-key", modelEntries: []model.ModelEntry{
 					{Model: "muse-alias", RedirectModel: muse}, {Model: "big-pickle"}, {Model: "qwen3.6-plus-free"},
 				}}}, map[int]string{0: endpoint})
 				nativePaths := map[string]string{muse: "/v1/responses", "big-pickle": "/v1/chat/completions", "qwen3.6-plus-free": "/v1/messages"}
@@ -1272,7 +1272,7 @@ func TestHandleChannelTestOpenCodeAutoNegotiatesModelProtocol(t *testing.T) {
 		for _, streaming := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%v", endpoint, streaming), func(t *testing.T) {
 				const actualModel = "muse-spark-1.3-contributor-free"
-				env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", protocolTransformMode: model.ProtocolTransformModeAuto, modelEntries: []model.ModelEntry{{Model: "alias", RedirectModel: actualModel}}}}, map[int]string{0: endpoint})
+				env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", protocolTransformMode: model.ProtocolTransformModeAuto, modelEntries: []model.ModelEntry{{Model: "alias", RedirectModel: actualModel}}}}, map[int]string{0: endpoint})
 				var paths []string
 				env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 					body, err := io.ReadAll(r.Body)
@@ -1428,7 +1428,7 @@ func TestOpenCodeAnonymousGeminiProbeReachesFreeGate(t *testing.T) {
 	for _, admin := range []bool{false, true} {
 		for _, streaming := range []bool{false, true} {
 			t.Run(fmt.Sprintf("admin=%v/stream=%v", admin, streaming), func(t *testing.T) {
-				env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", protocolTransformMode: model.ProtocolTransformModeAuto, models: jev, apiKey: "personal-key"}}, map[int]string{0: "https://opencode.ai/inference"})
+				env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", protocolTransformMode: model.ProtocolTransformModeAuto, models: jev, apiKey: "personal-key"}}, map[int]string{0: "https://opencode.ai/inference"})
 				var paths []string
 				env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 					body, err := io.ReadAll(r.Body)
@@ -1490,7 +1490,7 @@ func TestOpenCodeZenGeminiWire(t *testing.T) {
 		{"native stream", "/v1beta/models/gemini-3-flash:streamGenerateContent?alt=sse", ":streamGenerateContent", "alt=sse", native},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", upstreamProtocol: "gemini", protocolTransformMode: model.ProtocolTransformModeLocal, models: "gemini-3-flash", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen"})
+			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", upstreamProtocol: "gemini", protocolTransformMode: model.ProtocolTransformModeLocal, models: "gemini-3-flash", apiKey: "test-key"}}, map[int]string{0: "https://opencode.ai/zen"})
 			called := false
 			env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 				called = true

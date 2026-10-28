@@ -866,7 +866,7 @@ func TestStreamChatWithURLHandlesJSONResponseAsFrontendSSE(t *testing.T) {
 
 	srv := newInMemoryServer(t)
 	srv.client = upstream.Client()
-	cfg := &model.Config{
+	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		ID:           1,
 		Name:         "openai-non-stream",
 		URLs:         model.ChannelURLs{{URL: upstream.URL}},
@@ -2169,7 +2169,7 @@ func TestTestChannelAPI_OpenCodeFreeNonStreamPreservesToolsAndUsage(t *testing.T
 					}
 					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(tc.stream)), Request: r}, nil
 				})}
-				cfg := &model.Config{
+				cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 					ID: 1, Name: "OpenCode", AuthType: model.AuthTypeAPIKey, Enabled: true,
 					URLs:         model.ChannelURLs{{URL: endpoint, Protocols: []string{tc.name}}},
 					ModelEntries: []model.ModelEntry{{Model: "big-pickle"}},
@@ -2217,7 +2217,7 @@ func TestTestChannelAPI_OpenCodeFreeNonStreamClassifiesFailedSSELikeProxy(t *tes
 				srv.client = &http.Client{Transport: oauthUsageRoundTripper(func(r *http.Request) (*http.Response, error) {
 					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(wire)), Request: r}, nil
 				})}
-				cfg := &model.Config{
+				cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 					ID: 1, Name: "OpenCode", AuthType: model.AuthTypeAPIKey, Enabled: true,
 					URLs:         model.ChannelURLs{{URL: "https://opencode.ai/zen", Protocols: []string{string(upstream)}}},
 					ModelEntries: []model.ModelEntry{{Model: "big-pickle"}},

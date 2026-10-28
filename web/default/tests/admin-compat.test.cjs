@@ -15,6 +15,17 @@ function loadPage(relative) {
 const api = loadPage('pages/channels/api.ts');
 const { advancedFromChannel, advancedToPayload } = loadPage('pages/channels/advanced-settings-dialog.tsx');
 
+test('passthrough defaults on, merges the old Anthropic option and persists explicit disable', () => {
+  for (const channel of [{}, { custom_request_rules: { anthropic_passthrough: true } }]) {
+    const initial = advancedFromChannel(channel);
+    assert.equal(initial.passthrough, true);
+    assert.equal(advancedToPayload(initial, false).custom_request_rules, null);
+    const disabled = advancedToPayload({ ...initial, passthrough: false }, false);
+    assert.equal(disabled.custom_request_rules.passthrough, false);
+    assert.equal(advancedFromChannel(disabled).passthrough, false);
+  }
+});
+
 test('channel force-upstream-stream switch persists without body rules and can be disabled', () => {
   const initial = advancedFromChannel({ custom_request_rules: { force_upstream_stream: true } });
   assert.equal(initial.force_upstream_stream, true);

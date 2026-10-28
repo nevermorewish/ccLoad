@@ -235,7 +235,7 @@ func TestBuildProxyRequest_CodexSessionInjection_Anthropic(t *testing.T) {
 	resetCodexSessionCache()
 	srv := newInMemoryServer(t)
 
-	cfg := &model.Config{
+	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		ID:   1,
 		Name: "codex-ch",
 		URLs: model.ChannelURLs{{URL: "https://api.example.com"}},
@@ -427,7 +427,7 @@ func TestBuildProxyRequest_CodexIdentityHeadersAndTurnState(t *testing.T) {
 			resetCodexSessionCache()
 			srv := newInMemoryServer(t)
 
-			cfg := &model.Config{
+			cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 				ID:   1,
 				Name: "codex-ch",
 				URLs: model.ChannelURLs{{URL: "https://api.example.com"}},

@@ -77,12 +77,20 @@ func isAnthropicOAuthMessagesRequest(cfg *model.Config, upstream protocol.Protoc
 
 // isAnthropicClaudeCodeMessagesRequest 判断本次请求要不要套 Claude Code CLI 指纹。
 //
-// 判据只有「是不是 Anthropic Messages 上游」——OAuth、第一方 API Key、第三方网关
-// 都生成 CLI body；OAuth 的 beta/Header 使用 sub2api 模拟 profile。唯一例外是 Z.ai Coding Plan：它也走 anthropic
+// API Key 渠道默认透传；关闭透传时 Anthropic Messages 上游生成 CLI body。
+// OAuth 的 beta/Header 使用 sub2api 模拟 profile。Z.ai Coding Plan 也走 anthropic
 // 协议，却有自己的 ZCode 设备指纹契约，两套指纹叠加会互相破坏（ZCode 覆盖
 // metadata.user_id，而 Claude Code 的 1h cache TTL 配不上 ZCode 的 beta 头）。
 func isAnthropicClaudeCodeMessagesRequest(cfg *model.Config, upstream protocol.Protocol, requestPath string) bool {
-	return isAnthropicMessagesRequest(upstream, requestPath) && !isZAICodingPlanRequest(cfg, upstream, requestPath)
+	return isAnthropicMessagesRequest(upstream, requestPath) && !isZAICodingPlanRequest(cfg, upstream, requestPath) &&
+		!isAnthropicPassthroughRequest(cfg, upstream, requestPath)
+}
+
+// Anthropic passthrough shares the default-on channel switch, including
+// Bedrock-compatible gateways. OAuth retains its provider contract.
+func isAnthropicPassthroughRequest(cfg *model.Config, upstream protocol.Protocol, requestPath string) bool {
+	return cfg.PassthroughEnabled() &&
+		(isAnthropicMessagesRequest(upstream, requestPath) || isAnthropicCountTokensRequest(upstream, requestPath))
 }
 
 func isAnthropicMessagesRequest(upstream protocol.Protocol, requestPath string) bool {

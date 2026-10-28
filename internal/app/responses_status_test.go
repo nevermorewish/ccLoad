@@ -115,7 +115,7 @@ func TestProxyResponsesStatusCompatibility(t *testing.T) {
 				_, _ = io.WriteString(w, `{"id":"resp_status","object":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)
 			}))
 			defer upstream.Close()
-			env := setupProxyTestEnv(t, []testChannel{{name: "status-test", upstreamProtocol: "codex", models: "gpt-test", priority: 100}}, map[int]string{0: upstream.URL})
+			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "status-test", upstreamProtocol: "codex", models: "gpt-test", priority: 100}}, map[int]string{0: upstream.URL})
 			env.server.client = upstream.Client()
 			function := map[string]any{"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}
 			if mode != "missing_status" {

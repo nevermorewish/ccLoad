@@ -142,12 +142,12 @@ func TestProxy_UnsupportedUsageSemantics(t *testing.T) {
 			}
 			channels := []testChannel{{
 				name: "gpt-yuguang", upstreamProtocol: "anthropic", protocolTransformMode: model.ProtocolTransformModeAuto,
-				models: "gpt-6.1-sol", customRequestRules: rules,
+				models: "gpt-6.1-sol", customRequestRules: compatibilityRules(rules),
 			}}
 			// Unrelated 400s retain the existing routing policy. The spare
 			// channel verifies that a failed compatibility retry stays put.
 			if !tc.unrelated {
-				channels = append(channels, testChannel{name: "spare", models: "gpt-6.1-sol"})
+				channels = append(channels, testChannel{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "spare", models: "gpt-6.1-sol"})
 			}
 			env := setupProxyTestEnv(t, channels, map[int]string{0: "https://yuguang.example", 1: "https://spare.example"})
 			env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {

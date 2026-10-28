@@ -11,6 +11,15 @@ const {
   MAX_RULES
 } = mod;
 
+test('透传默认开启，旧编辑器保存时保留显式关闭状态', () => {
+  resetCustomRulesState({ passthrough: false, anthropic_passthrough: true });
+  assert.deepEqual(collectCustomRulesForSubmit(), { passthrough: false });
+  resetCustomRulesState({ anthropic_passthrough: true });
+  assert.equal(collectCustomRulesForSubmit(), null);
+  resetCustomRulesState(null);
+  assert.equal(collectCustomRulesForSubmit(), null);
+});
+
 test('cloneRules 深拷贝并规范化字段', () => {
   const rules = {
     headers: [{ action: 'OVERRIDE', name: 'X-Foo', value: 'v' }],

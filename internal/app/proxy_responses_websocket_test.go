@@ -2950,7 +2950,7 @@ func TestNativeCodexWebsocketReusesUpstreamConnection(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	env := setupProxyTestEnv(t, []testChannel{{
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		name: "native-codex", upstreamProtocol: "codex", websockets: true,
 		models: "gpt-test", apiKey: "sk-upstream", priority: 100,
 	}}, map[int]string{0: upstream.URL})
@@ -3388,7 +3388,7 @@ func TestNativeCodexWebsocketWindowHeaderRules(t *testing.T) {
 			}
 			env := setupProxyTestEnv(t, []testChannel{{
 				name: "window-headers", upstreamProtocol: "codex", websockets: true, models: "gpt-test",
-				customRequestRules: &model.CustomRequestRules{Headers: rules},
+				customRequestRules: compatibilityRules(&model.CustomRequestRules{Headers: rules}),
 			}}, map[int]string{0: upstream.URL})
 			downstream := dialResponsesWebsocketWithTokenAndHeaders(t, env.engine, "test-api-key", http.Header{
 				"X-Codex-Window-Id": {"019a3c5e-7f21-7c3a-9b4d-2f6e8a1c0d11:0"},
@@ -3601,7 +3601,7 @@ func TestNativeCodexWebsocketIgnoresUnapprovedHandshakeHeaderChanges(t *testing.
 	}))
 	defer upstream.Close()
 
-	env := setupProxyTestEnv(t, []testChannel{{
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		name: "header-fingerprint", upstreamProtocol: "codex", websockets: true,
 		models: "gpt-test", priority: 100,
 	}}, map[int]string{0: upstream.URL})
@@ -5317,7 +5317,7 @@ func TestResponsesWebsocketOnlyHandlesInitialHTTPPrewarmLocally(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	env := setupProxyTestEnv(t, []testChannel{{
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		name: "initial-prewarm-only", upstreamProtocol: "codex", models: "gpt-test", priority: 100,
 	}}, map[int]string{0: upstream.URL})
 	conn := dialResponsesWebsocket(t, env.engine)

@@ -1055,7 +1055,7 @@ func TestProxy_NativeAnthropicAPIKeyRebuildsAndNormalizesWire(t *testing.T) {
 
 	var upstreamBody []byte
 	var upstreamHeaders http.Header
-	env := setupProxyTestEnv(t, []testChannel{{
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		name: "official-anthropic-api-key", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6", apiKey: "sk-ant-official",
 	}}, map[int]string{0: "https://api.anthropic.com"})
 	env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
@@ -1200,7 +1200,7 @@ func TestProxy_AnthropicCredentialsSeparateCodexThreads(t *testing.T) {
 				body            []byte
 			}
 			var captured []capturedRequest
-			env := setupProxyTestEnv(t, []testChannel{{
+			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 				name: "anthropic-thread-identity", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6",
 				authType: test.authType, apiKey: test.apiKey, oauthCredential: test.oauthCredential,
 			}}, map[int]string{0: "https://api.anthropic.com"})
@@ -2160,7 +2160,7 @@ func TestProxy_AnthropicCountTokensUsesUpstreamOAuthWire(t *testing.T) {
 
 func TestProxy_AnthropicCountTokensAPIKeyUsesUpstream(t *testing.T) {
 	t.Parallel()
-	env := setupProxyTestEnv(t, []testChannel{{
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		name: "anthropic-count-tokens-key", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6",
 		apiKey: "sk-ant-count-token",
 	}}, map[int]string{0: "https://api.anthropic.com"})
@@ -2370,7 +2370,7 @@ func TestProxy_AnthropicCountTokensTokenRestrictionsUseLocalEstimate(t *testing.
 func TestProxy_AnthropicLegacyModelRejectsMidConversationSystemLocally(t *testing.T) {
 	t.Parallel()
 	var upstreamCalls atomic.Int32
-	env := setupProxyTestEnv(t, []testChannel{{
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		name: "legacy-anthropic", upstreamProtocol: "anthropic", models: "claude-haiku-4-5-20251001", apiKey: "sk-ant",
 	}}, map[int]string{0: "https://api.anthropic.com"})
 	env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
@@ -2504,7 +2504,7 @@ func TestProxy_NativeAnthropic400RepairsThinkingBudget(t *testing.T) {
 	t.Parallel()
 	var attempts atomic.Int32
 	var bodies [][]byte
-	env := setupProxyTestEnv(t, []testChannel{{name: "anthropic-repair", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6", apiKey: "sk-ant"}}, map[int]string{0: "https://anthropic-gateway.example.com"})
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "anthropic-repair", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6", apiKey: "sk-ant"}}, map[int]string{0: "https://anthropic-gateway.example.com"})
 	env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -2671,7 +2671,7 @@ func TestProxy_NativeAnthropicToolRepairIsLocalized(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			env := setupProxyTestEnv(t, []testChannel{{name: "localized-repair", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6", apiKey: "sk-ant"}}, map[int]string{0: "https://anthropic-gateway.example.com"})
+			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "localized-repair", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6", apiKey: "sk-ant"}}, map[int]string{0: "https://anthropic-gateway.example.com"})
 			var bodies [][]byte
 			env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 				body, readErr := io.ReadAll(r.Body)
@@ -2818,11 +2818,11 @@ func TestProxy_NativeAnthropicToolRepairFailurePreservesNextChannelRequest(t *te
 		Mode: model.CooldownModeFixed, CooldownSeconds: 60,
 	}}}
 	env := setupProxyTestEnv(t, []testChannel{
-		{
+		{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 			name: "anthropic-repair-fails", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6",
 			apiKey: "sk-first", priority: 100, cooldownDetectionRules: firstRule,
 		},
-		{
+		{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 			name: "anthropic-fallback", upstreamProtocol: "anthropic", models: "claude-sonnet-4-6",
 			apiKey: "sk-second", priority: 90,
 		},
@@ -12015,7 +12015,7 @@ func TestProxy_CodexInvalidEncryptedContentRetriesWithoutEncryptedInputItems(t *
 	var bodies [][]byte
 
 	env := setupProxyTestEnv(t, []testChannel{
-		{name: "codex-ch", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
+		{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "codex-ch", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
 	}, map[int]string{0: "https://codex-upstream.example.com"})
 
 	env.server.client = &http.Client{
@@ -12081,7 +12081,7 @@ func TestProxy_CodexSSEInvalidEncryptedContentRetriesWithoutEncryptedInputItems(
 	var attempts atomic.Int32
 	var bodies [][]byte
 	env := setupProxyTestEnv(t, []testChannel{
-		{name: "codex-sse-ch", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
+		{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "codex-sse-ch", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
 	}, map[int]string{0: "https://codex-upstream.example.com"})
 
 	env.server.client = &http.Client{
@@ -12207,7 +12207,7 @@ func TestProxy_CodexNormalizesToolSearchArgumentsBeforeForward(t *testing.T) {
 	defer upstream.Close()
 
 	env := setupProxyTestEnv(t, []testChannel{
-		{name: "codex-normalize", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
+		{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "codex-normalize", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
 	}, map[int]string{0: upstream.URL})
 
 	w := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{
@@ -12295,7 +12295,7 @@ func TestProxy_AnyrouterCodexContentItemKinds(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := setupProxyTestEnv(t, []testChannel{
-				{name: tc.name, upstreamProtocol: "codex", models: "gpt-6-astra", apiKey: "sk-test"},
+				{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: tc.name, upstreamProtocol: "codex", models: "gpt-6-astra", apiKey: "sk-test"},
 			}, map[int]string{0: tc.url})
 			var captured []byte
 			env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
@@ -12353,7 +12353,7 @@ func TestProxy_AnyrouterCodexStripsToolSearchBeforeForwardThenRetriesEncryptedCo
 	var bodies [][]byte
 
 	env := setupProxyTestEnv(t, []testChannel{
-		{name: "anyrouter-codex", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
+		{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "anyrouter-codex", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
 	}, map[int]string{0: "https://codex-upstream.example.com"})
 
 	env.server.client = &http.Client{
@@ -12424,7 +12424,7 @@ func TestProxy_CodexInvalidEncryptedContentWrappedRequestErrorRetries(t *testing
 	var bodies [][]byte
 
 	env := setupProxyTestEnv(t, []testChannel{
-		{name: "codex-ch", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
+		{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "codex-ch", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
 	}, map[int]string{0: "https://codex-upstream.example.com"})
 
 	env.server.client = &http.Client{
@@ -12483,8 +12483,8 @@ func TestProxy_CodexInvalidEncryptedContentRetryFailureReturnsUpstreamError(t *t
 	var attempts, backupAttempts atomic.Int32
 
 	env := setupProxyTestEnv(t, []testChannel{
-		{name: "codex-ch", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
-		{name: "codex-backup", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-backup"},
+		{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "codex-ch", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex"},
+		{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "codex-backup", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-backup"},
 	}, map[int]string{0: "https://codex-upstream.example.com", 1: "https://codex-backup.example.com"})
 
 	env.server.client = &http.Client{
@@ -12619,8 +12619,8 @@ func TestProxy_RepairRetryNonRequestFailureFailsOver(t *testing.T) {
 
 			var primaryAttempts, backupAttempts atomic.Int32
 			env := setupProxyTestEnv(t, []testChannel{
-				{name: "primary", upstreamProtocol: tt.protocol, models: tt.model, apiKey: "sk-primary"},
-				{name: "backup", upstreamProtocol: tt.protocol, models: tt.model, apiKey: "sk-backup"},
+				{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "primary", upstreamProtocol: tt.protocol, models: tt.model, apiKey: "sk-primary"},
+				{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "backup", upstreamProtocol: tt.protocol, models: tt.model, apiKey: "sk-backup"},
 			}, map[int]string{0: "https://primary.example.com", 1: "https://backup.example.com"})
 			env.server.client = &http.Client{
 				Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
@@ -16112,7 +16112,7 @@ func TestProxy_ResponsesMissingRequiredParameterRetriesWithPrunedInput(t *testin
 	}))
 	defer upstream.Close()
 
-	env := setupProxyTestEnv(t, []testChannel{{
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		name: "responses-missing-required", upstreamProtocol: "codex", models: "gpt-test", apiKey: "sk-1",
 	}}, map[int]string{0: upstream.URL})
 	w := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{
@@ -16171,7 +16171,7 @@ func TestProxy_ResponsesSSEMissingStoredItemRetriesOnceWithStrippedBody(t *testi
 	}))
 	defer upstream.Close()
 
-	env := setupProxyTestEnv(t, []testChannel{{
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		name: "responses-missing-items", upstreamProtocol: "codex", models: "gpt-test", apiKey: "sk-1",
 	}}, map[int]string{0: upstream.URL})
 	w := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{
@@ -16319,7 +16319,7 @@ func TestProxy_ResponsesSSEMissingStoredItemsRecoverTogether(t *testing.T) {
 			"type": "reasoning", "id": fmt.Sprintf("rs_item_missing_%02d", index), "summary": []any{},
 		})
 	}
-	env := setupProxyTestEnv(t, []testChannel{{
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		name: "responses-missing-item-limit", upstreamProtocol: "codex", models: "gpt-test", apiKey: "sk-1",
 	}}, map[int]string{0: upstream.URL})
 	w := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{
@@ -16374,7 +16374,7 @@ func TestProxy_ResponsesHTTPMissingStoredItemRetriesOnce(t *testing.T) {
 			"type": "reasoning", "id": fmt.Sprintf("rs_item_missing_%02d", index), "summary": []any{},
 		})
 	}
-	env := setupProxyTestEnv(t, []testChannel{{
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		name: "responses-http-missing-item-limit", upstreamProtocol: "codex", models: "gpt-test", apiKey: "sk-1",
 	}}, map[int]string{0: upstream.URL})
 	w := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{

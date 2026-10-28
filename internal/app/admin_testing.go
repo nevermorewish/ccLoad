@@ -2290,6 +2290,9 @@ func (s *Server) buildTestUpstreamRequestPlan(
 	callerBodyIsAnthropic := requestPlan.clientProtocol == string(protocol.Anthropic) || len(requestPlan.anthropicTestBody) > 0
 	callerWire := classifyAnthropicRequestCallerWire(
 		callerBody, requestPlan.headers, upstreamProtocolValue, requestPath, callerBodyIsAnthropic)
+	if isAnthropicPassthroughRequest(cfgForBuild, upstreamProtocolValue, requestPath) {
+		callerWire = anthropicCallerWire{}
+	}
 	if cfgForBuild.UsesAnthropicOAuth() {
 		fingerprintSource := http.Header(nil)
 		if callerWire.nativeClaudeCode {
@@ -2373,7 +2376,7 @@ func (s *Server) buildTestUpstreamRequestPlan(
 	} else {
 		requestPlan.upstreamStreaming = isStreamingRequest(requestPath, requestPlan.requestBody)
 	}
-	if upstreamProtocolValue == protocol.Codex && !requestPlan.xaiOAuth {
+	if !cfgForBuild.PassthroughEnabled() && upstreamProtocolValue == protocol.Codex && !requestPlan.xaiOAuth {
 		sessionID := testReq.ResolveSessionID()
 		requestPlan.requestBody = injectCodexPromptCacheKey(requestPlan.requestBody, sessionID)
 		ensureCodexSessionHeader(requestPlan.headers, sessionID)
@@ -2391,7 +2394,7 @@ func (s *Server) buildTestUpstreamRequestPlan(
 	requestPlan.endpointPath = requestPath
 	requestPlan.codeBuddyOAuth = cfgForBuild.UsesCodeBuddyOAuth()
 	// Same model source as prepareTranslatedUpstreamBody, so body shaping and transport agree.
-	requestPlan.openCodeFree = isOpenCodeFreeRequest(cfgForBuild, requestPlan.fullURL, upstreamProtocolValue, requestPath, testReq.Model)
+	requestPlan.openCodeFree = !cfgForBuild.PassthroughEnabled() && isOpenCodeFreeRequest(cfgForBuild, requestPlan.fullURL, upstreamProtocolValue, requestPath, testReq.Model)
 	return cfgForBuild, requestPlan, nil
 }
 
@@ -2431,10 +2434,15 @@ func (s *Server) newTestUpstreamRequest(
 		callerBody = requestPlan.requestBody
 	}
 	requestProtocol := protocol.Protocol(requestPlan.upstreamProtocol)
+	passthrough := cfgForBuild.PassthroughEnabled()
 	callerWire := classifyAnthropicRequestCallerWire(callerBody, sourceHeaders, requestProtocol,
 		requestPlan.endpointPath, requestPlan.clientProtocol == string(protocol.Anthropic))
 	callerOwnsAnthropicWire := callerWire.ownsWire()
-	if requestProtocol == protocol.Codex {
+	if passthrough {
+		copyRequestHeaders(req, sourceHeaders)
+		injectAPIKeyHeaders(req, requestPlan.apiKey, requestPlan.upstreamProtocol)
+		ensureAnthropicVersionHeader(req, requestPlan.upstreamProtocol)
+	} else if !passthrough && requestProtocol == protocol.Codex {
 		copyCodexHTTPHeaders(req.Header, sourceHeaders)
 	} else {
 		for k, vs := range sourceHeaders {
@@ -2460,13 +2468,13 @@ func (s *Server) newTestUpstreamRequest(
 		injectVertexAuthHeaders(req, requestPlan.apiKey)
 	} else if requestPlan.xaiOAuth {
 		injectXAIResponsesHeaders(req, requestPlan.apiKey, requestPlan.xaiConversationID)
-	} else if requestProtocol == protocol.Codex {
+	} else if !passthrough && requestProtocol == protocol.Codex {
 		injectCodexHeaders(req, cfgForBuild, requestPlan.apiKey, requestPlan.upstreamStreaming)
 	} else if cfgForBuild.UsesAntigravityOAuth() {
 		// injectAntigravityOAuthHeaders 整体替换 req.Header，同样属于重建路径。
 		injectAntigravityOAuthHeaders(req, cfgForBuild, s.antigravityUserAgent())
 		wireRebuilt = true
-	} else if isAnthropicCountTokensRequest(requestProtocol, requestPlan.endpointPath) {
+	} else if !passthrough && isAnthropicCountTokensRequest(requestProtocol, requestPlan.endpointPath) {
 		injectAnthropicCountTokensHeadersWithFingerprint(req, cfgForBuild, requestPlan.apiKey,
 			requestPlan.requestBody, callerOwnsAnthropicWire, oauthFingerprint, sourceHeaders)
 		wireRebuilt = true
@@ -2474,7 +2482,7 @@ func (s *Server) newTestUpstreamRequest(
 		injectAnthropicOAuthHeadersWithFingerprint(req, cfgForBuild, requestPlan.apiKey, requestPlan.requestBody,
 			callerOwnsAnthropicWire, oauthFingerprint, sourceHeaders)
 		wireRebuilt = true
-	} else if isZAICodingPlanRequest(cfgForBuild, requestProtocol, requestPlan.endpointPath) {
+	} else if !passthrough && isZAICodingPlanRequest(cfgForBuild, requestProtocol, requestPlan.endpointPath) {
 		injectZAICodingPlanHeaders(req, cfgForBuild, requestPlan.apiKey, requestPlan.requestBody, sourceHeaders)
 		wireRebuilt = true
 	} else if isAnthropicClaudeCodeMessagesRequest(cfgForBuild, requestProtocol, requestPlan.endpointPath) && !isOpenCodeAPIKeyEndpoint(cfgForBuild, req.URL.String()) {
@@ -2487,7 +2495,7 @@ func (s *Server) newTestUpstreamRequest(
 		anthropicSessionIDFromBody(requestPlan.requestBody) == requestPlan.anthropicMappedSessionID {
 		setRawHeader(req.Header, "X-Claude-Code-Session-Id", requestPlan.anthropicMappedSessionID)
 	}
-	if isAnthropicCountTokensRequest(requestProtocol, requestPlan.endpointPath) && isOfficialAnthropicURL(req.URL) {
+	if !passthrough && isAnthropicCountTokensRequest(requestProtocol, requestPlan.endpointPath) && isOfficialAnthropicURL(req.URL) {
 		req.Header.Del("X-Claude-Code-Session-Id")
 	}
 	// 指纹路径重建请求头；原生 OAuth 使用账号指纹，模拟请求保留 billing 同源的头。
@@ -2502,18 +2510,18 @@ func (s *Server) newTestUpstreamRequest(
 		}
 	}
 	// anyrouter 渠道：确保 anthropic-beta 包含 context-1m，与代理链路步骤 6.2 对齐。
-	if requestProtocol == protocol.Anthropic && isAnyrouterChannel(cfgForBuild) {
+	if !passthrough && requestProtocol == protocol.Anthropic && isAnyrouterChannel(cfgForBuild) {
 		injectAnthropicBetaFlag(req, "context-1m-2025-08-07")
 	}
-	if isOpenCodeAPIKeyEndpoint(cfgForBuild, req.URL.String()) {
+	if !passthrough && isOpenCodeAPIKeyEndpoint(cfgForBuild, req.URL.String()) {
 		executionIdentity := ""
 		if testReq != nil {
 			executionIdentity = testReq.ResolveSessionID()
 		}
 		injectOpenCodeHeaders(req, cfgForBuild, requestProtocol, requestPlan.apiKey, sourceHeaders, executionIdentity)
 	}
-	if isAnthropicClaudeCodeMessagesRequest(cfgForBuild, requestProtocol, requestPlan.endpointPath) ||
-		isAnthropicCountTokensRequest(requestProtocol, requestPlan.endpointPath) {
+	if !passthrough && (isAnthropicClaudeCodeMessagesRequest(cfgForBuild, requestProtocol, requestPlan.endpointPath) ||
+		isAnthropicCountTokensRequest(requestProtocol, requestPlan.endpointPath)) {
 		requestPlan.requestBody, err = applyFinalAnthropicBetaBodyPolicy(req, requestPlan.requestBody)
 		if err != nil {
 			timeout.cancelAll()

@@ -2309,7 +2309,7 @@ func TestPrepareCodexResponsesBodyForUpstream_StripsAnyrouterUnsupportedInputBef
 			{"type":"reasoning","summary":[]}
 		]
 	}`)
-	cfg := &model.Config{Name: "regular-codex", URLs: model.ChannelURLs{{URL: "https://anyrouter.top"}}}
+	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, Name: "regular-codex", URLs: model.ChannelURLs{{URL: "https://anyrouter.top"}}}
 
 	got := prepareCodexResponsesBodyForUpstream(cfg, protocol.Codex, "/v1/responses", body)
 	text := string(got)
@@ -2365,7 +2365,7 @@ func TestPrepareCodexResponsesBodyForUpstream_NormalizesToolSchemas(t *testing.T
 		{"type":"web_search"}
 	]}`)
 
-	got := prepareCodexResponsesBodyForUpstream(&model.Config{Name: "codex"}, protocol.Codex, "/v1/responses", body)
+	got := prepareCodexResponsesBodyForUpstream(&model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, Name: "codex"}, protocol.Codex, "/v1/responses", body)
 	props := gjson.GetBytes(got, "tools.0.parameters.properties")
 	wantEnum := `["v0","v1","v2","v3","v4","v5","v6","v7"]`
 	for _, path := range []string{"mode", `a\.b`} {
@@ -3012,7 +3012,7 @@ func TestAnthropicCountTokensFinalizerFirstPartyFields(t *testing.T) {
 
 func TestAnthropicOpus55GuardUsesCallerBody(t *testing.T) {
 	body := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hello"}],"thinking":{"type":"disabled"}}`)
-	cfg := &model.Config{Name: "anthropic-api-key"}
+	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, Name: "anthropic-api-key"}
 	for _, testCase := range []struct {
 		name              string
 		callerIsAnthropic bool
@@ -3907,9 +3907,9 @@ func TestZAICodingPlanSkipsClaudeCodeFingerprint(t *testing.T) {
 		cfg  *model.Config
 		want bool
 	}{
-		{name: "API key channel", cfg: &model.Config{Name: "anthropic"}, want: true},
-		{name: "Anthropic OAuth channel", cfg: &model.Config{AuthType: model.AuthTypeAnthropicOAuth}, want: true},
-		{name: "Z.ai Coding Plan channel", cfg: &model.Config{AuthType: model.AuthTypeZAIOAuth}},
+		{name: "API key channel", cfg: &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, Name: "anthropic"}, want: true},
+		{name: "Anthropic OAuth channel", cfg: &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, AuthType: model.AuthTypeAnthropicOAuth}, want: true},
+		{name: "Z.ai Coding Plan channel", cfg: &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, AuthType: model.AuthTypeZAIOAuth}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -4014,7 +4014,7 @@ func TestPrepareTranslatedUpstreamBodyFillsXAIAnthropicToolDescriptions(t *testi
 		t.Run(test.target, func(t *testing.T) {
 			t.Parallel()
 			got, _, err := (&Server{}).prepareTranslatedUpstreamBody(
-				&model.Config{}, protocol.Anthropic, "/v1/messages", "",
+				&model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}}, protocol.Anthropic, "/v1/messages", "",
 				[]byte(body), []byte(body), "sk-key", http.Header{}, false, mustParseTestURL(test.target),
 				false, false,
 			)

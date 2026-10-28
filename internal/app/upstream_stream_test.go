@@ -228,7 +228,7 @@ func TestForceUpstreamStreamPreservesClientUsageOptions(t *testing.T) {
 func TestForceUpstreamStreamResignsAnthropicCCH(t *testing.T) {
 	srv := newInMemoryServer(t)
 	const billing = "x-anthropic-billing-header: cc_version=2.1.280.abc; cc_entrypoint=cli; cch=00000;"
-	cfg := &model.Config{ID: 1, Name: "forced", CustomRequestRules: &model.CustomRequestRules{ForceUpstreamStream: true}}
+	cfg := &model.Config{ID: 1, Name: "forced", CustomRequestRules: compatibilityRules(&model.CustomRequestRules{ForceUpstreamStream: true})}
 	headers := http.Header{"User-Agent": {"claude-cli/2.1.280 (external, cli)"}, "X-App": {"cli"}, "Anthropic-Beta": {"claude-code-20250219"}}
 	for _, admin := range []bool{false, true} {
 		name := "proxy"

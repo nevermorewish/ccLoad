@@ -185,7 +185,7 @@ func TestBuildProxyRequest_RebuildsClaudeCodeWireForAnthropicMessagesUpstream(t 
 	t.Parallel()
 	srv := newInMemoryServer(t)
 
-	cfg := &model.Config{
+	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		ID:   1,
 		Name: "openai-compatible-anthropic",
 		URLs: model.ChannelURLs{{URL: "https://api.example.com"}},
@@ -572,7 +572,7 @@ func TestForwardOnceAsync_Integration(t *testing.T) {
 	// 创建代理服务器
 	srv := newInMemoryServer(t)
 
-	cfg := &model.Config{
+	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		ID:   1,
 		Name: "test",
 		URLs: model.ChannelURLs{{URL: upstream.URL}},
@@ -775,7 +775,7 @@ func TestForwardOnceAsync_CodexSessionInjectionUsesFinalBodyForDebug(t *testing.
 		}),
 	}
 
-	cfg := &model.Config{
+	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		ID:   1,
 		Name: "codex-upstream",
 		URLs: model.ChannelURLs{{URL: "https://codex-upstream.example.com"}},
@@ -855,11 +855,11 @@ func TestForwardOnceAsync_CodexStaticKeyUsesDedicatedHeaderContract(t *testing.T
 		ID:   1,
 		Name: "codex-static",
 		URLs: model.ChannelURLs{{URL: "https://codex-upstream.example.com"}},
-		CustomRequestRules: &model.CustomRequestRules{Headers: []model.CustomHeaderRule{
+		CustomRequestRules: compatibilityRules(&model.CustomRequestRules{Headers: []model.CustomHeaderRule{
 			{Action: model.RuleActionOverride, Name: "Authorization", Value: "Bearer configured-attacker"},
 			{Action: model.RuleActionOverride, Name: "User-Agent", Value: "configured-attacker"},
 			{Action: model.RuleActionOverride, Name: "X-Configured", Value: "kept"},
-		}},
+		}}),
 	}
 	body := []byte(`{"model":"gpt-5.4","stream":false,"prompt_cache_key":"session-1","input":[]}`)
 	plan, err := protocol.BuildTransformPlan(

@@ -1,0 +1,6 @@
+{
+  "model": "{{MODEL}}",
+  "max_tokens": 512,
+  "messages": [{"role": "user", "content": "{{CONTENT}}"}],
+  "stream": "{{STREAM}}"
+}

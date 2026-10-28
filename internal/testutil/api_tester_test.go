@@ -789,7 +789,7 @@ func TestAnthropicTesterBuild_MapsXHighThinkingEffortByModel(t *testing.T) {
 }
 
 func TestAnthropicTesterBuild_AppendsSystemPromptAndAppliesSampling(t *testing.T) {
-	cfg := &model.Config{URLs: model.ChannelURLs{{URL: "https://api.example.com"}}}
+	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, URLs: model.ChannelURLs{{URL: "https://api.example.com"}}}
 	temperature := 0.2
 	topP := 0.85
 	req := &TestChannelRequest{
@@ -902,7 +902,7 @@ func TestAnthropicTesterBuild_SupportsStructuredImageMessages(t *testing.T) {
 }
 
 func TestAnthropicTesterBuild_PlainRequest(t *testing.T) {
-	cfg := &model.Config{URLs: model.ChannelURLs{{URL: "https://api.example.com"}}}
+	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, URLs: model.ChannelURLs{{URL: "https://api.example.com"}}}
 	for _, stream := range []bool{false, true} {
 		req := &TestChannelRequest{Model: "claude-sonnet-5", Content: "hello", Stream: stream, SessionID: "conversation"}
 		fullURL, headers, body, err := (&AnthropicTester{}).Build(cfg, "sk-test", req)
@@ -975,7 +975,7 @@ func TestAnthropicTesterBuild_PlainRequest(t *testing.T) {
 }
 
 func TestAnthropicTesterBuild_MaxTokensRemainOptional(t *testing.T) {
-	cfg := &model.Config{URLs: model.ChannelURLs{{URL: "https://api.example.com"}}}
+	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, URLs: model.ChannelURLs{{URL: "https://api.example.com"}}}
 	temperature := 0.2
 	for _, tt := range []struct {
 		name    string

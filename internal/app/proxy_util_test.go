@@ -1488,7 +1488,7 @@ func TestStripAnthropicProtocolHeaders(t *testing.T) {
 }
 
 func anyrouterAnthropicCfg() *model.Config {
-	return &model.Config{Name: "anyrouter-claude", URLs: model.ChannelURLs{{URL: "https://anyrouter.top"}}}
+	return &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, Name: "anyrouter-claude", URLs: model.ChannelURLs{{URL: "https://anyrouter.top"}}}
 }
 
 func TestNormalizeAnyrouterAdaptiveThinking(t *testing.T) {
@@ -1659,7 +1659,7 @@ func TestInjectAnyrouterClaudeCodeFallbackTools(t *testing.T) {
 		{
 			name: "regular channel unchanged",
 			body: `{"model":"claude-fable-5-1","tools":[]}`,
-			cfg:  &model.Config{Name: "regular", URLs: model.ChannelURLs{{URL: "https://example.com"}}},
+			cfg:  &model.Config{CustomRequestRules: compatibilityRules(&model.CustomRequestRules{Passthrough: new(bool)}), Name: "regular", URLs: model.ChannelURLs{{URL: "https://example.com"}}},
 			want: []string{},
 		},
 		{

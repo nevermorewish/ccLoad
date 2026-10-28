@@ -29,7 +29,7 @@ func TestProxy_ArrayIndexBodyRuleNotReappliedOn400Retry(t *testing.T) {
 	var attempts atomic.Int32
 	var bodies [][]byte
 	env := setupProxyTestEnv(t, []testChannel{
-		{name: "codex-rule-retry", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex", customRequestRules: rules},
+		{name: "codex-rule-retry", upstreamProtocol: "codex", models: "gpt-5.5", apiKey: "sk-codex", customRequestRules: compatibilityRules(rules)},
 	}, map[int]string{0: "https://codex-upstream.example.com"})
 
 	env.server.client = &http.Client{

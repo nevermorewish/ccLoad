@@ -1430,7 +1430,7 @@ func TestAnthropicChannelTestUsesLightweightClaudeCodeWire(t *testing.T) {
 			t.Run(fmt.Sprintf("oauth=%v/%s", oauth, tc.name), func(t *testing.T) {
 				t.Parallel()
 				srv := newInMemoryServer(t)
-				cfg := &model.Config{Name: "anthropic-test"}
+				cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, Name: "anthropic-test"}
 				if oauth {
 					cfg.AuthType = model.AuthTypeAnthropicOAuth
 					cfg.OAuthCredential = anthropicProxyTestCredential(t, "test-token")
@@ -1790,7 +1790,7 @@ func TestChannelTestCodexUsesNativeWebsocketWhenEnabled(t *testing.T) {
 	defer upstream.Close()
 
 	srv := newInMemoryServer(t)
-	result := srv.testChannelAPI(context.Background(), &model.Config{
+	result := srv.testChannelAPI(context.Background(), &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		ID:                    97,
 		Name:                  "codex-native-websocket-test",
 		URLs:                  model.ChannelURLs{{URL: upstream.URL}},
@@ -4037,7 +4037,7 @@ func TestHandleChannelTest_UsesSelectedCodexProtocolWithBasePathPrefix(t *testin
 	srv.client = upstream.Client()
 	ctx := context.Background()
 
-	created, err := srv.store.CreateConfig(ctx, &model.Config{
+	created, err := srv.store.CreateConfig(ctx, &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		Name:                  "anthropic-with-prefixed-base-path",
 		URLs:                  model.ChannelURLs{{URL: upstream.URL + "/anthropic"}},
 		Priority:              1,

@@ -75,6 +75,13 @@
 - 关闭时，在下游输出边界过滤账号额度响应头（Anthropic/Codex/rate-limit）、额度 SSE/WS 事件和协议 JSON 中的额度字段，包括最终错误响应；保留请求 ID、Codex turn-state、正常错误和模型输出。用户自定义 metadata 与 token usage 不作为账号额度删除。
 - 原始响应仍先用于内部额度采样、计费、冷却和故障切换，过滤只作用于客户端输出。HTTP、SSE 与 Responses WebSocket 共用该边界；不能在 usage parser 前删事件。
 
+## 渠道透传
+
+- API Key 渠道的 `custom_request_rules.passthrough` 默认开启（缺省/null 为 true，显式 false 关闭），统一覆盖 Anthropic（含 Bedrock 兼容 Messages 网关）、OpenAI Chat、Codex Responses 和 Gemini；旧 `anthropic_passthrough` 配置兼容读取，页面只保留通用开关。OAuth/System One 保留原认证与传输契约，不提供 AWS SigV4/原生 InvokeModel 接入。
+- 透传跳过内置 body/header 指纹、Codex item ID/tool schema/缓存键改写、Anthropic beta/CCH 字段修复和错误后的 body 修复重试，包括删除加密 reasoning 或缺失历史项。HTTP 与原生 Responses WS 共用开关；WS 必需的 framing/重连回放仍执行，业务历史不作兼容清理。关闭后恢复原兼容处理。
+- 认证仍使用渠道 Key；hop-by-hop/内部路由头按通用反代规则过滤。模型映射、协议转换、显式头/body 规则、动态思考配置及强制流式仍生效。无这些显式改写时，同协议请求体保持原始字节，客户端业务头保留；错误正文不做修复。
+- 代理和管理测试共用判定；Anthropic 管理测试使用最小 Messages 模板。显式 false 必须参与非空判断、克隆与持久化；新旧编辑器都不能在保存时丢失关闭状态。兼容行为回归测试须显式关闭透传。
+
 ## 渠道强制上游流式
 
 - API Key 渠道高级设置的 `custom_request_rules.force_upstream_stream` 默认关闭，仅作用于 Chat Completions、Messages、Responses 和 Gemini 内容生成端点。OAuth、System One、计数、嵌入、图片与压缩端点不适用。

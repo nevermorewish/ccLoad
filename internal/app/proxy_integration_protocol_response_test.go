@@ -388,7 +388,7 @@ func TestProxy_CodexCompactionReplaysFullSessionAcrossRetry(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 	}))
-	env := setupProxyTestEnv(t, []testChannel{{
+	env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 		name: "openai-session-compact-retry", upstreamProtocol: "openai",
 		protocolTransformMode: model.ProtocolTransformModeLocal, models: "gpt-test", apiKey: "test-key",
 	}}, map[int]string{0: upstream.URL})
