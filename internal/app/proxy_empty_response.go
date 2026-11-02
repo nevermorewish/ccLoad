@@ -68,21 +68,12 @@ func isEmptyChatOutputValue(value any) bool {
 }
 
 // geminiCompletionFailure checks the complete JSON before conversion or commit.
-// A 200 error envelope must retain its real status and body. Token counts alone
-// cannot prove that a response contains output usable by the client.
+// A 200 error envelope must retain its real status and body. Otherwise, preserve
+// successful responses even when candidates are empty or finish reasons disagree.
 func geminiCompletionFailure(path string, body []byte) (int, error) {
 	generation := strings.HasSuffix(path, ":generateContent") || strings.HasSuffix(path, ":streamGenerateContent")
 	var response struct {
-		Error          any `json:"error"`
-		PromptFeedback struct {
-			BlockReason string `json:"blockReason"`
-		} `json:"promptFeedback"`
-		Candidates []struct {
-			FinishReason string `json:"finishReason"`
-			Content      struct {
-				Parts []map[string]any `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
+		Error any `json:"error"`
 	}
 	if err := sonic.Unmarshal(body, &response); err != nil {
 		if generation {
@@ -93,27 +84,7 @@ func geminiCompletionFailure(path string, body []byte) (int, error) {
 	if response.Error != nil {
 		return classifySSEErrorStatus(body), nil
 	}
-	if !generation || response.PromptFeedback.BlockReason != "" {
-		return 0, nil
-	}
-	if len(response.Candidates) == 0 {
-		return http.StatusBadGateway, fmt.Errorf("%w (200 OK without Gemini candidates or a prompt block reason)", util.ErrUpstreamEmptyResponse)
-	}
-	for _, candidate := range response.Candidates {
-		// Safety, truncation and other explicit finish reasons are protocol
-		// outcomes, not empty successful completions to replay on another model.
-		if candidate.FinishReason != "" && candidate.FinishReason != "STOP" {
-			return 0, nil
-		}
-		for _, part := range candidate.Content.Parts {
-			for name, value := range part {
-				if name != "thought" && name != "thoughtSignature" && !isEmptyChatOutputValue(value) {
-					return 0, nil
-				}
-			}
-		}
-	}
-	return http.StatusBadGateway, fmt.Errorf("%w (200 OK without Gemini candidate output)", util.ErrUpstreamEmptyResponse)
+	return 0, nil
 }
 
 func rejectInvalidNonStreamCompletion(reqCtx *requestContext, resp *http.Response, hdr http.Header, stats *streamReadStats, upstreamProtocol string, body []byte) (*fwResult, float64, error) {

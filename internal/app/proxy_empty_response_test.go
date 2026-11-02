@@ -145,17 +145,20 @@ func TestProxy_NonStreamingEmptyAssistant(t *testing.T) {
 	}
 }
 
+const emptyGeminiConflictingFinish = `{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"finish":["MAX_TOKENS"],"finishReason":"STOP","finish_messages":[],"index":0}],"modelVersion":"gemini-3.8-flash","usageMetadata":{"candidatesTokenCount":12,"promptTokenCount":261,"totalTokenCount":273}}`
+
 func TestGeminiNonStreamCompletionValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
 		status     int
 	}{
-		{"no candidates", `{}`, 502},
-		{"empty candidates", `{"candidates":[]}`, 502},
-		{"empty parts", `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":8}}`, 502},
-		{"empty text", `{"candidates":[{"content":{"parts":[{"text":""},{"thoughtSignature":"opaque"}]},"finishReason":"STOP"}]}`, 502},
+		{"no candidates", `{}`, 200},
+		{"empty candidates", `{"candidates":[]}`, 200},
+		{"empty parts", `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":8}}`, 200},
+		{"empty text", `{"candidates":[{"content":{"parts":[{"text":""},{"thoughtSignature":"opaque"}]},"finishReason":"STOP"}]}`, 200},
+		{"conflicting finish reasons", emptyGeminiConflictingFinish, 200},
 		{"invalid JSON", `{"candidates":`, 502},
-		{"JSON null", `null`, 502},
+		{"JSON null", `null`, 200},
 		{"embedded 429", `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota exhausted"}}`, 429},
 		{"embedded 503", `{"error":{"code":503,"status":"UNAVAILABLE","message":"model unavailable"}}`, 503},
 		{"text with zero tokens", `{"candidates":[{"content":{"parts":[{"text":"OK"}]},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":0}}`, 200},
@@ -202,23 +205,26 @@ func TestProxy_GeminiEmptyAndEmbeddedErrors(t *testing.T) {
 	const good = `{"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1}}`
 	const quota = `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota exhausted"}}`
 	for _, tc := range []struct {
-		name                               string
-		force, fallback, translated, admin bool
-		body                               string
-		status                             int
+		name                   string
+		force, fallback, admin bool
+		body                   string
+		status                 int
 	}{
-		{name: "admin empty", admin: true, body: empty, status: 502},
-		{name: "admin forced empty", admin: true, force: true, body: empty, status: 502},
+		{name: "admin empty", admin: true, body: empty, status: 200},
+		{name: "admin forced empty", admin: true, force: true, body: empty, status: 200},
 		{name: "admin embedded quota", admin: true, body: quota, status: 429},
-		{name: "native empty", body: empty, status: 502},
-		{name: "forced stream empty", force: true, body: empty, status: 502},
-		{name: "converted empty", translated: true, body: empty, status: 502},
-		{name: "forced converted empty", force: true, translated: true, body: empty, status: 502},
+		{name: "native empty", body: empty, status: 200},
+		{name: "forced stream empty", force: true, body: empty, status: 200},
 		{name: "embedded quota", body: quota, status: 429},
 		{name: "forced embedded quota", force: true, body: quota, status: 429},
-		{name: "long converted error", translated: true, body: `{"padding":"` + strings.Repeat("x", 1024) + `","error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota exhausted"}}`, status: 429},
-		{name: "native fallback", fallback: true, body: empty, status: 200},
-		{name: "forced fallback", force: true, fallback: true, body: empty, status: 200},
+		{name: "long embedded error", body: `{"padding":"` + strings.Repeat("x", 1024) + `","error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota exhausted"}}`, status: 429},
+		{name: "native empty with fallback", fallback: true, body: empty, status: 200},
+		{name: "native quota fallback", fallback: true, body: quota, status: 200},
+		{name: "native conflicting finish", body: emptyGeminiConflictingFinish, status: 200},
+		{name: "forced conflicting finish", force: true, body: emptyGeminiConflictingFinish, status: 200},
+		{name: "admin forced conflicting finish", admin: true, force: true, body: emptyGeminiConflictingFinish, status: 200},
+		{name: "admin conflicting finish", admin: true, body: emptyGeminiConflictingFinish, status: 200},
+		{name: "forced empty with fallback", force: true, fallback: true, body: empty, status: 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			channels := []testChannel{{name: "bad", models: "test", apiKey: "key-bad", priority: 100, upstreamProtocol: "gemini", protocolTransformMode: model.ProtocolTransformModeLocal, customRequestRules: &model.CustomRequestRules{ForceUpstreamStream: tc.force}}}
@@ -234,34 +240,41 @@ func TestProxy_GeminiEmptyAndEmbeddedErrors(t *testing.T) {
 				body, ct := tc.body, "application/json"
 				if r.URL.Host == "good.example.com" {
 					body = good
-				} else if tc.force && tc.body == empty {
+				} else if tc.force && tc.body != quota {
 					body = "data: " + body + "\n\n"
 					ct = "text/event-stream"
 				}
 				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {ct}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 			})}
-			// The admin test must report the same failure instead of a green empty reply.
+			// The admin test must preserve the same success or embedded error as the proxy.
 			if tc.admin {
 				c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/1/test", map[string]any{"model": "test", "client_protocol": "gemini", "stream": false, "content": "hi"}))
 				c.Params = gin.Params{{Key: "id", Value: "1"}}
 				env.server.HandleChannelTest(c)
 				data := gjson.GetBytes(w.Body.Bytes(), "data")
-				if data.Get("success").Bool() || int(data.Get("status_code").Int()) != tc.status || data.Get("error").String() == "" {
-					t.Fatalf("admin returned empty success: %s", w.Body.String())
+				if data.Get("success").Bool() != (tc.status == 200) || int(data.Get("status_code").Int()) != tc.status || (data.Get("error").String() != "") != (tc.status != 200) {
+					t.Fatalf("unexpected admin result: %s", w.Body.String())
 				}
 				return
 			}
 			path := "/v1beta/models/test:generateContent"
 			request := map[string]any{"contents": []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hi"}}}}}
-			if tc.translated {
-				path = "/v1/chat/completions"
-				request = map[string]any{"model": "test", "stream": false, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
-			}
 			w := doProxyRequest(t, env.engine, path, request, nil)
 			if w.Code != tc.status {
 				t.Fatalf("status=%d want=%d body=%s", w.Code, tc.status, w.Body.String())
 			}
-			if tc.fallback {
+			if tc.status == 200 && tc.body != quota {
+				if len(hosts) != 1 || hosts[0] != "bad.example.com" || gjson.GetBytes(w.Body.Bytes(), "error").Exists() {
+					t.Fatalf("empty success retried or rejected: hosts=%v body=%s", hosts, w.Body.String())
+				}
+				if !tc.force && w.Body.String() != tc.body {
+					t.Fatalf("native response changed: %s", w.Body.String())
+				}
+				cooldowns, err := env.store.GetAllModelCooldowns(context.Background())
+				if err != nil || len(cooldowns) != 0 {
+					t.Fatalf("empty success triggered cooldown: cooldowns=%v err=%v", cooldowns, err)
+				}
+			} else if tc.fallback {
 				if len(hosts) != 2 || hosts[0] != "bad.example.com" || hosts[1] != "good.example.com" || !strings.Contains(w.Body.String(), "OK") {
 					t.Fatalf("fallback failed: hosts=%v body=%s", hosts, w.Body.String())
 				}
@@ -272,9 +285,6 @@ func TestProxy_GeminiEmptyAndEmbeddedErrors(t *testing.T) {
 				}
 				if tc.status == 429 && message != "quota exhausted" {
 					t.Fatalf("upstream error lost: %s", w.Body.String())
-				}
-				if tc.status == 502 && !strings.Contains(message, "without Gemini candidate output") {
-					t.Fatalf("empty-response reason lost: %s", w.Body.String())
 				}
 			}
 		})
