@@ -30,6 +30,8 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/text/collate"
+	"golang.org/x/text/language"
 )
 
 // ==================== 渠道CRUD管理 ====================
@@ -356,14 +358,17 @@ func parseChannelListSort(c *gin.Context) (channelListSort, error) {
 }
 
 // sortChannelList 原地排序 cfgs：先按请求的键，平局依次按优先级降序、名称升序、ID 升序，
-// 保证分页跨页顺序稳定。前端 compareChannelsForList 必须保持同一规则。
+// 保证分页跨页顺序稳定；/web/channels 直接使用服务端返回的顺序。
 func sortChannelList(cfgs []*model.Config, order channelListSort, priority func(*model.Config) float64) {
+	// 名称按自然顺序比较：忽略字母大小写，连续数字按数值排列（channel2 < channel10）。
+	// Collator 不支持并发共享，每次列表排序使用独立实例。
+	nameOrder := collate.New(language.Und, collate.Numeric, collate.IgnoreCase)
 	sort.Slice(cfgs, func(i, j int) bool {
 		a, b := cfgs[i], cfgs[j]
 		var result int
 		switch order.key {
 		case "name":
-			result = strings.Compare(a.Name, b.Name)
+			result = nameOrder.CompareString(a.Name, b.Name)
 		case "enabled":
 			result = cmp.Compare(boolToInt(a.Enabled), boolToInt(b.Enabled))
 		default:

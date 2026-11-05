@@ -2427,6 +2427,12 @@ func (s *Server) newTestUpstreamRequest(
 		deadlineCancel()
 	}
 	requestPlan.timeout = timeout
+	videoBody, err := prepareChannelVideoBody(ctx, cfgForBuild, requestPlan.requestBody, protocol.Protocol(requestPlan.upstreamProtocol))
+	if err != nil {
+		timeout.cancelAll()
+		return nil, nil, err
+	}
+	requestPlan.requestBody = videoBody
 	req, err := http.NewRequestWithContext(ctx, "POST", requestPlan.fullURL, bytes.NewReader(requestPlan.requestBody))
 	if err != nil {
 		timeout.cancelAll()

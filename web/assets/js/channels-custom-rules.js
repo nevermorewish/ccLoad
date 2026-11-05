@@ -40,6 +40,7 @@
     const headers = Array.isArray(safe.headers) ? safe.headers : [];
     const body = Array.isArray(safe.body) ? safe.body : [];
     return {
+      ...(safe.video_to_images === true ? { video_to_images: true } : {}),
       ...(safe.force_upstream_stream === true ? { force_upstream_stream: true } : {}),
       ...(safe.passthrough === false ? { passthrough: false } : {}),
       headers: headers.map((r) => ({
@@ -204,8 +205,9 @@
         }
       })
       .filter((r) => r);
-    if (headers.length === 0 && body.length === 0 && !state.force_upstream_stream && state.passthrough !== false) return null;
+    if (headers.length === 0 && body.length === 0 && !state.video_to_images && !state.force_upstream_stream && state.passthrough !== false) return null;
     const payload = state.force_upstream_stream ? { force_upstream_stream: true } : {};
+    if (state.video_to_images === true) payload.video_to_images = true;
     if (state.passthrough === false) payload.passthrough = false;
     if (headers.length > 0) {
       payload.headers = headers.map((r) => {

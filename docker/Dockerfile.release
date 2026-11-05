@@ -18,7 +18,7 @@ FROM debian:bookworm-slim
 ARG TARGETARCH
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates tzdata wget && \
+    apt-get install -y --no-install-recommends ca-certificates tzdata wget ffmpeg && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd --gid 1001 ccload && \
     useradd --uid 1001 --gid ccload --no-create-home --shell /usr/sbin/nologin ccload && \

@@ -149,3 +149,15 @@ test('OpenCode saves omit unsupported management accounts and retain automatic m
   }
   assert.deepEqual(api.formToPayload({ ...api.emptyForm(), urls: [{ url: 'https://opencode.ai.example/zen' }] }, extras).management_account, { profile: '' });
 });
+
+
+test('video-to-images defaults off and survives enable, reload, and disable', () => {
+  const initial = advancedFromChannel({});
+  assert.equal(initial.video_to_images, false);
+  assert.equal(advancedToPayload(initial, false).custom_request_rules, null);
+  const enabled = advancedToPayload({ ...initial, video_to_images: true }, false);
+  assert.equal(enabled.custom_request_rules.video_to_images, true);
+  const loaded = advancedFromChannel(enabled);
+  assert.equal(loaded.video_to_images, true);
+  assert.equal(advancedToPayload({ ...loaded, video_to_images: false }, false).custom_request_rules, null);
+});

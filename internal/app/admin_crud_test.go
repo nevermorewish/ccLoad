@@ -324,6 +324,8 @@ func TestHandleListChannelsSortsBeforePagination(t *testing.T) {
 		{"alpha", 10, false},
 		{"delta", 20, true},
 		{"bravo", 20, false},
+		{"alpha10", 10, false},
+		{"Alpha2", 10, false},
 	}
 	for _, fixture := range fixtures {
 		if _, err := store.CreateConfig(ctx, &model.Config{
@@ -357,12 +359,13 @@ func TestHandleListChannelsSortsBeforePagination(t *testing.T) {
 		query string
 		want  []string
 	}{
-		{"", []string{"charlie", "bravo", "delta", "alpha"}},
-		{"sort=priority&order=asc", []string{"alpha", "bravo", "delta", "charlie"}},
-		{"sort=name", []string{"alpha", "bravo", "charlie", "delta"}},
-		{"sort=name&order=desc", []string{"delta", "charlie", "bravo", "alpha"}},
-		{"sort=enabled", []string{"charlie", "delta", "bravo", "alpha"}},
-		{"sort=enabled&order=asc", []string{"bravo", "alpha", "charlie", "delta"}},
+		{"", []string{"charlie", "bravo", "delta", "Alpha2", "alpha", "alpha10"}},
+		{"sort=priority&order=asc", []string{"Alpha2", "alpha", "alpha10", "bravo", "delta", "charlie"}},
+		{"sort=name", []string{"alpha", "Alpha2", "alpha10", "bravo", "charlie", "delta"}},
+		{"sort=name&order=asc", []string{"alpha", "Alpha2", "alpha10", "bravo", "charlie", "delta"}},
+		{"sort=name&order=desc", []string{"delta", "charlie", "bravo", "alpha10", "Alpha2", "alpha"}},
+		{"sort=enabled", []string{"charlie", "delta", "bravo", "Alpha2", "alpha", "alpha10"}},
+		{"sort=enabled&order=asc", []string{"bravo", "Alpha2", "alpha", "alpha10", "charlie", "delta"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.query, func(t *testing.T) {

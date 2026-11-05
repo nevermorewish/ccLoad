@@ -111,7 +111,7 @@ export function ChannelsPage() {
     const seq = ++loadSeq.current
     setLoading(true)
     try {
-      const params: Record<string, unknown> = { limit: pageSize, offset: (page - 1) * pageSize, status: filters.status, auth_type: filters.authType, range: statsRange }
+      const params: Record<string, unknown> = { limit: pageSize, offset: (page - 1) * pageSize, status: filters.status, auth_type: filters.authType, range: statsRange, sort: 'name', order: 'asc' }
       // 命中筛选全集时用精确参数（channel_name / model），否则模糊（search / model_like）。
       if (filters.search.trim()) params[options.channel_names.includes(filters.search.trim()) ? 'channel_name' : 'search'] = filters.search.trim()
       if (filters.model.trim()) params[options.models.includes(filters.model.trim()) ? 'model' : 'model_like'] = filters.model.trim()

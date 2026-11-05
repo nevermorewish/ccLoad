@@ -17,6 +17,7 @@ export type ManagementDraft = {
   credential_configured?: boolean
 }
 export type AdvancedDraft = {
+  video_to_images: boolean
   force_upstream_stream: boolean
   passthrough: boolean
   headers: HeaderRuleDraft[]; body: BodyRuleDraft[]; cooldown: CooldownRuleDraft[]
@@ -42,11 +43,12 @@ const PROFILES = [{ value: '', label: '不启用' }, { value: 'new_api', label: 
 // ---------------------------------------------------------------- 与后端结构互转
 
 export function advancedFromChannel(channel: Record<string, unknown>, management: Record<string, unknown> | undefined): AdvancedDraft {
-  const custom = (channel.custom_request_rules ?? {}) as { force_upstream_stream?: boolean; passthrough?: boolean; headers?: Array<Record<string, unknown>>; body?: Array<Record<string, unknown>> }
+  const custom = (channel.custom_request_rules ?? {}) as { video_to_images?: boolean; force_upstream_stream?: boolean; passthrough?: boolean; headers?: Array<Record<string, unknown>>; body?: Array<Record<string, unknown>> }
   const cooldown = (channel.cooldown_detection_rules ?? {}) as { rules?: Array<Record<string, unknown>> }
   const rules = [...(cooldown.rules ?? [])].sort((a, b) => Number(a.priority ?? 0) - Number(b.priority ?? 0))
   const account = management ?? {}
   return {
+    video_to_images: custom.video_to_images === true,
     force_upstream_stream: custom.force_upstream_stream === true,
     passthrough: custom.passthrough !== false,
     headers: (custom.headers ?? []).map((rule) => ({ action: String(rule.action ?? 'override'), name: String(rule.name ?? ''), value: String(rule.value ?? '') })),
@@ -140,7 +142,7 @@ export function advancedToPayload(draft: AdvancedDraft, isOAuth: boolean): Recor
     ...(rule.mode === 'fixed' ? { cooldown_seconds: Number(rule.cooldown_seconds) } : { time_capture: rule.time_capture, time_format: rule.time_format, time_layout: rule.time_layout || undefined, timezone: rule.timezone || undefined }),
   }))
   const payload: Record<string, unknown> = {
-    custom_request_rules: headers.length || body.length || draft.force_upstream_stream || !draft.passthrough ? { headers, body, ...(draft.force_upstream_stream ? { force_upstream_stream: true } : {}), ...(!draft.passthrough ? { passthrough: false } : {}) } : null,
+    custom_request_rules: headers.length || body.length || draft.video_to_images || draft.force_upstream_stream || !draft.passthrough ? { headers, body, ...(draft.video_to_images ? { video_to_images: true } : {}), ...(draft.force_upstream_stream ? { force_upstream_stream: true } : {}), ...(!draft.passthrough ? { passthrough: false } : {}) } : null,
     cooldown_detection_rules: rules.length ? { rules } : null,
     proxy_url: draft.proxy_url.trim(),
     available_time_start: draft.available_time_start,
@@ -223,6 +225,8 @@ export function AdvancedSettingsDialog({ open, draft: initial, channelId, authTy
       {notice && <p className="muted" role="status">{notice}</p>}
 
       {tab === 'custom' && <>
+        <label><input type="checkbox" role="switch" checked={draft.video_to_images} onChange={(event) => patch({ video_to_images: event.target.checked })} /> 视频转图片（默认关闭）</label>
+        <p className="muted">将视频 URL 或 Base64 视频抽帧后，以图片发送给上游。上游需支持图片输入；不包含音频。每次最多 2 个视频，每个不超过 64 MiB，最多抽取 16 帧。开启后透传请求也会进行转换。</p>
         {!isOAuth && authType !== 'system_one' && <>
           <label><input type="checkbox" role="switch" checked={draft.passthrough} onChange={(event) => patch({ passthrough: event.target.checked })} /> 透传（默认开启）</label>
           <p className="muted">适用于 Anthropic（含 AWS Bedrock 兼容网关）、GPT/OpenAI 和 Gemini。保留业务请求头和请求体，跳过内置指纹、参数修复及改写重试。认证使用渠道 Key；模型映射、协议转换、显式请求规则和强制上游流式仍生效。关闭后启用兼容处理。</p>

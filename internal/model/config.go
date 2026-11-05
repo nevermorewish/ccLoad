@@ -551,6 +551,7 @@ type CustomBodyRule struct {
 
 // CustomRequestRules 渠道级自定义请求改写规则集
 type CustomRequestRules struct {
+	VideoToImages       bool  `json:"video_to_images,omitempty"`
 	ForceUpstreamStream bool  `json:"force_upstream_stream,omitempty"`
 	Passthrough         *bool `json:"passthrough,omitempty"`
 	// Deprecated: old Anthropic-only clients may still send this field.
@@ -564,7 +565,7 @@ func (r *CustomRequestRules) IsEmpty() bool {
 	if r == nil {
 		return true
 	}
-	return !r.ForceUpstreamStream && r.Passthrough == nil && !r.AnthropicPassthrough && len(r.Headers) == 0 && len(r.Body) == 0
+	return !r.VideoToImages && !r.ForceUpstreamStream && r.Passthrough == nil && !r.AnthropicPassthrough && len(r.Headers) == 0 && len(r.Body) == 0
 }
 
 // Clone returns an independent copy suitable for config-cache boundaries.
@@ -573,6 +574,7 @@ func (r *CustomRequestRules) Clone() *CustomRequestRules {
 		return nil
 	}
 	out := &CustomRequestRules{
+		VideoToImages:        r.VideoToImages,
 		ForceUpstreamStream:  r.ForceUpstreamStream,
 		AnthropicPassthrough: r.AnthropicPassthrough,
 		Headers:              append([]CustomHeaderRule(nil), r.Headers...),

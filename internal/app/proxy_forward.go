@@ -394,6 +394,11 @@ func (s *Server) buildProxyRequest(
 		upstreamStreaming = true
 	}
 
+	body, err = prepareChannelVideoBody(reqCtx.ctx, cfg, body, upstreamProtocol)
+	if err != nil {
+		return nil, err
+	}
+
 	// 2. 创建带上下文的请求
 	req, err := buildUpstreamRequest(reqCtx.ctx, method, upstreamURL, body)
 	if err != nil {
