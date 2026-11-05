@@ -8,9 +8,11 @@ import type { Channel, Session } from '../types'
 import { ChannelEditorDialog } from './channels/channel-editor-dialog'
 import { channelTestPayload } from './channels/api'
 import { RoutePreviewDialog } from './route-preview-dialog'
+import { KimiTestPanel } from './kimi-test-panel'
+import { createClientId } from '../lib/client-id'
 
 type Entry = { model: string; redirect_model?: string; disabled?: boolean }
-type TestMode = 'channel' | 'model' | 'chat' | 'image'
+type TestMode = 'channel' | 'model' | 'chat' | 'image' | 'kimi'
 type Key = { key_index?: number; api_key?: string; disabled?: boolean; note?: string; cost_multiplier?: number }
 type ChatBlock = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
 type ChatMessage = { role: string; content: string | ChatBlock[]; thinking?: string; summary?: Record<string, unknown> }
@@ -41,7 +43,7 @@ const readStoredFlag = (key: string, fallback: boolean) => { try { const value =
 const readStoredText = (key: string) => { try { return localStorage.getItem(key) ?? '' } catch { return '' } }
 const readSavedChat = (): { sessionId: string; messages: ChatMessage[] } => {
   const value = readStored<{ session_id?: string; messages?: ChatMessage[] }>(CHAT_STORAGE_KEY, {})
-  return { sessionId: value.session_id || crypto.randomUUID(), messages: Array.isArray(value.messages) ? value.messages : [] }
+  return { sessionId: value.session_id || createClientId(), messages: Array.isArray(value.messages) ? value.messages : [] }
 }
 
 function extractSSEText(value: unknown): string {
@@ -58,7 +60,7 @@ const chatMessageText = (message: ChatMessage) => typeof message.content === 'st
 
 const readPendingImages = (files: File[]) => Promise.all(files.map((file) => new Promise<PendingImage>((resolve, reject) => {
   const reader = new FileReader()
-  reader.onload = () => resolve({ id: crypto.randomUUID(), name: file.name || 'clipboard-image', dataUrl: String(reader.result ?? '') })
+  reader.onload = () => resolve({ id: createClientId(), name: file.name || 'clipboard-image', dataUrl: String(reader.result ?? '') })
   reader.onerror = () => reject(reader.error)
   reader.readAsDataURL(file)
 })))
@@ -156,8 +158,15 @@ export function ModelTestPage() {
   useEffect(() => { try { localStorage.setItem(STATE_KEY, JSON.stringify({ mode, channelId: channelId === '' ? undefined : channelId, model, protocol })) } catch { /* 存储不可用 */ } }, [mode, channelId, model, protocol])
 
   useEffect(() => {
-    if (!channelId) { setKeys([]); setKeyIndex(''); return }
-    void getJSON<Key[]>(`/admin/channels/${channelId}/keys`).then((value) => { setKeys(Array.isArray(value) ? value : []); setKeyIndex(String(value.find((item) => !item.disabled)?.key_index ?? '')) }).catch(() => setKeys([]))
+    let active = true
+    setKeys([]); setKeyIndex('')
+    if (!channelId) return
+    void getJSON<Key[]>(`/admin/channels/${channelId}/keys`).then((value) => {
+      if (!active) return
+      const available = Array.isArray(value) ? value : []
+      setKeys(available); setKeyIndex(String(available.find((item) => !item.disabled)?.key_index ?? ''))
+    }).catch(() => { if (active) setKeys([]) })
+    return () => { active = false }
   }, [channelId])
 
   // 切换模式时重置不适用的选择，避免把生图/聊天参数带到其他模式。
@@ -333,20 +342,22 @@ export function ModelTestPage() {
     </header>
 
     <div className="toolbar" role="tablist">
-      {([['channel', '按渠道'], ['model', '按模型'], ['chat', '对话'], ['image', '生图']] as Array<[TestMode, string]>).map(([key, label]) => (
-        <button key={key} role="tab" aria-selected={mode === key} className={`btn${mode === key ? ' btn-primary' : ''}`} onClick={() => switchMode(key)}>{label}</button>
+      {([['channel', '按渠道'], ['model', '按模型'], ['chat', '对话'], ['image', '生图'], ['kimi', 'Kimi K3']] as Array<[TestMode, string]>).map(([key, label]) => (
+        <button key={key} role="tab" disabled={busy} aria-selected={mode === key} className={`btn${mode === key ? ' btn-primary' : ''}`} onClick={() => switchMode(key)}>{label}</button>
       ))}
     </div>
 
     <div className="toolbar">
-      <SearchableSelect ariaLabel="渠道" className="combobox-inline" value={channelId === '' ? '' : String(channelId)} options={[{ value: '', label: '选择渠道' }, ...channelRows.map((row) => ({ value: String(row.id), label: `${row.name}${row.enabled === false ? '（已停用）' : ''}` }))]} onChange={(value) => { setChannelId(value === '' ? '' : Number(value)); setModel('') }} />
-      {mode !== 'model' && <SearchableSelect ariaLabel="模型" className="combobox-inline" options={configuredModels.map((name) => ({ value: name, label: name }))} value={model} onChange={setModel} placeholder={configuredModels.length ? '选择模型' : '该渠道暂无模型'} />}
-      {current?.auth_type !== 'system_one' && <SearchableSelect ariaLabel="请求协议" className="combobox-inline" value={protocol} options={CLIENT_PROTOCOLS} onChange={setProtocol} />}
-      <SearchableSelect ariaLabel="API Key" className="combobox-inline" value={keyIndex} options={[{ value: '', label: '自动选择 Key' }, ...keys.slice(0, 10).map((key) => ({ value: String(key.key_index), label: `#${Number(key.key_index) + 1} ${maskKey(key.api_key)}${key.note ? `（${key.note}）` : ''}×${key.cost_multiplier ?? 1}` }))]} onChange={setKeyIndex} />
-      {current?.auth_type !== 'system_one' && <label><input type="checkbox" checked={stream} onChange={(event) => setStream(event.target.checked)} /> 流式</label>}
+      <SearchableSelect disabled={busy} ariaLabel="渠道" className="combobox-inline" value={channelId === '' ? '' : String(channelId)} options={[{ value: '', label: '选择渠道' }, ...channelRows.map((row) => ({ value: String(row.id), label: `${row.name}${row.enabled === false ? '（已停用）' : ''}` }))]} onChange={(value) => { setChannelId(value === '' ? '' : Number(value)); setModel('') }} />
+      {mode !== 'model' && <SearchableSelect disabled={busy} ariaLabel="模型" className="combobox-inline" options={configuredModels.map((name) => ({ value: name, label: name }))} value={model} onChange={setModel} placeholder={configuredModels.length ? '选择模型' : '该渠道暂无模型'} />}
+      {mode !== 'kimi' && current?.auth_type !== 'system_one' && <SearchableSelect ariaLabel="请求协议" className="combobox-inline" value={protocol} options={CLIENT_PROTOCOLS} onChange={setProtocol} />}
+      <SearchableSelect disabled={busy} ariaLabel="API Key" className="combobox-inline" value={keyIndex} options={[{ value: '', label: '自动选择 Key' }, ...keys.slice(0, 10).map((key) => ({ value: String(key.key_index), label: `#${Number(key.key_index) + 1} ${maskKey(key.api_key)}${key.note ? `（${key.note}）` : ''}×${key.cost_multiplier ?? 1}` }))]} onChange={setKeyIndex} />
+      {mode !== 'kimi' && current?.auth_type !== 'system_one' && <label><input type="checkbox" checked={stream} onChange={(event) => setStream(event.target.checked)} /> 流式</label>}
       {mode === 'image' && <button className="btn btn-primary" disabled={busy || !channelId || !model} onClick={() => void runImage()}>{busy ? '生成中…' : '生成图片'}</button>}
     </div>
     {error && <div className="card error-text" role="alert">{error}</div>}
+
+    {mode === 'kimi' && <KimiTestPanel channel={current} model={model} keyIndex={keyIndex} onBusy={setBusy} />}
 
     {/* ---------------- 按渠道 / 按模型 ---------------- */}
     {(mode === 'channel' || mode === 'model') && <>
@@ -406,7 +417,7 @@ export function ModelTestPage() {
         <SearchableSelect ariaLabel="思考等级" className="combobox-inline" value={thinkingEffort} options={THINKING_EFFORTS} onChange={setThinkingEffort} />
         <label><input type="checkbox" checked={chatStream} onChange={(event) => setChatStream(event.target.checked)} /> 流式</label>
         <label><input type="checkbox" checked={builtinSearch} onChange={(event) => setBuiltinSearch(event.target.checked)} /> 内置搜索</label>
-        <button className="btn" disabled={!chat.length} onClick={() => { setChat([]); setSessionId(crypto.randomUUID()); setResult(null) }}>清空对话</button>
+        <button className="btn" disabled={!chat.length} onClick={() => { setChat([]); setSessionId(createClientId()); setResult(null) }}>清空对话</button>
         <button className="btn" disabled={chat.length < 2} onClick={() => exportChat(chat)}>导出 Markdown</button>
       </div>
       <div className="chat-transcript">

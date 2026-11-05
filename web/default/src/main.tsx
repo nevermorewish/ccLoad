@@ -7,6 +7,7 @@ import { SessionContext } from './lib/session-context'
 import { AppLayout } from './components/layout'
 import type { Session } from './types'
 import './styles/index.css'
+import './styles/kimi-test.css'
 
 // 页面按路由懒加载，首屏只下载概览和应用壳，避免渠道/日志/模型测试等大页面
 // 在用户尚未访问时阻塞首屏。Rsbuild 生产构建会为这些入口生成独立缓存块。

@@ -1797,6 +1797,7 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		public.GET("/summary", s.HandlePublicSummary)
 		public.GET("/protocols", s.HandleGetProtocols)
 		public.GET("/version", s.HandlePublicVersion)
+		public.GET("/model-test/kimi/blue.png", s.HandleKimiBlueFixture)
 	}
 
 	// 登录相关（公开访问）
@@ -1904,6 +1905,8 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		admin.POST("/channels/:id/models", s.HandleAddModels)        // 添加渠道模型
 		admin.DELETE("/channels/:id/models", s.HandleDeleteModels)   // 删除渠道模型
 		admin.POST("/channels/:id/test", s.HandleChannelTest)
+		admin.GET("/model-test/kimi/cases", s.HandleKimiCases)
+		admin.POST("/channels/:id/kimi-test", s.HandleChannelKimiTest)
 		admin.POST("/channels/:id/test-url", s.HandleChannelURLTest)
 		admin.POST("/channels/:id/chat", s.HandleChannelChat)
 		admin.POST("/channels/:id/images/generations", s.HandleChannelImageGeneration)

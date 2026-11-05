@@ -1,0 +1,57 @@
+.kimi-panel { --kimi-bg: #111827; --kimi-row: #151e2f; --kimi-border: #2b374d; --kimi-muted: #99a7be; --kimi-text: #e5eaf3; color: var(--kimi-text); display: grid; gap: 14px; }
+:root[data-resolved-theme="light"] .kimi-panel { --kimi-bg: #fff; --kimi-row: #fafbfd; --kimi-border: #dce3ef; --kimi-muted: #6d7a93; --kimi-text: #232c3d; }
+.kimi-panel h2, .kimi-panel h3, .kimi-panel h4, .kimi-panel p { margin: 0; }
+.kimi-intro { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: center; gap: 14px; }
+.kimi-intro h2 { font-size: 20px; margin-bottom: 6px; }
+.kimi-panel p, .kimi-panel small { color: var(--kimi-muted); font-size: 12px; line-height: 1.65; }
+.kimi-intro .toolbar { margin: 0; }
+.kimi-intro .btn { display: inline-flex; gap: 7px; align-items: center; }
+.kimi-options { border: 1px solid var(--kimi-border); border-radius: 10px; background: var(--kimi-bg); padding: 12px 18px; font-size: 13px; }
+.kimi-options summary { cursor: pointer; color: var(--kimi-muted); }
+.kimi-options fieldset { border: 0; padding: 16px 0 0; margin: 0; min-width: 0; display: grid; gap: 12px; }
+.kimi-option-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.kimi-options label { display: grid; gap: 8px; }
+.kimi-options input { width: 100%; min-width: 0; }
+.kimi-summary { display: grid; grid-template-columns: 1.2fr 1.2fr 1fr 1fr 1fr; gap: 12px; }
+.kimi-summary > div { border: 1px solid var(--kimi-border); border-radius: 12px; background: var(--kimi-bg); padding: 18px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.kimi-summary > div > span:first-child, .kimi-metadata span { font-size: 11px; color: var(--kimi-muted); }
+.kimi-summary strong { font-size: 23px; line-height: 1.1; }
+.kimi-status { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 30px; background: #283348; color: #b8c5dc; font: 600 12px/1.2 Inter, sans-serif; white-space: nowrap; }
+.kimi-status.kimi-passed, .kimi-status.kimi-completed { background: #153c33; color: #7fd7b3; }
+.kimi-status.kimi-failed, .kimi-status.kimi-interrupted { background: #492831; color: #ff9ca5; }
+.kimi-status.kimi-running { background: #292959; color: #b4a9ff; }
+:root[data-resolved-theme="light"] .kimi-status { background: #eef1f7; color: #70809a; }
+:root[data-resolved-theme="light"] .kimi-status.kimi-passed, :root[data-resolved-theme="light"] .kimi-status.kimi-completed { background: #e5f5ee; color: #21815d; }
+:root[data-resolved-theme="light"] .kimi-status.kimi-failed, :root[data-resolved-theme="light"] .kimi-status.kimi-interrupted { background: #fdecee; color: #bd3543; }
+:root[data-resolved-theme="light"] .kimi-status.kimi-running { background: #efecff; color: #6a52d7; }
+.kimi-pass-number { color: #28976c; }.kimi-fail-number { color: #c47c2b; }
+.kimi-metadata { border: 1px solid var(--kimi-border); border-radius: 12px; background: var(--kimi-bg); padding: 21px; display: grid; grid-template-columns: .7fr 1fr 1.65fr; gap: 20px; }
+.kimi-metadata > div { display: grid; align-content: start; gap: 7px; min-width: 0; }
+.kimi-metadata strong { font-size: 13px; overflow-wrap: anywhere; }
+.kimi-columns { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(300px, 1fr); gap: 14px; align-items: start; }
+.kimi-cases, .kimi-events { min-width: 0; border: 1px solid var(--kimi-border); background: var(--kimi-bg); padding: 22px; border-radius: 12px; }
+.kimi-panel h3 { font-size: 18px; margin-bottom: 3px; }
+.kimi-section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.kimi-section-title > label { white-space: nowrap; font-size: 12px; color: var(--kimi-muted); }
+.kimi-case-list { display: grid; gap: 8px; }
+.kimi-case { border: 1px solid var(--kimi-border); border-radius: 9px; background: var(--kimi-row); overflow: hidden; }
+.kimi-case-heading { min-height: 64px; display: flex; align-items: center; gap: 9px; padding: 10px 12px; }
+.kimi-case-heading > input { margin: 0; accent-color: #7060db; flex-shrink: 0; }
+.kimi-case-toggle { flex: 1; min-width: 0; border: 0; background: transparent; color: inherit; text-align: left; padding: 0; }
+.kimi-case-toggle strong { display: block; font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
+.kimi-case-toggle small { display: block; font-size: 10px; overflow-wrap: anywhere; }
+.kimi-case-detail { padding: 14px; border-top: 1px solid var(--kimi-border); display: grid; gap: 10px; }
+.kimi-case-detail pre { max-height: 320px; margin: 0; padding: 12px; background: var(--kimi-bg); border: 1px solid var(--kimi-border); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; font-size: 11px; }
+.kimi-case-detail h4 { font-size: 12px; }
+.kimi-events { position: sticky; top: 16px; }
+.kimi-event-list { margin-top: 18px; max-height: 900px; min-height: 400px; overflow: auto; }
+.kimi-event { display: grid; grid-template-columns: 100px 88px minmax(0, 1fr); gap: 9px; padding: 12px 0; border-bottom: 1px solid var(--kimi-border); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.kimi-event time { color: var(--kimi-muted); }.kimi-event > span { color: #8c7ded; font-weight: 600; }
+:root[data-resolved-theme="light"] .kimi-event > span { color: #6953d9; }
+.kimi-empty { padding: 60px 8px; text-align: center; color: var(--kimi-muted); font-size: 13px; line-height: 2; }
+.kimi-error { border: 1px solid #c44558; border-radius: 8px; padding: 12px; color: #ce4b5e; font-size: 13px; }
+.kimi-running svg { animation: kimi-spin 1.4s linear infinite; } @keyframes kimi-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .kimi-running svg { animation: none; } }
+@media (max-width: 1200px) { .kimi-columns { grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr); }.kimi-cases, .kimi-events { padding: 16px; }.kimi-event { grid-template-columns: 90px minmax(0, 1fr); }.kimi-event > div { grid-column: 1 / -1; } }
+@media (max-width: 900px) { .kimi-columns { grid-template-columns: 1fr; }.kimi-events { position: static; }.kimi-event-list { min-height: 180px; max-height: 400px; }.kimi-summary { grid-template-columns: repeat(6, minmax(0, 1fr)); }.kimi-summary > div { grid-column: span 2; }.kimi-summary > div:nth-child(-n+2) { grid-column: span 3; }.kimi-metadata { grid-template-columns: 1fr 1fr; }.kimi-metadata > div:last-child { grid-column: 1 / -1; } }
+@media (max-width: 540px) { .kimi-option-grid { grid-template-columns: 1fr 1fr; }.kimi-case-heading { flex-wrap: wrap; }.kimi-case-toggle { flex-basis: calc(100% - 30px); }.kimi-case-heading > .kimi-status { margin-left: 22px; }.kimi-summary > div { padding: 13px; }.kimi-intro .toolbar { width: 100%; }.kimi-intro .btn { font-size: 12px; }.kimi-metadata { grid-template-columns: 1fr; }.kimi-metadata > div:last-child { grid-column: auto; }.kimi-section-title { align-items: start; } }
