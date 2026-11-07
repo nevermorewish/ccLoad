@@ -278,6 +278,19 @@ test('admins can select checkin logs when scheduled model detection is disabled'
   });
 });
 
+test('local 429 logs display their category and expose complete error details without a channel', async () => {
+  await withLoadedLogsPage({ entries: [{
+    id: 421, time: Date.now(), model: 'gpt-test', channel_id: 0,
+    status_code: 429, error_category: 'ws_transcript', duration: 0,
+    message: 'Responses WebSocket transcript budget exceeded', log_source: 'proxy'
+  }] }, ({ tbody }) => {
+    assert.match(tbody.innerHTML, /logs\.rateLimit\.ws_transcript/);
+    assert.match(tbody.innerHTML, /logs\.rateLimit\.local/);
+    assert.match(tbody.innerHTML, /data-log-id="421"/);
+    assert.match(tbody.innerHTML, /Responses WebSocket transcript budget exceeded/);
+  });
+});
+
 test('API token sessions cannot select management log sources', async () => {
   await withLoadedLogsPage({ isTokenRole: true, logSource: 'checkin' }, ({ sourceGroup, sourceSelect }) => {
     assert.equal(sourceGroup.hidden, true);

@@ -79,6 +79,7 @@ type LogEntry struct {
 	ChannelID            int64              `json:"channel_id"`
 	ChannelName          string             `json:"channel_name,omitempty"`
 	StatusCode           int                `json:"status_code"`
+	ErrorCategory        string             `json:"error_category,omitempty"` // Derived from status/message; not persisted.
 	Message              string             `json:"message"`
 	Duration             float64            `json:"duration"`                     // 总耗时（秒）
 	IsStreaming          bool               `json:"is_streaming"`                 // 是否为流式请求
@@ -120,6 +121,7 @@ type LogFilter struct {
 	Model            string
 	ModelLike        string
 	StatusCode       *int
+	ErrorCategory    string // 429 subtype; implies status_code=429.
 	ClientProtocol   string // 客户端入口协议过滤
 	UpstreamProtocol string // 实际上游协议过滤
 	AuthTokenID      *int64 // API令牌ID过滤

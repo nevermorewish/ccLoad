@@ -54,6 +54,7 @@ func scanLogEntry(scanner interface {
 		}
 	}
 	e.CodexHasCredits = codexHasCredits != 0
+	e.ErrorCategory = model.LogErrorCategory(e.StatusCode, e.Message)
 	e.Time = model.JSONTime{Time: time.UnixMilli(timeMs)}
 
 	if actualModel.Valid {

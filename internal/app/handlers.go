@@ -346,6 +346,10 @@ func BuildLogFilter(c *gin.Context) model.LogFilter {
 
 	// 状态码精确匹配
 	if scStr := strings.TrimSpace(c.Query("status_code")); scStr != "" {
+		if category, ok := strings.CutPrefix(scStr, "429:"); ok && model.ValidRateLimitCategory(category) {
+			lf.ErrorCategory = category
+			scStr = "429"
+		}
 		if code, err := strconv.Atoi(scStr); err == nil && code > 0 {
 			lf.StatusCode = &code
 		}

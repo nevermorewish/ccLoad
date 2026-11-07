@@ -1,6 +1,14 @@
 // 中文语言包
 window.I18N_LOCALES = window.I18N_LOCALES || {};
 window.I18N_LOCALES['zh-CN'] = {
+  'logs.rateLimit.all': '全部原因',
+  'logs.rateLimit.ws_transcript': '会话记录容量超限',
+  'logs.rateLimit.ws_sessions': '会话数超限',
+  'logs.rateLimit.ws_connections': '连接数超限',
+  'logs.rateLimit.token_rpm': '令牌 RPM 超限',
+  'logs.rateLimit.quota': '额度不足',
+  'logs.rateLimit.other': '其他限流 / 未识别',
+  'logs.rateLimit.local': '本机拦截（未请求上游）',
   // ============================================================
   // 通用
   // ============================================================

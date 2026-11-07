@@ -80,6 +80,26 @@ func (wb *WhereBuilder) ApplyLogFilter(filter *model.LogFilter) *WhereBuilder {
 	if filter.StatusCode != nil {
 		wb.AddCondition("status_code = ?", *filter.StatusCode)
 	}
+	if model.ValidRateLimitCategory(filter.ErrorCategory) {
+		wb.AddCondition("status_code = ?", 429)
+		// Use the same precedence as LogErrorCategory, including the unknown fallback.
+		var cases strings.Builder
+		args := []any{}
+		cases.WriteString("CASE ")
+		for _, rule := range model.RateLimitCategoryRules() {
+			conditions := make([]string, 0, len(rule.Patterns))
+			for _, pattern := range rule.Patterns {
+				conditions = append(conditions, "LOWER(COALESCE(message, '')) LIKE ? ESCAPE '!'")
+				pattern = strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(pattern)
+				args = append(args, "%"+pattern+"%")
+			}
+			cases.WriteString("WHEN (" + strings.Join(conditions, " OR ") + ") THEN ? ")
+			args = append(args, rule.Category)
+		}
+		cases.WriteString("ELSE 'other' END = ?")
+		args = append(args, filter.ErrorCategory)
+		wb.AddCondition(cases.String(), args...)
+	}
 	if filter.AuthTokenID != nil {
 		wb.AddCondition("auth_token_id = ?", *filter.AuthTokenID)
 	}

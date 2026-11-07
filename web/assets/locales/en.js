@@ -1,6 +1,14 @@
 // English language pack
 window.I18N_LOCALES = window.I18N_LOCALES || {};
 window.I18N_LOCALES['en'] = {
+  'logs.rateLimit.all': 'All causes',
+  'logs.rateLimit.ws_transcript': 'Transcript budget exceeded',
+  'logs.rateLimit.ws_sessions': 'Session limit exceeded',
+  'logs.rateLimit.ws_connections': 'Connection limit exceeded',
+  'logs.rateLimit.token_rpm': 'Token RPM exceeded',
+  'logs.rateLimit.quota': 'Quota exhausted',
+  'logs.rateLimit.other': 'Other / unclassified',
+  'logs.rateLimit.local': 'Local rejection (no upstream request)',
   // ============================================================
   // Common
   // ============================================================

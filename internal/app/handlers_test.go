@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ccLoad/internal/model"
+	"github.com/gin-gonic/gin"
 )
 
 func TestTimeHelpers(t *testing.T) {
@@ -297,6 +298,19 @@ func TestPaginationParams_SetDefaults(t *testing.T) {
 	}
 	if p2.Limit != 50 {
 		t.Errorf("Limit should not change, got %d", p2.Limit)
+	}
+}
+
+func TestBuildLogFilterRateLimitCategory(t *testing.T) {
+	for _, category := range []string{"ws_transcript", "ws_sessions", "ws_connections", "token_rpm", "quota", "other"} {
+		t.Run(category, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodGet, "/admin/logs?status_code=429:"+category, nil)
+			lf := BuildLogFilter(c)
+			if lf.StatusCode == nil || *lf.StatusCode != 429 || lf.ErrorCategory != category {
+				t.Fatalf("unexpected filter: %+v", lf)
+			}
+		})
 	}
 }
 

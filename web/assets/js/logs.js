@@ -393,6 +393,7 @@ function formatMultiplierText(multiplier) {
 }
 
 function buildLogChannelDisplay(entry) {
+  if (!entry.channel_id && Number(entry.status_code) === 429) return escapeHtml(t('logs.rateLimit.local'));
   const configInfo = entry.channel_name ||
     (entry.channel_id ? t('logs.channelFallback', { id: entry.channel_id }) :
       (entry.message === 'exhausted backends' ? t('logs.systemAllChannelsFailed') :
@@ -602,7 +603,7 @@ function renderLogSourceBadge(logSource) {
 function canInspectDebugLog(entry) {
   const isTokenSession = typeof window.isAPITokenRole === 'function' && window.isAPITokenRole();
   // count_tokens 本地估算没有渠道，但同样可能带 debug 记录。
-  const isChannelless = entry?.log_source === 'count_tokens';
+  const isChannelless = entry?.log_source === 'count_tokens' || Number(entry?.status_code) === 429;
   return !isTokenSession && (Number(entry?.channel_id) > 0 || (isChannelless && Number(entry?.id) > 0));
 }
 
@@ -1289,7 +1290,7 @@ function renderLogs(data) {
           <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="text-align: center; white-space: nowrap;">${apiKeyDisplay}</td>
           <td class="logs-col-channel" data-mobile-label="${logMobileLabels.channel}" style="text-align: left;">${configDisplay}</td>
           <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay}</td>
-          <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}"><span class="${statusClass}">${statusCode}</span></td>
+          <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}"><span class="${statusClass}">${statusCode}</span>${Number(statusCode) === 429 ? `<div class="logs-rate-limit-category">${escapeHtml(t('logs.rateLimit.' + (LOG_RATE_LIMIT_CATEGORIES.includes(entry.error_category) ? entry.error_category : 'other')))}</div>` : ''}</td>
           <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="text-align: right; white-space: nowrap;">${responseTimingDisplay}</td>
           <td class="logs-col-speed${speedDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.speed}" style="text-align: right; white-space: nowrap;">${speedDisplay}</td>
           <td class="logs-col-input${inputTokensDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.input}" style="text-align: right; white-space: nowrap;">${inputTokensDisplay}</td>
@@ -1469,7 +1470,7 @@ function applyLogsFilterValues(filters) {
   }
 
   if (logsStatusCombobox && filters.status !== undefined) {
-    logsStatusCombobox.setValue(filters.status || '', filters.status || t('logs.allStatusCodes'));
+    logsStatusCombobox.setValue(filters.status || '', logStatusLabel(filters.status));
   }
 
 }
@@ -1615,6 +1616,20 @@ function initLogsModelCombobox(initialValue) {
   });
 }
 
+const LOG_RATE_LIMIT_CATEGORIES = ['ws_transcript', 'ws_sessions', 'ws_connections', 'token_rpm', 'quota', 'other'];
+function logStatusLabel(value) {
+  if (value === '429') return '429 · ' + t('logs.rateLimit.all');
+  if (String(value).startsWith('429:')) return '429 · ' + t('logs.rateLimit.' + String(value).slice(4));
+  return value || t('logs.allStatusCodes');
+}
+function logStatusOptions() {
+  return [{ value: '', label: t('logs.allStatusCodes') },
+    ...[...new Set([...(window.availableLogsStatusCodes || []), 429])].sort((a, b) => a - b).flatMap(code => [
+      { value: String(code), label: logStatusLabel(String(code)) },
+      ...(code === 429 ? LOG_RATE_LIMIT_CATEGORIES.map(category => ({ value: '429:' + category, label: logStatusLabel('429:' + category) })) : [])
+    ])];
+}
+
 function initLogsStatusCombobox(initialValue) {
   if (typeof window.createSearchableCombobox !== 'function') return;
   if (!document.getElementById('f_status')) return;
@@ -1623,12 +1638,9 @@ function initLogsStatusCombobox(initialValue) {
     dropdownId: 'f_status_dropdown',
     attachMode: true,
     initialValue: initialValue || '',
-    initialLabel: initialValue || t('logs.allStatusCodes'),
+    initialLabel: logStatusLabel(initialValue),
     commitEmptyAsFirst: true,
-    getOptions: () => [
-      { value: '', label: t('logs.allStatusCodes') },
-      ...(window.availableLogsStatusCodes || []).map(code => ({ value: String(code), label: String(code) }))
-    ],
+    getOptions: logStatusOptions,
     onSelect: () => {
       applyFilter();
     }

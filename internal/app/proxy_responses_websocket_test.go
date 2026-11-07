@@ -412,6 +412,15 @@ func TestResponsesWebsocketTranscriptBudgetRejectsNewWorkWithoutEvictingStableSe
 	if stats.Sessions != 1 || stats.TranscriptBytes <= stats.MaxTranscriptBytes || stats.BudgetRejected != 3 {
 		t.Fatalf("budget pressure silently changed stable state: %+v", stats)
 	}
+	entry := waitForProxyLogMatching(t, env, func(entry *model.LogEntry) bool {
+		return entry.StatusCode == http.StatusTooManyRequests && entry.ErrorCategory == "ws_transcript"
+	})
+	if entry == nil {
+		t.Fatal("budget rejection missing from request logs")
+	}
+	if entry.ChannelID != 0 || entry.APIKeyUsed != "" || entry.BaseURL != "" || entry.Model != "gpt-test" || entry.ClientProtocol != "codex" || entry.Message != firstBudgetErr.Message {
+		t.Fatalf("incorrect local rejection log: %+v", entry)
+	}
 }
 
 func newBridgeWriterTestConn(t *testing.T) *websocket.Conn {

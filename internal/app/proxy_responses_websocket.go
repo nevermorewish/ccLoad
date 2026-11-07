@@ -122,6 +122,7 @@ func (s *Server) HandleResponsesWebsocket(c *gin.Context) {
 			Current:      int64(connectionLimit.active),
 			Unit:         "connections",
 		}})
+		s.logResponsesWebsocketRateLimit(c, nil, "responses_websocket_connection_limit_exceeded: "+message)
 		return
 	}
 	defer releaseConnection()
@@ -187,6 +188,7 @@ func (s *Server) HandleResponsesWebsocket(c *gin.Context) {
 				var errSession error
 				executionSession, releaseExecutionSession, errSession = s.responsesExecutionSessions.acquire(tokenHashString, sessionID)
 				if errSession != nil {
+					s.logResponsesWebsocketRateLimit(c, message.payload, errSession.Error())
 					if errWrite := writeResponsesWebsocketRateLimit(conn, errSession); errWrite != nil {
 						return
 					}
@@ -197,6 +199,7 @@ func (s *Server) HandleResponsesWebsocket(c *gin.Context) {
 				return
 			}
 			if errAdmit := s.responsesExecutionSessions.admitTurn(executionSession); errAdmit != nil {
+				s.logResponsesWebsocketRateLimit(c, message.payload, errAdmit.Error())
 				executionSession.releaseTurn()
 				if errWrite := writeResponsesWebsocketRateLimit(conn, errAdmit); errWrite != nil {
 					return
@@ -216,6 +219,7 @@ func (s *Server) HandleResponsesWebsocket(c *gin.Context) {
 				if localInterrupt != nil {
 					_, errWrite = writeResponsesWebsocketLocalInterrupt(conn, localInterrupt, []byte("[]"))
 				} else if errors.As(errSlots, &rpmErr) {
+					s.logResponsesWebsocketRateLimit(c, message.payload, "token_rpm_exceeded: "+rpmErr.Error())
 					errWrite = writeResponsesWebsocketErrorPayload(conn, http.StatusTooManyRequests, responsesWebsocketErrorBody{
 						Type: "rate_limit_error", Code: "token_rpm_exceeded", Message: rpmErr.Error(),
 						RetryAfter: rpmErr.retryAfterSeconds(),
@@ -1263,6 +1267,21 @@ func writeResponsesWebsocketRateLimit(conn *websocket.Conn, limitErr error) erro
 		body.Unit = executionLimitErr.unit
 	}
 	return writeResponsesWebsocketErrorPayload(conn, http.StatusTooManyRequests, body)
+}
+
+// Admission failures happen before an upstream attempt, so they have no channel or key.
+func (s *Server) logResponsesWebsocketRateLimit(c *gin.Context, payload []byte, message string) {
+	s.AddLogAsync(&model.LogEntry{
+		Time:           model.JSONTime{Time: time.Now()},
+		Model:          strings.TrimSpace(gjson.GetBytes(payload, "model").String()),
+		LogSource:      model.LogSourceProxy,
+		StatusCode:     http.StatusTooManyRequests,
+		Message:        message,
+		AuthTokenID:    c.GetInt64("token_id"),
+		ClientProtocol: string(protocol.Codex),
+		ClientIP:       c.ClientIP(),
+		IsStreaming:    true,
+	})
 }
 
 func writeResponsesWebsocketClientRetryError(

@@ -6,13 +6,14 @@ import { ApiError, deleteJSON, getJSON, getPaginated, postJSON } from '../lib/ap
 import { isAPITokenRole, shouldHideChannels } from '../lib/auth'
 import { cacheHitRate, formatCompact, formatDateTime, formatSeconds, formatUSD } from '../lib/format'
 import { debugLogUnavailableHint } from '../lib/debug-log'
+import { logStatusOptions, RATE_LIMIT_LABELS } from '../lib/log-status'
 import { useSession } from '../lib/session-context'
 import { readQuery, readStored, writeQuery } from '../lib/url-state'
 import { ChannelEditorDialog } from './channels/channel-editor-dialog'
 
 type LogRow = {
   id: number; time?: number; model?: string; actual_model?: string; response_model?: string; log_source?: string; channel_id?: number; channel_name?: string
-  status_code?: number; message?: string; duration?: number; is_streaming?: boolean; upstream_websocket?: boolean; first_byte_time?: number
+  status_code?: number; error_category?: string; message?: string; duration?: number; is_streaming?: boolean; upstream_websocket?: boolean; first_byte_time?: number
   api_key_used?: string; api_key_hash?: string; auth_token_id?: number; auth_token_description?: string; client_protocol?: string; upstream_protocol?: string
   client_ip?: string; base_url?: string; service_tier?: string; thinking_effort?: string; input_tokens?: number; output_tokens?: number; reasoning_tokens?: number
   cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cache_5m_input_tokens?: number; cache_1h_input_tokens?: number
@@ -191,7 +192,7 @@ export function LogsPage() {
     if (boot.log_channel_click_action === 'navigate') window.location.href = `/web/channels?id=${row.channel_id}#channel-${row.channel_id}`
     else setEditChannel({ id: row.channel_id, name: row.channel_name ?? '' })
   }
-  const canDebug = (row: LogRow) => !readOnly && (num(row.channel_id) > 0 || row.log_source === 'jev')
+  const canDebug = (row: LogRow) => !readOnly && (num(row.channel_id) > 0 || row.log_source === 'jev' || num(row.status_code) === 429)
 
   return <>
     <header className="page-header">
@@ -211,7 +212,7 @@ export function LogsPage() {
       <DateRangeFilter value={filters.range} onChange={(range) => set({ range })} />
       {!hideChannels && <SearchableSelect ariaLabel="渠道" className="combobox-inline" allowCustomInput value={filters.channel} options={[{ value: '', label: '所有渠道' }, ...channelNames.map((name) => ({ value: name, label: name }))]} onChange={(channel) => set({ channel })} placeholder="渠道" />}
       <SearchableSelect ariaLabel="模型" className="combobox-inline" allowCustomInput value={filters.model} options={[{ value: '', label: '所有模型' }, ...modelNames.map((name) => ({ value: name, label: name }))]} onChange={(model) => set({ model })} placeholder="模型" />
-      <SearchableSelect ariaLabel="状态码" className="combobox-inline" value={filters.status} options={[{ value: '', label: '所有状态码' }, ...statusCodes.map((code) => ({ value: String(code), label: String(code) }))]} onChange={(status) => set({ status })} />
+      <SearchableSelect ariaLabel="状态码" className="combobox-inline" value={filters.status} options={logStatusOptions(statusCodes)} onChange={(status) => set({ status })} />
       <SearchableSelect ariaLabel="请求协议" className="combobox-inline" value={filters.protocol} options={PROTOCOLS} onChange={(protocol) => set({ protocol })} />
       {!readOnly && <SearchableSelect ariaLabel="日志来源" className="combobox-inline" value={filters.source} options={SOURCES} onChange={(source) => set({ source })} />}
       {tokenOptions && <SearchableSelect ariaLabel="令牌" className="combobox-inline" value={filters.token} options={[{ value: '', label: '全部令牌' }, ...tokenOptions]} onChange={(token) => set({ token })} />}
@@ -319,9 +320,9 @@ function LogTableRow({ row, show, tokenLabel, readOnly, onChannel, onDebug, onTe
     {show('ip') && <td title={row.client_ip}>{maskIP(row.client_ip)}</td>}
     {show('token') && <td title={row.auth_token_description}>{row.auth_token_id ? (tokenLabel ?? row.auth_token_description ?? `#${row.auth_token_id}`) : '-'}</td>}
     {show('key') && <td className="cell-stack"><code>{row.api_key_used || '-'}</code>{(onTestKey || onDeleteKey) && <span className="toolbar" style={{ marginBottom: 0 }}>{onTestKey && <button className="btn btn-sm" title="测试此 Key" onClick={onTestKey}>⚡ 测试</button>}{onDeleteKey && <button className="btn btn-sm" title="删除此 Key" onClick={onDeleteKey}>删除 Key</button>}</span>}</td>}
-    {show('channel') && <td>{row.channel_id ? (readOnly ? <span>{row.channel_name || `#${row.channel_id}`}</span> : <button className="link-button" title={row.base_url} onClick={onChannel}>{row.channel_name || `#${row.channel_id}`}</button>) : <span className="muted">-</span>}{row.upstream_websocket && <span className="badge">ws</span>}{row.cost_multiplier && row.cost_multiplier !== 1 ? <span className="badge">×{row.cost_multiplier}</span> : null}</td>}
+    {show('channel') && <td>{row.channel_id ? (readOnly ? <span>{row.channel_name || `#${row.channel_id}`}</span> : <button className="link-button" title={row.base_url} onClick={onChannel}>{row.channel_name || `#${row.channel_id}`}</button>) : <span className="muted">{status === 429 ? '本机拦截（未请求上游）' : '-'}</span>}{row.upstream_websocket && <span className="badge">ws</span>}{row.cost_multiplier && row.cost_multiplier !== 1 ? <span className="badge">×{row.cost_multiplier}</span> : null}</td>}
     {show('model') && <td className="cell-stack"><span>{row.model}{row.thinking_effort && <span className="badge">{row.thinking_effort}</span>}</span>{row.actual_model && row.actual_model !== row.model && <span className="table-note">↪ {row.actual_model}</span>}{row.response_model && row.response_model !== (row.actual_model || row.model) && <span className="table-note">响应：{row.response_model}</span>}{num(row.reasoning_tokens) > 0 && <span className="table-note">推理 {formatCompact(row.reasoning_tokens)}</span>}</td>}
-    {show('status') && <td><span className={`badge ${success ? 'badge-good' : status >= 500 || status === 0 ? 'badge-bad' : 'badge-warn'}`}>{status || '-'}</span></td>}
+    {show('status') && <td className="cell-stack"><span className={`badge ${success ? 'badge-good' : status >= 500 || status === 0 ? 'badge-bad' : 'badge-warn'}`}>{status || '-'}</span>{status === 429 && <span className="table-note">{RATE_LIMIT_LABELS[row.error_category ?? 'other'] ?? RATE_LIMIT_LABELS.other}</span>}</td>}
     {show('timing') && <td className="cell-stack"><span className={timingClass(ttft, 5, 15)}>{row.is_streaming && ttft > 0 ? formatSeconds(ttft) : '-'}</span><span className={`table-note ${timingClass(duration, 30, 120) ?? ''}`}>{formatSeconds(duration)}{row.is_streaming ? ' · 流' : ''}</span></td>}
     {show('speed') && <td>{speed == null ? '-' : `${speed.toFixed(1)} t/s`}</td>}
     {show('input') && <td>{num(row.input_tokens) ? formatCompact(row.input_tokens) : ''}</td>}

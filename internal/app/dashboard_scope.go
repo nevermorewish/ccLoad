@@ -33,6 +33,7 @@ type tokenLogEntry struct {
 	ActualModel              string                      `json:"actual_model,omitempty"`
 	ResponseModel            string                      `json:"response_model,omitempty"`
 	StatusCode               int                         `json:"status_code"`
+	ErrorCategory            string                      `json:"error_category,omitempty"`
 	Message                  string                      `json:"message"`
 	Duration                 float64                     `json:"duration"`
 	IsStreaming              bool                        `json:"is_streaming"`
@@ -196,6 +197,7 @@ func projectTokenLogs(logs []*model.LogEntry, channels map[int64]tokenLogChannel
 			ActualModel:              entry.ActualModel,
 			ResponseModel:            entry.ResponseModel,
 			StatusCode:               entry.StatusCode,
+			ErrorCategory:            model.LogErrorCategory(entry.StatusCode, entry.Message),
 			Message:                  message,
 			Duration:                 entry.Duration,
 			IsStreaming:              entry.IsStreaming,
