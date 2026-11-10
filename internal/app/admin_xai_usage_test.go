@@ -468,6 +468,7 @@ func TestXAIUsage_PartialRefreshPreservesQuotaCosts(t *testing.T) {
 			server.xaiCredentials = newXAICredentialManager(server.store, func(*model.Config) *http.Client { return server.client }, nil)
 			refresh := func(wantWarning bool) {
 				t.Helper()
+				time.Sleep(time.Millisecond) // Ensure separate request timestamps for snapshot CAS.
 				response := callXAIUsage(t, server, cfg.ID)
 				if response.code != http.StatusOK {
 					t.Fatalf("refresh: status=%d body=%s", response.code, response.body)

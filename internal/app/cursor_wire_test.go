@@ -490,7 +490,8 @@ func TestForwardCursorAgentStreamsRunningStatusAsPing(t *testing.T) {
 		{name: "openai", protocol: protocol.OpenAI, path: "/v1/chat/completions", wantPing: ": ping\n\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runner := &fakeCursorRunner{text: "hello", pings: 1}
+			runner := &blockingCursorRunner{started: make(chan struct{}), release: make(chan struct{}), ping: true}
+			go func() { <-runner.started; time.Sleep(10 * time.Millisecond); close(runner.release) }()
 			srv := newInMemoryServer(t)
 			srv.cursorRunner = runner
 			rec := httptest.NewRecorder()

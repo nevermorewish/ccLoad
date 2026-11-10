@@ -12,6 +12,38 @@ import (
 
 const antigravitySchemaTestModel = "gemini-3-pro"
 
+// Gemini 的 promptTokenCount 与 totalTokenCount 都**含**缓存命中部分，而 Anthropic 的
+// input_tokens 语义是**未命中缓存**的输入，cache_read 与它相加才是总输入。两边口径不同，
+// 转换时必须减掉 cached，否则缓存部分被按全价重复计费、缓存命中率也被腰斩。
+//
+// 取值来自一次真实的 Antigravity 响应：prompt 62277 / cached 62181 / candidates 248，
+// 正确的 input_tokens 是 96。上游 CLIProxyAPI 只在流式路径做了这个减法，
+// 偏差登记见 protocol/cliproxy/UPSTREAM.md。
+const (
+	antigravityUsagePromptTokens = 62277
+	antigravityUsageCachedTokens = 62181
+	antigravityUsageInputTokens  = antigravityUsagePromptTokens - antigravityUsageCachedTokens
+
+	// candidatesTokenCount 缺失，强制走 totalTokenCount 回退分支。
+	antigravityUsageNoCandidates = `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":62277,"totalTokenCount":62525,"cachedContentTokenCount":62181},"modelVersion":"claude-sonnet-4-6","responseId":"msg_vrtx_1"}}`
+)
+
+// 流式终止事件必须给出与非流式一致的 usage 口径。
+
+func assertAntigravityClaudeUsage(t *testing.T, usage gjson.Result, wantOutput int64) {
+	t.Helper()
+	if got := usage.Get("input_tokens").Int(); got != antigravityUsageInputTokens {
+		t.Errorf("input_tokens = %d, want %d (promptTokenCount 未减去 cachedContentTokenCount)",
+			got, antigravityUsageInputTokens)
+	}
+	if got := usage.Get("cache_read_input_tokens").Int(); got != antigravityUsageCachedTokens {
+		t.Errorf("cache_read_input_tokens = %d, want %d", got, antigravityUsageCachedTokens)
+	}
+	if got := usage.Get("output_tokens").Int(); got != wantOutput {
+		t.Errorf("output_tokens = %d, want %d (回退计算误把缓存输入算成输出)", got, wantOutput)
+	}
+}
+
 func TestNormalizeAntigravitySchemasConsolidatesParametersAliases(t *testing.T) {
 	t.Parallel()
 
@@ -198,22 +230,6 @@ func TestNormalizeAntigravitySchemasFoldsGenerationConfigMixedFields(t *testing.
 	}
 }
 
-// Gemini 的 promptTokenCount 与 totalTokenCount 都**含**缓存命中部分，而 Anthropic 的
-// input_tokens 语义是**未命中缓存**的输入，cache_read 与它相加才是总输入。两边口径不同，
-// 转换时必须减掉 cached，否则缓存部分被按全价重复计费、缓存命中率也被腰斩。
-//
-// 取值来自一次真实的 Antigravity 响应：prompt 62277 / cached 62181 / candidates 248，
-// 正确的 input_tokens 是 96。上游 CLIProxyAPI 只在流式路径做了这个减法，
-// 偏差登记见 protocol/cliproxy/UPSTREAM.md。
-const (
-	antigravityUsagePromptTokens = 62277
-	antigravityUsageCachedTokens = 62181
-	antigravityUsageInputTokens  = antigravityUsagePromptTokens - antigravityUsageCachedTokens
-
-	// candidatesTokenCount 缺失，强制走 totalTokenCount 回退分支。
-	antigravityUsageNoCandidates = `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":62277,"totalTokenCount":62525,"cachedContentTokenCount":62181},"modelVersion":"claude-sonnet-4-6","responseId":"msg_vrtx_1"}}`
-)
-
 func TestTranslateAntigravityResponseNonStreamSubtractsCachedTokens(t *testing.T) {
 	t.Parallel()
 
@@ -251,7 +267,6 @@ func TestTranslateAntigravityResponseNonStreamSubtractsCachedTokens(t *testing.T
 	}
 }
 
-// 流式终止事件必须给出与非流式一致的 usage 口径。
 func TestTranslateAntigravityResponseStreamUsageMatchesNonStream(t *testing.T) {
 	t.Parallel()
 
@@ -276,18 +291,4 @@ func TestTranslateAntigravityResponseStreamUsageMatchesNonStream(t *testing.T) {
 		t.Fatalf("未找到 message_delta 事件:\n%s", stream)
 	}
 	assertAntigravityClaudeUsage(t, gjson.Get(delta, "usage"), 248)
-}
-
-func assertAntigravityClaudeUsage(t *testing.T, usage gjson.Result, wantOutput int64) {
-	t.Helper()
-	if got := usage.Get("input_tokens").Int(); got != antigravityUsageInputTokens {
-		t.Errorf("input_tokens = %d, want %d (promptTokenCount 未减去 cachedContentTokenCount)",
-			got, antigravityUsageInputTokens)
-	}
-	if got := usage.Get("cache_read_input_tokens").Int(); got != antigravityUsageCachedTokens {
-		t.Errorf("cache_read_input_tokens = %d, want %d", got, antigravityUsageCachedTokens)
-	}
-	if got := usage.Get("output_tokens").Int(); got != wantOutput {
-		t.Errorf("output_tokens = %d, want %d (回退计算误把缓存输入算成输出)", got, wantOutput)
-	}
 }

@@ -42,9 +42,8 @@ func execSelf() {
 
 	// syscall.Exec 替换当前进程，不会返回
 	//nolint:gosec // G204: executable 来自 os.Executable()，用于自重启，安全可控
-	if err := syscall.Exec(executable, os.Args, os.Environ()); err != nil {
-		log.Printf("[ERROR] 重启失败: %v", err)
-	}
+	err = syscall.Exec(executable, os.Args, os.Environ())
+	log.Printf("[ERROR] 重启失败: %v", err)
 }
 
 // defaultTrustedProxies 默认可信代理（私有网段 + 共享地址空间）

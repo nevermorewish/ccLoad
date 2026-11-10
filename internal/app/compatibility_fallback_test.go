@@ -44,7 +44,7 @@ func TestCompatibilityMultiURLPreservesUpstreamError(t *testing.T) {
 	}
 }
 
-func TestCompatibilitySamplingFallback(t *testing.T) {
+func TestCompatibilitySamplingDoesNotEnableProtocolFallback(t *testing.T) {
 	for _, field := range []string{"temperature", "top_p"} {
 		for _, value := range []float64{0, 0.5} {
 			for _, withNative := range []bool{false, true} {
@@ -76,7 +76,11 @@ func TestCompatibilitySamplingFallback(t *testing.T) {
 						return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 					})}
 					got := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{"model": "compat-model", "input": "hi", field: value}, nil)
-					if got.Code != 200 || chatCalls != 1 {
+					wantStatus, wantNative := http.StatusServiceUnavailable, 0
+					if withNative {
+						wantStatus, wantNative = http.StatusBadRequest, 1
+					}
+					if got.Code != wantStatus || nativeCalls != wantNative || chatCalls != 0 {
 						t.Fatalf("status=%d nativeCalls=%d chatCalls=%d body=%s", got.Code, nativeCalls, chatCalls, got.Body.String())
 					}
 				})

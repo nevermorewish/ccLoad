@@ -2,14 +2,9 @@ package app
 
 import (
 	"bytes"
-	"ccLoad/internal/model"
-	"ccLoad/internal/protocol"
 	"context"
 	"encoding/base64"
 	"fmt"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"github.com/tidwall/gjson"
 	"image/jpeg"
 	"io"
 	"net"
@@ -20,6 +15,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"ccLoad/internal/model"
+	"ccLoad/internal/protocol"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestVideoBodyFormats(t *testing.T) {

@@ -636,7 +636,7 @@ func TestHandleSuccessResponseTracksRawStreamAndClientCancel(t *testing.T) {
 	}
 }
 
-func TestHandleSuccessResponseTracksTranslatedStream(t *testing.T) {
+func TestHandleSuccessResponseTracksNativeStream(t *testing.T) {
 	const body = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\n"
 	start := time.Now().Add(-10 * time.Millisecond)
 	reqCtx := &requestContext{
@@ -644,11 +644,11 @@ func TestHandleSuccessResponseTracksTranslatedStream(t *testing.T) {
 		startTime:   start,
 		isStreaming: true,
 		transformPlan: protocol.TransformPlan{
-			ClientProtocol:   protocol.Anthropic,
+			ClientProtocol:   protocol.OpenAI,
 			UpstreamProtocol: protocol.OpenAI,
 			OriginalModel:    "claude-3-5-sonnet",
 			ActualModel:      "gpt-4o",
-			NeedsTransform:   true,
+			NeedsTransform:   false,
 		},
 	}
 	readStats := &streamReadStats{}
@@ -668,14 +668,14 @@ func TestHandleSuccessResponseTracksTranslatedStream(t *testing.T) {
 		t.Fatalf("handleSuccessResponse() error = %v", err)
 	}
 	if result == nil || !result.ResponseCommitted {
-		t.Fatalf("translated stream result = %#v, want committed response", result)
+		t.Fatalf("native stream result = %#v, want committed response", result)
 	}
 	if readStats.lastReadSec <= 0 || readStats.downstreamBytes == 0 ||
 		readStats.downstreamWrites == 0 || readStats.downstreamFlushes == 0 {
-		t.Fatalf("translated stream stats = %#v, want read/write/flush observations", *readStats)
+		t.Fatalf("native stream stats = %#v, want read/write/flush observations", *readStats)
 	}
-	if !strings.Contains(target.body.String(), "message_stop") {
-		t.Fatalf("translated response lacks message_stop: %s", target.body.String())
+	if target.body.String() != body {
+		t.Fatalf("native response lacks message_stop: %s", target.body.String())
 	}
 }
 

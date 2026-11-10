@@ -20,7 +20,6 @@ import (
 
 	"ccLoad/internal/model"
 	"ccLoad/internal/util"
-	"ccLoad/internal/zedauth"
 
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
@@ -175,6 +174,11 @@ func newReasoningAutoBusiness(t testing.TB) *reasoningAutoBusinessFixture {
 			_, _ = io.WriteString(w, `{"id":"msg-auto","type":"message","role":"assistant","model":"gpt-5.6-sol","content":[{"type":"text","text":"business answer"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`)
 			return
 		}
+		if strings.Contains(r.URL.Path, ":streamGenerateContent") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: "+`{"candidates":[{"content":{"role":"model","parts":[{"text":"business answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}}`+"\n\n")
+			return
+		}
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Errorf("unexpected business path=%q", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -260,7 +264,7 @@ func assertReasoningAutoEfforts(t testing.TB, requests [][]byte, want ...string)
 	t.Helper()
 	got := make([]string, len(requests))
 	for i, request := range requests {
-		for _, path := range []string{"reasoning_effort", "reasoning.effort", "output_config.effort"} {
+		for _, path := range []string{"reasoning_effort", "reasoning.effort", "output_config.effort", "generationConfig.thinkingConfig.thinkingLevel"} {
 			if got[i] == "" {
 				got[i] = gjson.GetBytes(request, path).String()
 			}
@@ -716,7 +720,7 @@ func TestReasoningAutoAnthropicAndGeminiClients(t *testing.T) {
 				map[string]any{"role": "system", "content": "SessionStart hook additional context"},
 			}}
 	}
-	for _, upstream := range []string{"codex", "anthropic"} {
+	for _, upstream := range []string{"anthropic"} {
 		t.Run("claude_code_to_"+upstream, func(t *testing.T) {
 			t.Parallel()
 			judge := newReasoningAutoJudge(t, "high", "xhigh", "xhigh")
@@ -792,7 +796,7 @@ func TestReasoningAutoAnthropicAndGeminiClients(t *testing.T) {
 		judge := newReasoningAutoJudge(t, "low")
 		business := newReasoningAutoBusiness(t)
 		env := setupReasoningAutoTestEnv(t, judge.server.URL, []testChannel{{
-			name: "gemini-client", upstreamProtocol: "codex", models: "gpt-5.6-sol",
+			name: "gemini-client", upstreamProtocol: "gemini", models: "gpt-5.6-sol",
 		}}, []string{business.server.URL})
 		reasoningAutoRequest(t, env, "/v1beta/models/gpt-5.6-sol:streamGenerateContent?alt=sse", map[string]any{
 			"systemInstruction": map[string]any{"parts": []any{map[string]any{"text": "Be brief."}}},
@@ -1104,7 +1108,7 @@ func TestReasoningAutoHistoricalMediaAndUnknownTypesStayJudged(t *testing.T) {
 			judge := newReasoningAutoJudge(t, "xhigh")
 			business := newReasoningAutoBusiness(t)
 			env := setupReasoningAutoTestEnv(t, judge.server.URL, []testChannel{{
-				name: "history", upstreamProtocol: "codex", models: "gpt-5.6-sol",
+				name: "history", upstreamProtocol: string(detectClientProtocolFromPath(tc.path)), models: "gpt-5.6-sol",
 			}}, []string{business.server.URL})
 			reasoningAutoRequest(t, env, tc.path, tc.body, nil)
 			decisions := judge.snapshot()
@@ -1389,7 +1393,7 @@ func TestReasoningAutoIdentityIsolation(t *testing.T) {
 			judge := newReasoningAutoJudge(t, "high", "low")
 			business := newReasoningAutoBusiness(t)
 			env := setupReasoningAutoTestEnv(t, judge.server.URL, []testChannel{{
-				name: "isolated", upstreamProtocol: "openai", models: "gpt-5.6-sol,gpt-5.6-luna",
+				name: "isolated", protocolTransformMode: model.ProtocolTransformModeAuto, upstreamProtocol: "openai", models: "gpt-5.6-sol,gpt-5.6-luna",
 			}}, []string{business.server.URL})
 			headers := map[string]string{"Session-Id": "shared-session", "Thread-Id": "thread-a"}
 			if dimension == "no_session" {
@@ -1825,85 +1829,6 @@ func TestReasoningAutoHTTPAndWebsocketShareState(t *testing.T) {
 	})
 	if entry == nil || entry.ThinkingEffort != "medium" || entry.ReasoningDecision.AppliedEffort != "medium" || entry.ReasoningDecision.ContextIncomplete {
 		t.Fatalf("valid opaque reasoning history incorrectly caused fallback: %+v", entry)
-	}
-}
-
-func TestReasoningAutoZedProviderEnvelopeCommitsEffort(t *testing.T) {
-	t.Parallel()
-	judge := newReasoningAutoJudge(t, "high", "low", "low")
-	credential, err := (&zedauth.Credential{
-		UserID: "business-user", NativeCredential: json.RawMessage(`{"token":"native"}`),
-		AccessToken: "business-access", ExpiresAt: time.Now().Add(time.Hour).Unix(),
-	}).JSON()
-	if err != nil {
-		t.Fatal(err)
-	}
-	requests := make(chan []byte, 4)
-	var turn atomic.Int32
-	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil || !json.Valid(body) {
-			t.Errorf("invalid Zed business request: body=%s error=%v", body, err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		if r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer business-access" || gjson.GetBytes(body, "provider").String() != zedauth.ProviderOpenAI {
-			t.Errorf("unexpected Zed business wire: path=%q authorization=%q body=%s", r.URL.Path, r.Header.Get("Authorization"), body)
-		}
-		requests <- body
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		_, _ = io.WriteString(w, "{\"status\":\"started\"}\n")
-		_ = json.NewEncoder(w).Encode(map[string]any{"event": map[string]any{"type": "response.output_text.delta", "delta": "business answer"}})
-		_ = json.NewEncoder(w).Encode(map[string]any{"event": reasoningAutoCompletedEvent(fmt.Sprintf("resp-zed-auto-%d", turn.Add(1)), "business answer")})
-		_, _ = io.WriteString(w, "{\"status\":\"stream_ended\"}\n")
-	}))
-	env := setupReasoningAutoTestEnv(t, judge.server.URL, []testChannel{{
-		name: "zed-business", upstreamProtocol: "codex", authType: model.AuthTypeZedOAuth,
-		oauthCredential: credential, models: "gpt-5.6-sol",
-	}}, []string{upstream.URL})
-	headers := map[string]string{"Session-Id": "zed-state"}
-	for _, text := range []string{"Analyze the difficult migration.", "The plan is settled.", "Finish the mechanical work."} {
-		reasoningAutoRequest(t, env, "/v1/responses", map[string]any{
-			"model": "gpt-5.6-sol", "input": []any{map[string]any{"role": "user", "content": text}},
-		}, headers)
-	}
-	reasoningAutoRequest(t, env, "/v1/responses", map[string]any{
-		"model": "gpt-5.6-sol", "input": []any{
-			map[string]any{"role": "user", "content": "Finish the settled migration."},
-			map[string]any{"type": "function_call", "id": "fc-migration", "call_id": "call-migration", "name": "migration_step", "arguments": "{}"},
-			map[string]any{"type": "function_call_output", "call_id": "call-migration", "output": "step completed"},
-		},
-	}, headers)
-	got := make([]string, 4)
-	for i := range got {
-		got[i] = gjson.GetBytes(<-requests, "provider_request.reasoning.effort").String()
-	}
-	if !slices.Equal(got, []string{"high", "high", "low", "low"}) || len(judge.snapshot()) != 3 {
-		t.Fatalf("Zed did not commit actual envelope effort: efforts=%v decisions=%d", got, len(judge.snapshot()))
-	}
-	entry := waitForProxyLogMatching(t, env, func(entry *model.LogEntry) bool {
-		return entry.ReasoningDecision != nil && entry.ReasoningDecision.Status == "reused"
-	})
-	if entry == nil || entry.ThinkingEffort != "low" || entry.ReasoningDecision.AppliedEffort != "low" {
-		t.Fatalf("Zed reuse log lost actual provider effort: %+v", entry)
-	}
-	logs, err := env.store.ListLogs(context.Background(), time.Now().Add(-time.Minute), 10, 0, &model.LogFilter{LogSource: model.LogSourceProxy})
-	if err != nil {
-		t.Fatal(err)
-	}
-	counts, businessLogs := map[string]int{}, 0
-	for _, entry := range logs {
-		if entry.ClientProtocol == util.ProtocolSystemOne {
-			continue // 决策调用同属代理流量
-		}
-		if entry.ReasoningDecision == nil || entry.ReasoningDecision.AppliedEffort != entry.ThinkingEffort {
-			t.Fatalf("Zed business log disagrees with actual effort: %+v", entry)
-		}
-		counts[entry.ThinkingEffort]++
-		businessLogs++
-	}
-	if businessLogs != 4 || counts["high"] != 2 || counts["low"] != 2 {
-		t.Fatalf("Zed business log efforts=%v, log count=%d", counts, businessLogs)
 	}
 }
 

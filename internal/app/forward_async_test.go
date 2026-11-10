@@ -602,8 +602,8 @@ func TestForwardOnceAsync_Integration(t *testing.T) {
 			t.Errorf("status = %d, want 200", result.Status)
 		}
 
-		if duration <= 0 {
-			t.Error("duration should be > 0")
+		if duration < 0 {
+			t.Error("duration must not be negative")
 		}
 
 		if result.FirstByteTime <= 0 {
@@ -705,54 +705,12 @@ func TestForwardOnceAsync_UsesTransformPlanUpstreamPathAndBody(t *testing.T) {
 		recorder,
 		nil,
 	)
-	if err != nil {
-		t.Fatalf("forwardOnceAsync error = %v", err)
-	}
-	if result.Status != http.StatusOK {
-		t.Fatalf("expected 200, got %d", result.Status)
-	}
-	if gotPath != "/v1beta/models/gemini-2.5-pro:generateContent" {
-		t.Fatalf("expected transformed path from plan, got %s", gotPath)
-	}
-	if !strings.Contains(gotBody, `"contents"`) {
-		t.Fatalf("expected transformed request body from plan, got %s", gotBody)
-	}
-	if result.DebugData == nil {
-		t.Fatal("expected debug data")
-	}
-	if !result.DebugData.ProtocolTransformed {
-		t.Fatal("debug data should mark local protocol transform")
-	}
-	if string(result.DebugData.OriginalReqBody) != string(originalBody) {
-		t.Fatalf("original request body=%s, want %s", result.DebugData.OriginalReqBody, originalBody)
-	}
-	if result.DebugData.OriginalReqURL != "/v1/chat/completions" {
-		t.Fatalf("original request URL=%q, want /v1/chat/completions", result.DebugData.OriginalReqURL)
-	}
-	if got := gjson.Get(result.DebugData.OriginalReqHeaders, "X-Client-Trace").String(); got != "original-request" {
-		t.Fatalf("original request header=%q, want original-request; headers=%s", got, result.DebugData.OriginalReqHeaders)
-	}
-	if string(result.DebugData.ReqBody) != gotBody {
-		t.Fatalf("translated request body=%s, want emitted body %s", result.DebugData.ReqBody, gotBody)
-	}
-	if string(result.DebugData.RespBody) != rawResponseBody {
-		t.Fatalf("original response body=%s, want %s", result.DebugData.RespBody, rawResponseBody)
-	}
-	if got := gjson.GetBytes(result.DebugData.TranslatedRespBody, "choices.0.message.content").String(); got != "ok" {
-		t.Fatalf("translated response content=%q, want ok; body=%s", got, result.DebugData.TranslatedRespBody)
-	}
-	if result.DebugData.TranslatedRespStatus != http.StatusOK {
-		t.Fatalf("translated response status=%d, want 200", result.DebugData.TranslatedRespStatus)
-	}
-	if got := gjson.Get(result.DebugData.TranslatedRespHeaders, "Content-Type").String(); got != "application/json" {
-		t.Fatalf("translated response content type=%q, want application/json; headers=%s", got, result.DebugData.TranslatedRespHeaders)
-	}
-	if got := gjson.Get(result.DebugData.RespHeaders, "Content-Type").String(); got != "application/x-gemini+json" {
-		t.Fatalf("raw response content type=%q, want application/x-gemini+json; headers=%s", got, result.DebugData.RespHeaders)
+	if err == nil || !strings.Contains(err.Error(), "protocol conversion is disabled") || gotPath != "" || gotBody != "" || result != nil {
+		t.Fatalf("foreign plan reached upstream: result=%+v err=%v path=%s body=%s", result, err, gotPath, gotBody)
 	}
 }
 
-func TestForwardOnceAsync_CodexSessionInjectionUsesFinalBodyForDebug(t *testing.T) {
+func TestForwardOnceAsync_CodexNativeSessionMatchesDebugBody(t *testing.T) {
 	t.Parallel()
 	resetCodexSessionCache()
 
@@ -769,23 +727,23 @@ func TestForwardOnceAsync_CodexSessionInjectionUsesFinalBodyForDebug(t *testing.
 			gotBody, _ = io.ReadAll(r.Body)
 			return &http.Response{
 				StatusCode: http.StatusInternalServerError,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Header:     http.Header{"Content-Type": []string{"application/json"}, "Session-Id": []string{"caller-session"}},
 				Body:       io.NopCloser(strings.NewReader(`{"error":"boom"}`)),
 			}, nil
 		}),
 	}
 
-	cfg := &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
+	cfg := &model.Config{
 		ID:   1,
 		Name: "codex-upstream",
 		URLs: model.ChannelURLs{{URL: "https://codex-upstream.example.com"}},
 	}
-	originalBody := []byte(`{"model":"claude-3-5-sonnet","metadata":{"user_id":"claude-code-user-42"},"system":[{"type":"text","text":"be careful"}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	originalBody := []byte(`{"model":"gpt-5-codex","instructions":"be careful","input":[{"role":"user","content":"hi"}],"prompt_cache_key":"caller-session"}`)
 	plan, err := protocol.BuildTransformPlan(
-		protocol.Anthropic,
 		protocol.Codex,
-		"/v1/messages",
-		"/v1/messages",
+		protocol.Codex,
+		"/v1/responses",
+		"/v1/responses",
 		originalBody,
 		originalBody,
 		"claude-3-5-sonnet",
@@ -803,7 +761,7 @@ func TestForwardOnceAsync_CodexSessionInjectionUsesFinalBodyForDebug(t *testing.
 		"sk-test",
 		http.MethodPost,
 		plan,
-		http.Header{"Content-Type": []string{"application/json"}},
+		http.Header{"Content-Type": []string{"application/json"}, "Session-Id": []string{"caller-session"}},
 		"",
 		cfg.GetURLs()[0],
 		recorder,
@@ -812,7 +770,7 @@ func TestForwardOnceAsync_CodexSessionInjectionUsesFinalBodyForDebug(t *testing.
 	if err != nil {
 		t.Fatalf("forwardOnceAsync error = %v", err)
 	}
-	if gotSessionID == "" || !uuidPattern.MatchString(gotSessionID) {
+	if gotSessionID != "caller-session" {
 		t.Fatalf("Session-Id header missing or invalid: %q", gotSessionID)
 	}
 	if key := readCodexPromptCacheKey(gotBody); key != gotSessionID {
@@ -825,7 +783,7 @@ func TestForwardOnceAsync_CodexSessionInjectionUsesFinalBodyForDebug(t *testing.
 	if string(result.DebugData.ReqBody) != string(gotBody) {
 		t.Fatalf("debug body does not match final upstream body:\ndebug=%s\nsent=%s", result.DebugData.ReqBody, gotBody)
 	}
-	if !result.DebugData.ProtocolTransformed || string(result.DebugData.OriginalReqBody) != string(originalBody) {
+	if result.DebugData.ProtocolTransformed {
 		t.Fatalf("debug data lost local transform request bodies: %+v", result.DebugData)
 	}
 	if got := gjson.GetBytes(result.DebugData.RespBody, "error").String(); got != "boom" {

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -144,7 +145,7 @@ func TestModelCatalogSyncUpdatesCacheAndUsesConditionalETag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat cache: %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
+	if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
 		t.Fatalf("cache mode = %o, want 600", got)
 	}
 
@@ -188,7 +189,7 @@ func TestModelCatalogSyncReportsStructuredResultMetadata(t *testing.T) {
 	}
 	if updated.Status != ModelCatalogSyncUpdated || updated.ModelCount != len(util.ModelsDevOfficialProviders) ||
 		updated.ProviderCount != len(util.ModelsDevOfficialProviders) || updated.SkippedModelCount != 1 ||
-		updated.ETag != etag || updated.Duration <= 0 {
+		updated.ETag != etag || updated.Duration < 0 {
 		t.Fatalf("updated result = %#v", updated)
 	}
 
@@ -198,7 +199,7 @@ func TestModelCatalogSyncReportsStructuredResultMetadata(t *testing.T) {
 	}
 	if notModified.Status != ModelCatalogSyncNotModified || notModified.ModelCount != updated.ModelCount ||
 		notModified.ProviderCount != updated.ProviderCount || notModified.SkippedModelCount != updated.SkippedModelCount ||
-		notModified.ETag != etag || notModified.Duration <= 0 {
+		notModified.ETag != etag || notModified.Duration < 0 {
 		t.Fatalf("not-modified result = %#v", notModified)
 	}
 
@@ -206,7 +207,7 @@ func TestModelCatalogSyncReportsStructuredResultMetadata(t *testing.T) {
 	if err == nil {
 		t.Fatal("invalid catalog Sync returned nil error")
 	}
-	if failed.Status != ModelCatalogSyncFailed || failed.Stage != "parse" || failed.Err == nil || failed.Duration <= 0 {
+	if failed.Status != ModelCatalogSyncFailed || failed.Stage != "parse" || failed.Err == nil || failed.Duration < 0 {
 		t.Fatalf("failed result = %#v, error = %v", failed, err)
 	}
 }

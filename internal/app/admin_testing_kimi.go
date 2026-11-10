@@ -13,9 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"ccLoad/internal/model"
 	"ccLoad/internal/testutil"
-	"github.com/gin-gonic/gin"
 )
 
 type kimiRunRequest struct {
@@ -90,10 +91,12 @@ func kimiEndpoint(raw string) (string, error) {
 	return u.String(), nil
 }
 
+// HandleKimiCases returns the configured Kimi verification cases.
 func (s *Server) HandleKimiCases(c *gin.Context) {
 	RespondJSON(c, http.StatusOK, gin.H{"version": kimiSuiteVersion, "cases": kimiCases})
 }
 
+// HandleKimiBlueFixture serves the image fixture used by Kimi checks.
 func (s *Server) HandleKimiBlueFixture(c *gin.Context) {
 	data, _ := kimiFixtures.ReadFile("kimi_fixtures/blue.png")
 	c.Header("Cache-Control", "public, max-age=86400")
@@ -122,6 +125,7 @@ type kimiEvent struct {
 	Meta    any         `json:"meta,omitempty"`
 }
 
+// HandleChannelKimiTest runs the selected Kimi checks for a channel.
 func (s *Server) HandleChannelKimiTest(c *gin.Context) {
 	id, err := ParseInt64Param(c, "id")
 	if err != nil {
@@ -325,7 +329,7 @@ func (s *Server) runKimiCase(parent context.Context, cfg *model.Config, key, end
 		}
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	result.HTTPStatus = resp.StatusCode
 	response, err := io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
 	traceMu.Lock()

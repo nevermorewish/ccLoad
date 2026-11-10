@@ -14,9 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"ccLoad/internal/model"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+
+	"ccLoad/internal/model"
 )
 
 func TestKimiCatalogResponse(t *testing.T) {

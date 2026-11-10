@@ -89,7 +89,7 @@ func TestProxy_NonStreamingEmptyAssistant(t *testing.T) {
 		fallback bool
 	}{
 		{"chat_fallback", "/v1/chat/completions", true},
-		{"messages_fallback", "/v1/messages", true},
+
 		{"chat_exhausted", "/v1/chat/completions", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

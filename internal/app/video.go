@@ -106,11 +106,12 @@ func convertVideoBody(ctx context.Context, body []byte, format protocol.Protocol
 					}
 					output = append(output, label)
 					image := map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/jpeg;base64," + encoded}}
-					if format == protocol.Gemini {
+					switch format {
+					case protocol.Gemini:
 						image = map[string]any{"inlineData": map[string]any{"mimeType": "image/jpeg", "data": encoded}}
-					} else if format == protocol.Anthropic {
+					case protocol.Anthropic:
 						image = map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/jpeg", "data": encoded}}
-					} else if format == protocol.Codex {
+					case protocol.Codex:
 						image = map[string]any{"type": "input_image", "image_url": "data:image/jpeg;base64," + encoded}
 					}
 					output = append(output, image)
@@ -218,7 +219,7 @@ func loadVideo(ctx context.Context, ref string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("video download failed or timed out")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("video download returned HTTP %d", resp.StatusCode)
 	}
@@ -263,7 +264,7 @@ func extractVideoFrames(ctx context.Context, ref string) ([]videoFrame, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot create video workspace")
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	input := filepath.Join(dir, "input")
 	if err := os.WriteFile(input, data, 0600); err != nil {
 		return nil, fmt.Errorf("cannot save video")
@@ -349,8 +350,13 @@ func validateVideoURL(u *url.URL) error {
 }
 
 func publicVideoIP(ip net.IP) bool {
-	return ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() &&
-		!(ip.To4() != nil && (ip.To4()[0] == 0 || ip.To4()[0] >= 224 || (ip.To4()[0] == 100 && ip.To4()[1]&192 == 64)))
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return false
+	}
+	if ipv4 := ip.To4(); ipv4 != nil {
+		return ipv4[0] != 0 && ipv4[0] < 224 && (ipv4[0] != 100 || ipv4[1]&192 != 64)
+	}
+	return true
 }
 
 func dialVideoURL(ctx context.Context, network, addr string) (net.Conn, error) {

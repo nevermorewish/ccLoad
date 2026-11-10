@@ -64,6 +64,12 @@ func TestForceUpstreamStream(t *testing.T) {
 					request["input"] = "hi"
 				}
 				response := doProxyRequest(t, env.engine, path, request, nil)
+				if client != upstream {
+					if calls != 0 || response.Code != http.StatusServiceUnavailable {
+						t.Fatalf("cross-protocol request reached upstream: calls=%d status=%d body=%s", calls, response.Code, response.Body.String())
+					}
+					return
+				}
 				if calls != 1 || response.Code != 200 || !json.Valid(response.Body.Bytes()) || !strings.Contains(response.Header().Get("Content-Type"), "application/json") {
 					t.Fatalf("nonstream response: calls=%d status=%d headers=%v body=%s", calls, response.Code, response.Header(), response.Body.String())
 				}
@@ -173,7 +179,7 @@ func TestForceUpstreamStreamAdminTest(t *testing.T) {
 				}
 				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(prefix + suffix)), Request: r}, nil
 			})}
-			c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/1/test", map[string]any{"model": "model-free", "client_protocol": "openai", "stream": false, "content": "hello"}))
+			c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/1/test", map[string]any{"model": "model-free", "client_protocol": string(upstream), "stream": false, "content": "hello"}))
 			c.Params = gin.Params{{Key: "id", Value: "1"}}
 			env.server.HandleChannelTest(c)
 			result := mustParseAPIResponse[map[string]any](t, w.Body.Bytes())

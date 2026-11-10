@@ -93,10 +93,22 @@ func TestAdminAnthropicPassthroughUsesPlainMessages(t *testing.T) {
 		t.Run(client, func(t *testing.T) {
 			input := &testutil.TestChannelRequest{Model: "claude-sonnet-4-6", Content: "Reply OK", MaxTokens: 32, Headers: map[string]string{"User-Agent": "probe", "X-Custom": "keep"}}
 			built, plan, err := srv.buildTestUpstreamRequestPlan(context.Background(), cfg, "upstream-key", input, input.Model, client, "anthropic", cfg.GetURLs()[0])
+			if client != "anthropic" {
+				if err == nil || !strings.Contains(err.Error(), "protocol conversion is disabled") {
+					t.Fatalf("expected protocol refusal, got %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			req, cancel, err := srv.newTestUpstreamRequest(context.Background(), built, input, plan)
+			if client != "anthropic" {
+				if err == nil || !strings.Contains(err.Error(), "protocol conversion is disabled") {
+					t.Fatalf("expected protocol refusal, got %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

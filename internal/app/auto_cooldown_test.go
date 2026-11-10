@@ -241,30 +241,3 @@ func TestURLSelectorAutoCooldownDisabledPreservesManualDisablement(t *testing.T)
 		t.Fatal("old cooldown lost or new cooldown written while disabled")
 	}
 }
-
-func TestProxy_AutoCooldownDisabledAntigravityRateLimit(t *testing.T) {
-	var calls atomic.Int64
-	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = io.WriteString(w, `{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"30s"}]}}`)
-	}))
-	defer upstream.Close()
-	env := setupProxyTestEnvWithSettings(t, []testChannel{{
-		name: "rate", upstreamProtocol: "gemini", models: "claude-sonnet-4-6",
-		authType: model.AuthTypeAntigravityOAuth, oauthCredential: antigravityProxyTestCredential(t, "rate-token"),
-	}}, map[int]string{0: upstream.URL}, map[string]string{autoCooldownEnabledSettingKey: "false", "cooldown_fallback_enabled": "false"})
-	for range 2 {
-		response := doProxyRequest(t, env.engine, "/v1beta/models/claude-sonnet-4-6:generateContent", map[string]any{
-			"contents": []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hello"}}}},
-		}, nil)
-		if response.Code != http.StatusTooManyRequests {
-			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-		}
-	}
-	if calls.Load() != 2 {
-		t.Fatalf("calls=%d want=2", calls.Load())
-	}
-	assertNoStoredAutoCooldowns(t, env.server)
-}

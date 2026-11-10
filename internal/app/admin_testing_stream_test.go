@@ -11,15 +11,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"slices"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"ccLoad/internal/cursorauth"
 	"ccLoad/internal/model"
 	"ccLoad/internal/protocol"
 	"ccLoad/internal/testutil"
@@ -540,120 +538,6 @@ func TestHandleChannelChatPersistsDetectionLogWithStreamStatusAndDebugData(t *te
 	}
 }
 
-func TestHandleChannelChatCursorUsesSDKBridgeAndPersistsUsage(t *testing.T) {
-	var upstreamHits atomic.Int32
-	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		upstreamHits.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"error":"Not Found"}`)
-	}))
-	defer upstream.Close()
-
-	srv := newInMemoryServerWithSettings(t, map[string]string{"debug_log_enabled": "true"})
-	created := createCursorOAuthChannelForAdminTest(t, srv, upstream.URL)
-	runner := &fakeCursorRunner{
-		text: "sdk answer",
-		usage: &cursorauth.Usage{
-			InputTokens: 11, OutputTokens: 7, CacheReadTokens: 5, CacheWriteTokens: 3,
-			TotalTokens: 26, ReasoningTokens: 2,
-		},
-	}
-	srv.cursorRunner = runner
-
-	started := time.Now()
-	request := newJSONRequest(t, http.MethodPost, fmt.Sprintf("/admin/channels/%d/chat", created.ID), map[string]any{
-		"model":           "grok-4.6",
-		"client_protocol": "anthropic",
-		"key_index":       0,
-		"session_id":      "89222d35-6a26-4266-b0e6-35ad747ea30d",
-		"stream":          true,
-		"thinking_effort": "",
-		"builtin_search":  false,
-		"messages": []map[string]string{{
-			"role": "user", "content": "一个冷白皮的绝美日本女人在池塘边玩水",
-		}},
-	})
-	c, response := newTestContext(t, request)
-	c.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", created.ID)}}
-
-	srv.HandleChannelChat(c)
-
-	if upstreamHits.Load() != 0 {
-		t.Fatalf("Cursor admin chat HTTP-forwarded %d requests", upstreamHits.Load())
-	}
-	if runner.model != "grok-4.6" || !strings.Contains(runner.prompt, "在池塘边玩水") {
-		t.Fatalf("SDK request model=%q prompt=%q", runner.model, runner.prompt)
-	}
-
-	var gotDelta string
-	var summary map[string]any
-	done := false
-	for _, block := range strings.Split(response.Body.String(), "\n\n") {
-		payload := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(block), "data:"))
-		if payload == "" {
-			continue
-		}
-		if payload == "[DONE]" {
-			done = true
-			continue
-		}
-		var event map[string]any
-		if err := sonic.UnmarshalString(payload, &event); err != nil {
-			t.Fatalf("decode frontend SSE event %q: %v", payload, err)
-		}
-		if delta, _ := event["delta"].(string); delta != "" {
-			gotDelta += delta
-		}
-		if value, ok := event["summary"].(map[string]any); ok {
-			summary = value
-		}
-		if errMessage, _ := event["error"].(string); errMessage != "" {
-			t.Fatalf("unexpected chat error %q; body=%s", errMessage, response.Body.String())
-		}
-	}
-	if gotDelta != "sdk answer" || !done {
-		t.Fatalf("frontend stream delta=%q done=%v body=%s", gotDelta, done, response.Body.String())
-	}
-	for field, want := range map[string]int{
-		"input_tokens": 11, "output_tokens": 7, "reasoning_tokens": 2,
-		"cache_read": 5, "cache_create": 3,
-	} {
-		got, ok := getResultInt(summary[field])
-		if !ok || got != want {
-			t.Fatalf("summary[%q]=%v, want %d; summary=%v", field, summary[field], want, summary)
-		}
-	}
-
-	logs, err := srv.store.ListLogsRange(
-		context.Background(), started.Add(-time.Second), time.Now().Add(time.Second), 10, 0,
-		&model.LogFilter{LogSource: model.LogSourceDetection},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(logs) != 1 {
-		t.Fatalf("logs=%+v, want one manual chat log", logs)
-	}
-	entry := logs[0]
-	if entry.LogSource != model.LogSourceManualChat || entry.StatusCode != http.StatusOK ||
-		entry.UpstreamProtocol != "cursor-sdk-bridge" || entry.InputTokens != 11 ||
-		entry.OutputTokens != 7 || entry.ReasoningTokens != 2 || entry.CacheReadInputTokens != 5 ||
-		entry.CacheCreationInputTokens != 3 || entry.Cache5mInputTokens != 3 {
-		t.Fatalf("manual chat log=%+v", entry)
-	}
-	debugLog, err := srv.store.GetDebugLogByLogID(context.Background(), entry.ID)
-	if err != nil || debugLog == nil {
-		t.Fatalf("debug log=%+v err=%v", debugLog, err)
-	}
-	if !strings.Contains(debugLog.ReqURL, "SdkAgentService/CreateAgent+Send") ||
-		!strings.Contains(string(debugLog.ReqBody), `"id":"grok-4.6"`) ||
-		!strings.Contains(string(debugLog.RespBody), "sdk answer") ||
-		!strings.Contains(string(debugLog.TranslatedRespBody), "sdk answer") {
-		t.Fatalf("debug log=%+v", debugLog)
-	}
-}
-
 func TestHandleChannelChatLogsThinkingEffortFromUpstreamRequestBody(t *testing.T) {
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -1077,52 +961,6 @@ func TestHandleChannelChatDoesNotFallbackAfterModelScopedHTTPError(t *testing.T)
 	}
 	if !strings.Contains(body, `"error"`) {
 		t.Fatalf("expected SSE error event, got:\n%s", body)
-	}
-}
-
-func TestHandleChannelChatAutoFallsBackToChannelProtocolOnMissingEndpoint(t *testing.T) {
-	var paths []string
-	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path != "/v1/responses" {
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = io.WriteString(w, `{"error":{"message":"endpoint not found"}}`)
-			return
-		}
-		_, _ = io.WriteString(w, `{"id":"resp_1","object":"response","status":"completed","model":"test-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback answer"}]}],"usage":{"input_tokens":1,"output_tokens":2}}`)
-	}))
-	defer upstream.Close()
-
-	srv := newInMemoryServer(t)
-	ctx := context.Background()
-	created, err := srv.store.CreateConfig(ctx, &model.Config{
-		Name: "chat-auto", URLs: model.ChannelURLs{{URL: upstream.URL}}, ProtocolTransformMode: model.ProtocolTransformModeAuto,
-		ModelEntries: []model.ModelEntry{{Model: "test-model"}},
-		Enabled:      true,
-	})
-	if err != nil {
-		t.Fatalf("CreateConfig: %v", err)
-	}
-	if err := srv.store.CreateAPIKeysBatch(ctx, []*model.APIKey{{ChannelID: created.ID, KeyIndex: 0, APIKey: "sk-test"}}); err != nil {
-		t.Fatalf("CreateAPIKeysBatch: %v", err)
-	}
-
-	channelID := fmt.Sprintf("%d", created.ID)
-	req := newJSONRequest(t, http.MethodPost, "/admin/channels/"+channelID+"/chat", map[string]any{
-		"model": "test-model", "client_protocol": "anthropic", "stream": false,
-		"messages": []map[string]string{{"role": "user", "content": "hi"}},
-	})
-	c, w := newTestContext(t, req)
-	c.Params = gin.Params{{Key: "id", Value: channelID}}
-
-	srv.HandleChannelChat(c)
-
-	if !slices.Equal(paths, []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"}) {
-		t.Fatalf("paths=%v, want Anthropic, OpenAI, then Codex", paths)
-	}
-	if !strings.Contains(w.Body.String(), `"delta":"fallback answer"`) || !strings.Contains(w.Body.String(), "data: [DONE]") {
-		t.Fatalf("unexpected frontend SSE: %s", w.Body.String())
 	}
 }
 
@@ -1703,191 +1541,6 @@ func TestHandleChannelChat_CodexOAuthWithoutAPIKeyOrSSEContentType(t *testing.T)
 	}
 }
 
-func TestHandleChannelChat_AntigravityCapacityUsesProviderFallbackPolicy(t *testing.T) {
-	t.Parallel()
-	var mu sync.Mutex
-	var baseURLs []string
-	var requestTimes []time.Time
-	client := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		baseURL := req.URL.Scheme + "://" + req.URL.Host
-		mu.Lock()
-		baseURLs = append(baseURLs, baseURL)
-		requestTimes = append(requestTimes, time.Now())
-		mu.Unlock()
-
-		status := http.StatusOK
-		contentType := "text/event-stream"
-		body := `data: {"response":{"responseId":"gravity-chat","candidates":[{"content":{"role":"model","parts":[{"text":"fallback chat answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5},"modelVersion":"gemini-3-flash"}}` + "\n\n"
-		switch baseURL {
-		case antigravityDailyBaseURL:
-			status = http.StatusServiceUnavailable
-			contentType = "application/json"
-			body = antigravityCapacityBodyForAdminTest
-		case antigravityProdBaseURL:
-			t.Fatalf("production Antigravity URL was called: %s", baseURL)
-		case antigravitySandboxDailyBaseURL:
-		default:
-			t.Fatalf("unexpected Antigravity fallback URL: %s", baseURL)
-		}
-		return &http.Response{
-			StatusCode: status,
-			Header:     http.Header{"Content-Type": []string{contentType}},
-			Body:       io.NopCloser(strings.NewReader(body)),
-			Request:    req,
-		}, nil
-	})}
-
-	srv := newInMemoryServer(t)
-	srv.antigravityClient = client
-	created := createAntigravityOAuthChannelForAdminTest(t, srv, antigravityDailyBaseURL)
-	started := time.Now()
-	channelID := fmt.Sprintf("%d", created.ID)
-	req := newJSONRequest(t, http.MethodPost, "/admin/channels/"+channelID+"/chat", map[string]any{
-		"model": "gemini-3-flash", "client_protocol": "gemini", "stream": true,
-		"messages": []map[string]string{{"role": "user", "content": "hello"}},
-	})
-	c, w := newTestContext(t, req)
-	c.Params = gin.Params{{Key: "id", Value: channelID}}
-	srv.HandleChannelChat(c)
-
-	body := w.Body.String()
-	if !strings.Contains(body, `"delta":"fallback chat answer"`) || strings.Contains(body, `"error"`) {
-		t.Fatalf("unexpected chat SSE: %s", body)
-	}
-	mu.Lock()
-	gotURLs := append([]string(nil), baseURLs...)
-	gotTimes := append([]time.Time(nil), requestTimes...)
-	mu.Unlock()
-	wantURLs := []string{antigravityDailyBaseURL, antigravitySandboxDailyBaseURL}
-	if !slices.Equal(gotURLs, wantURLs) {
-		t.Fatalf("Antigravity chat URLs=%v, want %v", gotURLs, wantURLs)
-	}
-	for i := 1; i < len(gotTimes); i++ {
-		if delay := gotTimes[i].Sub(gotTimes[i-1]); delay < antigravityBaseURLFallbackDelay {
-			t.Fatalf("fallback delay[%d]=%v, want >= %v", i, delay, antigravityBaseURLFallbackDelay)
-		}
-	}
-
-	logs, err := srv.store.ListLogsRange(
-		context.Background(), started.Add(-time.Second), time.Now().Add(time.Second), 10, 0,
-		&model.LogFilter{LogSource: model.LogSourceDetection},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(logs) != 1 || logs[0].LogSource != model.LogSourceManualChat || logs[0].StatusCode != http.StatusOK {
-		t.Fatalf("manual chat logs=%+v", logs)
-	}
-	cooldowns, err := srv.store.GetAllModelCooldowns(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if until := cooldowns[created.ID]["gemini-3-flash"]; until.After(time.Now()) {
-		t.Fatalf("successful fallback must clear model cooldown, until=%v", until)
-	}
-}
-
-func TestHandleChannelChat_AntigravityCapacityCancellationKeepsModelCooldown(t *testing.T) {
-	var calls atomic.Int32
-	reqCtx, cancel := context.WithCancel(context.Background())
-	client := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if calls.Add(1) != 1 {
-			t.Fatalf("unexpected request after cancellation: %s", req.URL)
-		}
-		time.AfterFunc(20*time.Millisecond, cancel)
-		return &http.Response{
-			StatusCode: http.StatusServiceUnavailable,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(antigravityCapacityBodyForAdminTest)),
-			Request:    req,
-		}, nil
-	})}
-
-	srv := newInMemoryServer(t)
-	srv.antigravityClient = client
-	created := createAntigravityOAuthChannelForAdminTest(t, srv, antigravityDailyBaseURL)
-	channelID := fmt.Sprintf("%d", created.ID)
-	req := newJSONRequest(t, http.MethodPost, "/admin/channels/"+channelID+"/chat", map[string]any{
-		"model": "gemini-3-flash", "client_protocol": "gemini", "stream": true, "content": "hello",
-	}).WithContext(reqCtx)
-	c, _ := newTestContext(t, req)
-	c.Params = gin.Params{{Key: "id", Value: channelID}}
-	srv.HandleChannelChat(c)
-
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("calls=%d, want 1", got)
-	}
-	cooldowns, err := srv.store.GetAllModelCooldowns(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	remaining := time.Until(cooldowns[created.ID]["gemini-3-flash"])
-	if remaining < util.ServerErrorInitialCooldown-10*time.Second || remaining > util.ServerErrorInitialCooldown+2*time.Second {
-		t.Fatalf("capacity cooldown remaining=%v, want about %v", remaining, util.ServerErrorInitialCooldown)
-	}
-}
-
-func TestHandleChannelChat_AntigravityFallbackBusinessFailureKeepsModelCooldown(t *testing.T) {
-	t.Parallel()
-	var mu sync.Mutex
-	var baseURLs []string
-	client := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		baseURL := req.URL.Scheme + "://" + req.URL.Host
-		mu.Lock()
-		baseURLs = append(baseURLs, baseURL)
-		mu.Unlock()
-
-		status := http.StatusServiceUnavailable
-		body := antigravityCapacityBodyForAdminTest
-		switch baseURL {
-		case antigravityDailyBaseURL:
-		case antigravitySandboxDailyBaseURL:
-			status = http.StatusOK
-			body = `{"error":{"message":"upstream overloaded"}}`
-		case antigravityProdBaseURL:
-			t.Fatalf("production Antigravity URL was called: %s", baseURL)
-		default:
-			t.Fatalf("unexpected Antigravity fallback URL: %s", baseURL)
-		}
-		return &http.Response{
-			StatusCode: status,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(body)),
-			Request:    req,
-		}, nil
-	})}
-
-	srv := newInMemoryServer(t)
-	srv.antigravityClient = client
-	created := createAntigravityOAuthChannelForAdminTest(t, srv, antigravityDailyBaseURL)
-	channelID := fmt.Sprintf("%d", created.ID)
-	req := newJSONRequest(t, http.MethodPost, "/admin/channels/"+channelID+"/chat", map[string]any{
-		"model": "gemini-3-flash", "client_protocol": "gemini", "stream": false, "content": "hello",
-	})
-	c, w := newTestContext(t, req)
-	c.Params = gin.Params{{Key: "id", Value: channelID}}
-	srv.HandleChannelChat(c)
-
-	if body := w.Body.String(); !strings.Contains(body, `"error"`) || strings.Contains(body, `"delta"`) {
-		t.Fatalf("business failure must remain a chat error: %s", body)
-	}
-	mu.Lock()
-	gotURLs := append([]string(nil), baseURLs...)
-	mu.Unlock()
-	wantURLs := []string{antigravityDailyBaseURL, antigravitySandboxDailyBaseURL}
-	if !slices.Equal(gotURLs, wantURLs) {
-		t.Fatalf("Antigravity chat URLs=%v, want %v", gotURLs, wantURLs)
-	}
-	cooldowns, err := srv.store.GetAllModelCooldowns(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	remaining := time.Until(cooldowns[created.ID]["gemini-3-flash"])
-	if remaining < util.ServerErrorInitialCooldown-10*time.Second || remaining > util.ServerErrorInitialCooldown+2*time.Second {
-		t.Fatalf("capacity cooldown remaining=%v, want about %v", remaining, util.ServerErrorInitialCooldown)
-	}
-}
-
 func TestHandleChannelChat_XAIOAuthWithoutAPIKeyUsesProviderWire(t *testing.T) {
 	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" {
@@ -1919,99 +1572,6 @@ func TestHandleChannelChat_XAIOAuthWithoutAPIKeyUsesProviderWire(t *testing.T) {
 	if got := w.Body.String(); !strings.Contains(got, `"delta":"xai chat answer"`) ||
 		!strings.Contains(got, "data: [DONE]") || strings.Contains(got, `"error"`) {
 		t.Fatalf("xAI OAuth chat failed: %s", got)
-	}
-}
-
-func TestHandleChannelChat_CodexOAuthTransformsOpenAIClientProtocol(t *testing.T) {
-	var upstreamBody []byte
-	upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/backend-api/codex/responses" {
-			t.Errorf("upstream path = %q", r.URL.Path)
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer at-admin-test" {
-			t.Errorf("Authorization = %q", got)
-		}
-		if got := r.Header.Get("ChatGPT-Account-ID"); got != "account-admin-test" {
-			t.Errorf("ChatGPT-Account-ID = %q", got)
-		}
-		upstreamBody, _ = io.ReadAll(r.Body)
-		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n")
-		_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"openai to codex answer\"}\n")
-		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
-	}))
-
-	srv := newInMemoryServer(t)
-	srv.client = upstream.Client()
-	created := createCodexOAuthChannelForAdminTest(t, srv, upstream.URL+"/backend-api/codex/responses")
-	updated := created.Clone()
-	updated.ProtocolTransformMode = model.ProtocolTransformModeLocal
-	created, err := srv.store.UpdateConfig(context.Background(), created.ID, updated)
-	if err != nil {
-		t.Fatalf("enable local protocol transform: %v", err)
-	}
-	channelID := fmt.Sprintf("%d", created.ID)
-	req := newJSONRequest(t, http.MethodPost, "/admin/channels/"+channelID+"/chat", map[string]any{
-		"model":           "gpt-5.6-sol",
-		"client_protocol": "openai",
-		"stream":          true,
-		"thinking_effort": "none",
-		"builtin_search":  true,
-		"messages": []map[string]string{
-			{"role": "user", "content": "which header carries the API key?"},
-		},
-	})
-	c, response := newTestContext(t, req)
-	c.Params = gin.Params{{Key: "id", Value: channelID}}
-
-	srv.HandleChannelChat(c)
-
-	if len(upstreamBody) == 0 {
-		t.Fatalf("OpenAI client request did not reach Codex upstream: %s", response.Body.String())
-	}
-	var payload map[string]any
-	if err := sonic.Unmarshal(upstreamBody, &payload); err != nil {
-		t.Fatalf("decode Codex upstream body: %v; body=%s", err, upstreamBody)
-	}
-	if _, exists := payload["messages"]; exists {
-		t.Fatalf("OpenAI messages leaked to Codex upstream: %s", upstreamBody)
-	}
-	if input, ok := payload["input"].([]any); !ok || len(input) != 1 {
-		t.Fatalf("Codex input = %#v; body=%s", payload["input"], upstreamBody)
-	}
-	if stream, ok := payload["stream"].(bool); !ok || !stream {
-		t.Fatalf("Codex stream = %#v; body=%s", payload["stream"], upstreamBody)
-	}
-	if store, ok := payload["store"].(bool); !ok || store {
-		t.Fatalf("Codex store = %#v; body=%s", payload["store"], upstreamBody)
-	}
-	if reasoning, exists := payload["reasoning"]; exists {
-		t.Fatalf("Codex reasoning = %#v; want request thinking_effort=none to remove template reasoning; body=%s", reasoning, upstreamBody)
-	}
-	textConfig, _ := payload["text"].(map[string]any)
-	if got, _ := textConfig["verbosity"].(string); got != "low" {
-		t.Fatalf("Codex text.verbosity = %q, want low; body=%s", got, upstreamBody)
-	}
-	if got, _ := payload["prompt_cache_key"].(string); got == "" {
-		t.Fatalf("Codex prompt_cache_key is missing; body=%s", upstreamBody)
-	}
-	if got, _ := payload["tool_choice"].(string); got != "auto" {
-		t.Fatalf("Codex tool_choice = %q, want auto; body=%s", got, upstreamBody)
-	}
-	clientMetadata, _ := payload["client_metadata"].(map[string]any)
-	if got, _ := clientMetadata["x-codex-installation-id"].(string); got == "" {
-		t.Fatalf("Codex installation id is missing; body=%s", upstreamBody)
-	}
-	tools, _ := payload["tools"].([]any)
-	if len(tools) != 1 {
-		t.Fatalf("Codex tools = %#v; want web_search; body=%s", tools, upstreamBody)
-	}
-	tool, _ := tools[0].(map[string]any)
-	if tool["type"] != "web_search" {
-		t.Fatalf("Codex tool = %#v; want web_search; body=%s", tool, upstreamBody)
-	}
-	got := response.Body.String()
-	if !strings.Contains(got, `"delta":"openai to codex answer"`) || !strings.Contains(got, "data: [DONE]") || strings.Contains(got, `"error"`) {
-		t.Fatalf("OpenAI to Codex chat response failed: %s", got)
 	}
 }
 
@@ -2050,7 +1610,7 @@ func TestHandleChannelChat_CodexOAuthKeepsConversationCacheIdentity(t *testing.T
 		t.Helper()
 		req := newJSONRequest(t, http.MethodPost, "/admin/channels/"+channelID+"/chat", map[string]any{
 			"model":           "gpt-5.6-sol",
-			"client_protocol": "openai",
+			"client_protocol": "codex",
 			"stream":          true,
 			"session_id":      sessionID,
 			"messages":        messages,
@@ -2104,7 +1664,7 @@ func TestHandleChannelChat_CodexOAuthKeepsConversationCacheIdentity(t *testing.T
 	}
 	firstInput := gjson.GetBytes(captured[0].body, "input.0").Raw
 	secondInput := gjson.GetBytes(captured[1].body, "input.0").Raw
-	if firstInput == "" || firstInput != secondInput {
+	if firstInput == "" || !reflect.DeepEqual(gjson.Parse(firstInput).Value(), gjson.Parse(secondInput).Value()) {
 		t.Fatalf("existing message JSON prefix changed:\nfirst:  %s\nsecond: %s", firstInput, secondInput)
 	}
 }

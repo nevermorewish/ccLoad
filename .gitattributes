@@ -6,3 +6,6 @@ internal/protocol/cliproxy/claude/openai/responses/testdata/tool_search_disabled
 web/assets/bundles/* -whitespace
 
 *.go text eol=lf
+
+# SSE framing fixtures must not acquire CRLF during Windows checkout.
+internal/app/testdata/*.txt text eol=lf

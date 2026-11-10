@@ -166,7 +166,7 @@ func TestProxyGemini_CodexModelsAstraServiceTiers(t *testing.T) {
 		{name: "different alias targets", modelID: "coding-alias", target: "gpt-6-astra", extraTarget: "gpt-6-sol", want: "null"},
 		{name: "multiple identical routes", extraURL: "https://api.openai.com", want: "priority,ultrafast"},
 		{name: "official Chat route", protocols: []string{"openai"}, want: "null"},
-		{name: "official Chat local fallback", protocols: []string{"codex", "openai"}, mode: model.ProtocolTransformModeLocal, want: "null"},
+		{name: "official native Responses with legacy local mode", protocols: []string{"codex", "openai"}, mode: model.ProtocolTransformModeLocal, want: "priority,ultrafast"},
 		{name: "official Chat auto fallback unused", protocols: []string{"codex", "openai"}, want: "priority,ultrafast"},
 		{name: "proxy route", url: "https://relay.example.com", want: "null"},
 		{name: "proxy fallback", extraURL: "https://relay.example.com", want: "null"},
@@ -273,6 +273,12 @@ func TestProxyGemini_CodexModelsAstraServiceTiers(t *testing.T) {
 				} `json:"models"`
 			}
 			mustUnmarshalJSON(t, response.Body.Bytes(), &payload)
+			if scenario.name == "official Chat route" {
+				if response.Code != http.StatusOK || len(payload.Models) != 0 {
+					t.Fatalf("Chat-only model advertised for Responses: %s", response.Body.String())
+				}
+				return
+			}
 			if response.Code != http.StatusOK || len(payload.Models) != 1 || payload.Models[0].Slug != modelID {
 				t.Fatalf("status=%d, payload=%s", response.Code, response.Body.String())
 			}
@@ -315,7 +321,7 @@ func TestProxyGemini_CodexModelsOnlyResponsesCapable(t *testing.T) {
 	compatible, err := store.CreateConfig(ctx, &model.Config{
 		Name: "codex-responses-compatible", Enabled: true,
 		ProtocolTransformMode: model.ProtocolTransformModeLocal,
-		URLs:                  model.ChannelURLs{{URL: "https://example.com", Protocols: []string{"anthropic"}}},
+		URLs:                  model.ChannelURLs{{URL: "https://example.com", Protocols: []string{"codex"}}},
 		ModelEntries: []model.ModelEntry{
 			{Model: "gpt-5.5"},
 			{Model: "claude-opus-5"},
@@ -353,7 +359,7 @@ func TestProxyGemini_CodexModelsOnlyResponsesCapable(t *testing.T) {
 	_, err = store.CreateConfig(ctx, &model.Config{
 		Name: "codex-responses-denied", Enabled: true,
 		ProtocolTransformMode: model.ProtocolTransformModeLocal,
-		URLs:                  model.ChannelURLs{{URL: "https://example.com", Protocols: []string{"anthropic"}}},
+		URLs:                  model.ChannelURLs{{URL: "https://example.com", Protocols: []string{"codex"}}},
 		ModelEntries:          []model.ModelEntry{{Model: "gpt-unroutable"}},
 	})
 	if err != nil {

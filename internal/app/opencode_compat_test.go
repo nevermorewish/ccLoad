@@ -484,12 +484,12 @@ func TestOpenCodeSessionHeaderIsUsedByProxyAndAdminBuilders(t *testing.T) {
 
 	adminTestReq := &testutil.TestChannelRequest{
 		Model:          "gpt-5.4",
-		ClientProtocol: "openai",
+		ClientProtocol: "codex",
 		SessionID:      "admin-session",
 	}
 	adminReq, _, cancel, err := srv.buildTestUpstreamRequestForProtocol(
 		context.Background(), cfg, "sk-test-key", adminTestReq,
-		adminTestReq.Model, "openai", "codex", endpoint,
+		adminTestReq.Model, "codex", "codex", endpoint,
 	)
 	if cancel != nil {
 		defer cancel()
@@ -502,7 +502,7 @@ func TestOpenCodeSessionHeaderIsUsedByProxyAndAdminBuilders(t *testing.T) {
 	}
 	adminAgain, _, cancelAgain, err := srv.buildTestUpstreamRequestForProtocol(
 		context.Background(), cfg, "sk-test-key", adminTestReq,
-		adminTestReq.Model, "openai", "codex", endpoint,
+		adminTestReq.Model, "codex", "codex", endpoint,
 	)
 	if cancelAgain != nil {
 		defer cancelAgain()
@@ -1015,6 +1015,12 @@ func TestOpenCodeFreeNonStreamToolsAndUsageAcrossProtocols(t *testing.T) {
 				request = map[string]any{"contents": []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hi"}}}}}
 			}
 			got := doProxyRequest(t, env.engine, path, request, nil)
+			if tc.client != tc.upstream {
+				if called || got.Code != http.StatusServiceUnavailable {
+					t.Fatalf("cross-protocol request admitted: called=%v status=%d", called, got.Code)
+				}
+				return
+			}
 			if !called || got.Code != 200 || !json.Valid(got.Body.Bytes()) || !strings.Contains(got.Header().Get("Content-Type"), "application/json") {
 				t.Fatalf("nonstream completion failed: called=%v status=%d body=%s", called, got.Code, got.Body.String())
 			}
@@ -1072,7 +1078,8 @@ func TestOpenCodeFreeNonStreamRejectsFailedOrTruncatedSSE(t *testing.T) {
 					called = true
 					return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(wire))}, nil
 				})}
-				response := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{"model": "model-free", "stream": false, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}, nil)
+				path, request := nativeGenerationRequest(upstream, "model-free", false)
+				response := doProxyRequest(t, env.engine, path, request, nil)
 				if !called || response.Code == 200 {
 					t.Fatalf("failed stream reported success: called=%v status=%d body=%s", called, response.Code, response.Body.String())
 				}
@@ -1116,8 +1123,9 @@ func TestOpenCodeFreeNonStreamStopsFirstByteDeadlineAfterEvent(t *testing.T) {
 				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: reader}, nil
 			})}
 			started := time.Now()
-			response := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{"model": "model-free", "stream": false, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}, nil)
-			if response.Code != 200 || time.Since(started) < completionDelay || gjson.GetBytes(response.Body.Bytes(), "choices.0.message.tool_calls.0.function.name").String() != "lookup" {
+			path, request := nativeGenerationRequest(upstream, "model-free", false)
+			response := doProxyRequest(t, env.engine, path, request, nil)
+			if response.Code != 200 || time.Since(started) < completionDelay || !strings.Contains(response.Body.String(), "lookup") {
 				t.Fatalf("first-byte deadline canceled a progressing completion: elapsed=%v status=%d body=%s", time.Since(started), response.Code, response.Body.String())
 			}
 			entry := waitForProxyLog(t, env, "model-free")
@@ -1185,245 +1193,10 @@ func assertOpenCodeNoPersistedCooldown(t *testing.T, srv *Server) {
 	}
 }
 
-func TestProxyOpenCodeAutoNegotiatesProtocolPerModel(t *testing.T) {
-	for _, endpoint := range []string{"https://opencode.ai/inference", "https://opencode.ai/zen", "https://opencode.ai/zen/go"} {
-		for _, streaming := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/stream=%v", endpoint, streaming), func(t *testing.T) {
-				const muse = "muse-spark-1.3-contributor-free"
-				env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", protocolTransformMode: model.ProtocolTransformModeAuto, apiKey: "personal-key", modelEntries: []model.ModelEntry{
-					{Model: "muse-alias", RedirectModel: muse}, {Model: "big-pickle"}, {Model: "qwen3.6-plus-free"},
-				}}}, map[int]string{0: endpoint})
-				nativePaths := map[string]string{muse: "/v1/responses", "big-pickle": "/v1/chat/completions", "qwen3.6-plus-free": "/v1/messages"}
-				var paths []string
-				env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-					body, err := io.ReadAll(r.Body)
-					if err != nil {
-						return nil, err
-					}
-					actual := gjson.GetBytes(body, "model").String()
-					path := strings.TrimPrefix(r.URL.Path, strings.TrimPrefix(endpoint, "https://opencode.ai"))
-					paths = append(paths, path)
-					if nativePaths[actual] != path {
-						return jsonResponseStatus(r, http.StatusBadRequest, openCodeUnsupportedProtocolResponse)
-					}
-					if !gjson.GetBytes(body, "stream").Bool() {
-						t.Fatalf("free request must stream upstream: %s", body)
-					}
-					upstream := protocol.OpenAI
-					switch path {
-					case "/v1/responses":
-						upstream = protocol.Codex
-						if !gjson.GetBytes(body, "input").IsArray() || gjson.GetBytes(body, "messages").Exists() {
-							t.Fatalf("Responses request was not translated: %s", body)
-						}
-					case "/v1/messages":
-						upstream = protocol.Anthropic
-						if !gjson.GetBytes(body, "messages").IsArray() || gjson.GetBytes(body, "max_tokens").Int() <= 0 {
-							t.Fatalf("Anthropic request was not translated: %s", body)
-						}
-					}
-					prefix, suffix := openCodeFreeToolStreamFixture(upstream)
-					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(prefix + suffix)), Request: r}, nil
-				})}
-				for requestIndex, name := range []string{"muse-alias", "big-pickle", "qwen3.6-plus-free", "muse-alias", "big-pickle", "qwen3.6-plus-free"} {
-					before := len(paths)
-					got := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
-						"model": name, "stream": streaming, "messages": []any{map[string]any{"role": "user", "content": "hi"}},
-					}, nil)
-					if got.Code != http.StatusOK {
-						t.Fatalf("model=%s status=%d paths=%v body=%s", name, got.Code, paths, got.Body.String())
-					}
-					if requestIndex >= 3 && len(paths)-before != 1 {
-						t.Fatalf("model=%s repeated protocol probes: %v", name, paths[before:])
-					}
-					if streaming {
-						tool, usage, done := false, false, false
-						for _, line := range strings.Split(got.Body.String(), "\n") {
-							if !strings.HasPrefix(line, "data:") {
-								continue
-							}
-							data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-							if data == "[DONE]" {
-								done = true
-								continue
-							}
-							if !json.Valid([]byte(data)) {
-								t.Fatalf("invalid client SSE data: %s", line)
-							}
-							root := gjson.Parse(data)
-							tool = tool || root.Get("choices.0.delta.tool_calls.0.function.name").String() == "lookup"
-							usage = usage || root.Get("usage.prompt_tokens").Int() == 11 && root.Get("usage.completion_tokens").Int() == 7
-						}
-						if !tool || !usage || !done {
-							t.Fatalf("model=%s lost client Chat SSE contract: %s", name, got.Body.String())
-						}
-					} else if root := gjson.ParseBytes(got.Body.Bytes()); !json.Valid(got.Body.Bytes()) || root.Get("choices.0.message.tool_calls.0.function.name").String() != "lookup" || root.Get("usage.prompt_tokens").Int() != 11 || root.Get("usage.completion_tokens").Int() != 7 {
-						t.Fatalf("model=%s lost client Chat completion: %s", name, got.Body.String())
-					}
-				}
-				assertOpenCodeNoPersistedCooldown(t, env.server)
-			})
-		}
-	}
-}
-
-func TestHandleChannelTestOpenCodeAutoNegotiatesModelProtocol(t *testing.T) {
-	for _, endpoint := range []string{"https://opencode.ai/inference", "https://opencode.ai/zen", "https://opencode.ai/zen/go"} {
-		for _, streaming := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/stream=%v", endpoint, streaming), func(t *testing.T) {
-				const actualModel = "muse-spark-1.3-contributor-free"
-				env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, name: "OpenCode", protocolTransformMode: model.ProtocolTransformModeAuto, modelEntries: []model.ModelEntry{{Model: "alias", RedirectModel: actualModel}}}}, map[int]string{0: endpoint})
-				var paths []string
-				env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-					body, err := io.ReadAll(r.Body)
-					if err != nil {
-						return nil, err
-					}
-					paths = append(paths, r.URL.Path)
-					if !strings.HasSuffix(r.URL.Path, "/v1/responses") {
-						return jsonResponseStatus(r, http.StatusBadRequest, openCodeUnsupportedProtocolResponse)
-					}
-					if gjson.GetBytes(body, "model").String() != actualModel || !gjson.GetBytes(body, "input").IsArray() || !gjson.GetBytes(body, "stream").Bool() {
-						t.Fatalf("admin Responses request was not translated: %s", body)
-					}
-					response := `{"type":"response.completed","response":{"id":"resp-admin","object":"response","status":"completed","model":"` + actualModel + `","output":[{"id":"msg-admin","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer","annotations":[]}]}],"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}}`
-					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("event: response.created\ndata: " + `{"type":"response.created","response":{"id":"resp-admin","model":"` + actualModel + `","object":"response","status":"in_progress","output":[]}}` + "\n\nevent: response.output_text.delta\ndata: " + `{"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg-admin","delta":"answer"}` + "\n\nevent: response.completed\ndata: " + response + "\n\n")), Request: r}, nil
-				})}
-				c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/1/test", map[string]any{
-					"model": "alias", "client_protocol": "openai", "stream": streaming, "content": "hello",
-				}))
-				c.Params = gin.Params{{Key: "id", Value: "1"}}
-				env.server.HandleChannelTest(c)
-				result := mustParseAPIResponse[map[string]any](t, w.Body.Bytes())
-				if w.Code != http.StatusOK || !result.Success || result.Data["success"] != true || result.Data["client_protocol"] != "openai" || result.Data["upstream_protocol"] != "codex" || result.Data["actual_model"] != actualModel || result.Data["response_text"] != "answer" {
-					t.Fatalf("admin negotiation failed: paths=%v response=%s", paths, w.Body.String())
-				}
-				if len(paths) != 3 || !strings.HasSuffix(paths[0], "/v1/chat/completions") || !strings.HasSuffix(paths[1], "/v1/messages") || !strings.HasSuffix(paths[2], "/v1/responses") {
-					t.Fatalf("unexpected admin protocol probes: %v", paths)
-				}
-				assertOpenCodeNoPersistedCooldown(t, env.server)
-			})
-		}
-	}
-}
-
-func TestHandleChannelChatOpenCodeAutoNegotiatesModelProtocol(t *testing.T) {
-	const actualModel = "muse-spark-1.3-contributor-free"
-	env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode", protocolTransformMode: model.ProtocolTransformModeAuto, modelEntries: []model.ModelEntry{{Model: actualModel}}}}, map[int]string{0: "https://opencode.ai/zen/go"})
-	var paths []string
-	env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-		paths = append(paths, r.URL.Path)
-		if !strings.HasSuffix(r.URL.Path, "/v1/responses") {
-			return jsonResponseStatus(r, http.StatusBadRequest, openCodeUnsupportedProtocolResponse)
-		}
-		response := `{"type":"response.completed","response":{"id":"resp-chat","object":"response","status":"completed","model":"` + actualModel + `","output":[{"id":"msg-chat","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer","annotations":[]}]}],"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}}`
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("event: response.output_text.delta\ndata: " + `{"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg-chat","delta":"answer"}` + "\n\nevent: response.completed\ndata: " + response + "\n\n")), Request: r}, nil
-	})}
-	c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/1/chat", map[string]any{
-		"model": actualModel, "client_protocol": "openai", "stream": true,
-		"messages": []map[string]string{{"role": "user", "content": "hi"}},
-	}))
-	c.Params = gin.Params{{Key: "id", Value: "1"}}
-	env.server.HandleChannelChat(c)
-	if len(paths) != 3 || !strings.HasSuffix(paths[2], "/v1/responses") {
-		t.Fatalf("chat did not negotiate to Responses: paths=%v body=%s", paths, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), `"delta":"answer"`) || !strings.Contains(w.Body.String(), "data: [DONE]") {
-		t.Fatalf("unexpected frontend SSE: %s", w.Body.String())
-	}
-	assertOpenCodeNoPersistedCooldown(t, env.server)
-}
-
-func TestOpenCodeProtocolNegotiationScopeAndExhaustion(t *testing.T) {
-	for _, tc := range []struct {
-		name, endpoint, mode, errorBody string
-		protocols                       []string
-		wantAttempts                    int
-		wantNoCooldown                  bool
-	}{
-		{name: "exhausted auto", endpoint: "https://opencode.ai/inference", mode: model.ProtocolTransformModeAuto, errorBody: openCodeUnsupportedProtocolResponse, wantAttempts: 4, wantNoCooldown: true},
-		{name: "declared auto", endpoint: "https://opencode.ai/inference", mode: model.ProtocolTransformModeAuto, protocols: []string{"openai"}, errorBody: openCodeUnsupportedProtocolResponse, wantAttempts: 1, wantNoCooldown: true},
-		{name: "declared local", endpoint: "https://opencode.ai/zen/go", mode: model.ProtocolTransformModeLocal, protocols: []string{"openai"}, errorBody: openCodeUnsupportedProtocolResponse, wantAttempts: 1, wantNoCooldown: true},
-		{name: "upstream mode", endpoint: "https://opencode.ai/inference", mode: model.ProtocolTransformModeUpstream, errorBody: openCodeUnsupportedProtocolResponse, wantAttempts: 1, wantNoCooldown: true},
-		{name: "other host", endpoint: "https://gateway.example/inference", mode: model.ProtocolTransformModeAuto, errorBody: openCodeUnsupportedProtocolResponse, wantAttempts: 1},
-		{name: "mixed URLs actual other host", endpoint: "https://gateway.example/inference", mode: model.ProtocolTransformModeAuto, errorBody: openCodeUnsupportedProtocolResponse, wantAttempts: 1},
-		{name: "ordinary data error", endpoint: "https://opencode.ai/inference", mode: model.ProtocolTransformModeAuto, errorBody: `{"error":{"type":"invalid_request_error","message":"ModelProtocolUnsupported in prompt is invalid"}}`, wantAttempts: 1},
-		{name: "wrong typed field", endpoint: "https://opencode.ai/inference", mode: model.ProtocolTransformModeAuto, errorBody: `{"error":{"code":"ModelProtocolUnsupported","message":"invalid input"}}`, wantAttempts: 1},
-	} {
-		for _, admin := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/admin=%v", tc.name, admin), func(t *testing.T) {
-				env := setupProxyTestEnv(t, []testChannel{{name: "OpenCode scope", protocolTransformMode: tc.mode, models: "model-free", apiKey: "personal-key"}}, map[int]string{0: tc.endpoint})
-				ctx := context.Background()
-				cfg, err := env.store.GetConfig(ctx, 1)
-				if err != nil {
-					t.Fatal(err)
-				}
-				cfg.URLs[0].Protocols = tc.protocols
-				if tc.name == "mixed URLs actual other host" {
-					cfg.URLs = append(cfg.URLs, model.ChannelURL{URL: "https://opencode.ai/inference"})
-					// Keep OpenCode configured while selecting only the ordinary URL.
-					env.server.urlSelector.DisableURL(cfg.ID, "https://opencode.ai/inference")
-				}
-				if _, err := env.store.UpdateConfig(ctx, cfg.ID, cfg); err != nil {
-					t.Fatal(err)
-				}
-				requests := 0
-				env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-					requests++
-					if tc.name == "mixed URLs actual other host" && r.URL.Hostname() == "opencode.ai" {
-						t.Fatalf("ordinary 400 from first URL triggered protocol/URL fallback: %s", r.URL)
-					}
-					return jsonResponseStatus(r, http.StatusBadRequest, tc.errorBody)
-				})}
-				// A typed 400 must never become a negative capability cache entry.
-				repeats := 1
-				if tc.name == "exhausted auto" {
-					repeats = 2
-				}
-				for range repeats {
-					if admin {
-						c, w := newTestContext(t, newJSONRequest(t, http.MethodPost, "/admin/channels/1/test", map[string]any{"model": "model-free", "client_protocol": "openai", "stream": true}))
-						c.Params = gin.Params{{Key: "id", Value: "1"}}
-						env.server.HandleChannelTest(c)
-						result := mustParseAPIResponse[map[string]any](t, w.Body.Bytes())
-						if w.Code != http.StatusOK || result.Data["success"] != false || result.Data["status_code"] != float64(http.StatusBadRequest) {
-							t.Fatalf("unexpected admin failure contract: %s", w.Body.String())
-						}
-					} else {
-						got := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{"model": "model-free", "messages": []any{map[string]any{"role": "user", "content": "hello"}}}, nil)
-						if got.Code != http.StatusBadRequest {
-							t.Fatalf("unexpected proxy failure contract: status=%d body=%s", got.Code, got.Body.String())
-						}
-					}
-				}
-				if requests != tc.wantAttempts*repeats {
-					t.Fatalf("requests=%d, want %d", requests, tc.wantAttempts*repeats)
-				}
-				if tc.wantNoCooldown {
-					assertOpenCodeNoPersistedCooldown(t, env.server)
-					for _, stat := range env.server.urlSelector.GetURLStats(cfg.ID, cfg.GetURLs()) {
-						if stat.CooledDown {
-							t.Fatalf("protocol negotiation cooled URL: %+v", stat)
-						}
-					}
-				} else {
-					models, err := env.store.GetAllModelCooldowns(ctx)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if !models[cfg.ID]["model-free"].After(time.Now()) {
-						t.Fatalf("ordinary 400 classification changed: %v", models)
-					}
-				}
-			})
-		}
-	}
-}
-
 // The anonymous lane screens Gemini requests before the model lookup: an
 // unknown route is an empty 404 and an unshaped request fails the free tier.
 // Either would cool the channel instead of reporting the missing protocol.
-func TestOpenCodeAnonymousGeminiProbeReachesFreeGate(t *testing.T) {
+func TestOpenCodeUnsupportedProtocolDoesNotProbeForeignEndpoints(t *testing.T) {
 	const jev = "jev-1.13-free"
 	for _, admin := range []bool{false, true} {
 		for _, streaming := range []bool{false, true} {
@@ -1458,8 +1231,8 @@ func TestOpenCodeAnonymousGeminiProbeReachesFreeGate(t *testing.T) {
 					c.Params = gin.Params{{Key: "id", Value: "1"}}
 					env.server.HandleChannelTest(c)
 					result := mustParseAPIResponse[map[string]any](t, w.Body.Bytes())
-					if w.Code != http.StatusOK || result.Data["success"] != false || result.Data["status_code"] != float64(http.StatusBadRequest) || result.Data["upstream_protocol"] != "gemini" ||
-						result.Data["upstream_request_url"] != "https://opencode.ai/inference/v1/models/"+jev+":streamGenerateContent?alt=sse" {
+					if w.Code != http.StatusOK || result.Data["success"] != false || result.Data["status_code"] != float64(http.StatusBadRequest) || result.Data["upstream_protocol"] != "openai" ||
+						result.Data["upstream_request_url"] != "https://opencode.ai/inference/v1/chat/completions" {
 						t.Fatalf("admin Gemini probe missed the free gate: paths=%v response=%s", paths, w.Body.String())
 					}
 				} else {
@@ -1468,7 +1241,7 @@ func TestOpenCodeAnonymousGeminiProbeReachesFreeGate(t *testing.T) {
 						t.Fatalf("proxy Gemini probe missed the free gate: paths=%v status=%d body=%s", paths, got.Code, got.Body.String())
 					}
 				}
-				if len(paths) != 4 || !strings.HasSuffix(paths[3], ":streamGenerateContent") {
+				if len(paths) != 1 || paths[0] != "/inference/v1/chat/completions" {
 					t.Fatalf("unexpected protocol probes: %v", paths)
 				}
 				assertOpenCodeNoPersistedCooldown(t, env.server)
@@ -1509,6 +1282,12 @@ func TestOpenCodeZenGeminiWire(t *testing.T) {
 				return jsonResponseStatus(r, http.StatusOK, reply)
 			})}
 			got := doProxyRequest(t, env.engine, tc.path, tc.request, nil)
+			if strings.HasPrefix(tc.name, "chat") {
+				if called || got.Code != http.StatusServiceUnavailable {
+					t.Fatalf("foreign protocol admitted: called=%v status=%d", called, got.Code)
+				}
+				return
+			}
 			if !called || got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"ok"`) {
 				t.Fatalf("Zen Gemini request failed: called=%v status=%d body=%s", called, got.Code, got.Body.String())
 			}

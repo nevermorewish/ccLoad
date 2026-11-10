@@ -43,14 +43,14 @@ func TestProxyCompatibilityRejectionCannotBecomeConvertedSuccess(t *testing.T) {
 	}
 }
 
-func TestProxyCompatibilityLocalErrorIdentifiesParameter(t *testing.T) {
+func TestProxyCompatibilityRejectsForeignChannelBeforeParameterConversion(t *testing.T) {
 	env := setupProxyTestEnv(t, []testChannel{{name: "chat", upstreamProtocol: "openai", models: "compat-model", apiKey: "b"}}, map[int]string{0: "https://chat.example"})
 	env.server.client = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		t.Fatal("unsupported conversion reached upstream")
 		return nil, nil
 	})}
 	got := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{"model": "compat-model", "input": "hi", "reasoning": map[string]any{"mode": "pro"}}, nil)
-	if got.Code != 400 || gjson.GetBytes(got.Body.Bytes(), "error.param").String() != "reasoning.mode" || gjson.GetBytes(got.Body.Bytes(), "error.code").String() != "unsupported_parameter" {
+	if got.Code != http.StatusServiceUnavailable || gjson.GetBytes(got.Body.Bytes(), "error.code").String() != "upstream_error" {
 		t.Fatalf("%d %s", got.Code, got.Body.String())
 	}
 }

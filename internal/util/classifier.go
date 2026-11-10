@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -26,8 +27,12 @@ var ErrUpstreamStreamTimeout = errors.New("upstream stream timeout")
 // ErrUpstreamEmptyResponse 是上游 200 但无响应体或无有效输出的统一错误标识。
 var ErrUpstreamEmptyResponse = errors.New("upstream returned empty response")
 
-// ErrUpstreamInvalidResponse 是上游返回 2xx 但正文不是 API 响应的统一错误标识。
+// ErrUpstreamInvalidResponse 是上游未返回可用 API 响应的统一错误标识：2xx 正文不是 API 响应，或重定向到其他源。
 var ErrUpstreamInvalidResponse = errors.New("upstream returned invalid response")
+
+// ErrUpstreamPromptBlocked 表示上游安全策略拦截了提示词本身（Gemini 不带 candidates 的
+// promptFeedback.blockReason）。结果由请求内容决定，换 Key 或渠道都一样。
+var ErrUpstreamPromptBlocked = errors.New("upstream blocked the prompt")
 
 // resetTime1308Regex 匹配1308错误 message 中的重置时间（不依赖具体语言文案）
 // 格式示例: 2025-12-09 18:08:11
@@ -225,7 +230,8 @@ func (r *sseErrorResponse) ErrorType() string {
 
 // IsContextLengthExceededError reports whether an upstream error says that the
 // current request exceeds the model context window. Codex can emit the error as
-// error, response.error, or a top-level streaming error object.
+// error, response.error, or a top-level streaming error object; Anthropic sends
+// it as an invalid_request_error identified only by its message.
 func IsContextLengthExceededError(responseBody []byte) bool {
 	if len(responseBody) == 0 {
 		return false
@@ -255,8 +261,10 @@ func IsContextLengthExceededError(responseBody []byte) bool {
 			continue
 		}
 		message := strings.ToLower(strings.TrimSpace(detail.Message))
+		// Anthropic 只用消息报告输入超限："prompt is too long: N tokens > M maximum"。
 		if strings.Contains(message, "context window") ||
 			strings.Contains(message, "context length") ||
+			strings.HasPrefix(message, "prompt is too long") ||
 			strings.Contains(message, "maximum context") ||
 			strings.Contains(message, "too many tokens") {
 			return true
@@ -492,6 +500,13 @@ func classifyHTTPResponseWithMetaAt(statusCode int, headers map[string][]string,
 		return HTTPResponseClassification{Level: ErrorLevelClient}
 	}
 
+	// 图片解不开同样由请求内容决定：Antigravity/Vertex 把 Anthropic 原错误包在 error.message 里，
+	// 后端仍是同一个解码器，换渠道只会重复失败并冷却无辜模型。原样直返，Claude Code 会移除该图片后重试。
+	if statusCode == http.StatusBadRequest &&
+		strings.Contains(upstreamErrorMessageLower(responseBody), "could not process image") {
+		return HTTPResponseClassification{Level: ErrorLevelClient}
+	}
+
 	// [INFO] 597 SSE error事件：解析实际错误类型动态判断级别
 	// SSE error JSON格式: {"type":"error","error":{"type":"api_error","message":"上游API返回错误: 500"}}
 	// 服务类错误切换渠道但只冷却当前模型；认证/限流类错误仍冷却 Key。
@@ -599,8 +614,10 @@ func classifyHTTPResponseWithMetaAt(statusCode int, headers map[string][]string,
 	// 不设固定冷却时长（无法预判质询持续时间），也不设置 ModelScoped（切模型无效）。
 	// 必须排在响应体关键字匹配之前：质询页 HTML 匹配不上任何渠道级特征，
 	// 否则会落到默认的 Key 级，OAuth 渠道下更是既不写 Key 冷却也不写渠道冷却。
+	// 1010 浏览器签名封禁同理，只是边缘返回的是纯文本或 JSON 而非 HTML。
 	if statusCode == http.StatusForbidden || statusCode == http.StatusServiceUnavailable {
-		if isCloudflareChallengeResponse(firstHeaderValueFold(headers, "cf-mitigated"), responseBody) {
+		if isCloudflareChallengeResponse(firstHeaderValueFold(headers, "cf-mitigated"), responseBody) ||
+			(statusCode == http.StatusForbidden && isCloudflareBotBlockResponse(responseBody)) {
 			return HTTPResponseClassification{
 				Level:                 ErrorLevelChannel,
 				PreventKeyFallback:    true,
@@ -1543,6 +1560,57 @@ func isCloudflareChallengeResponse(cfMitigated string, responseBody []byte) bool
 	return isCloudflareBlockPage(responseBody)
 }
 
+// isCloudflareBotBlockResponse 识别 Cloudflare 1010（browser_signature_banned）边缘拦截
+// （对齐 sub2api e0fa4b94f）：纯文本 `error code: 1010`，或 JSON 中 cloudflare_error=true
+// 且 code/error_code 为 1010，或 error_name=browser_signature_banned。普通 JSON 里的
+// code 1010 与正文提到 1010 都不算，避免把上游业务错误误判为边缘拦截。
+func isCloudflareBotBlockResponse(responseBody []byte) bool {
+	var payload any
+	if json.Unmarshal(responseBody, &payload) == nil {
+		return containsCloudflareBotBlock(payload)
+	}
+	return strings.Contains(strings.ToLower(string(responseBody)), "error code: 1010")
+}
+
+func containsCloudflareBotBlock(value any) bool {
+	switch node := value.(type) {
+	case map[string]any:
+		cloudflareError := false
+		for key, child := range node {
+			if is, ok := child.(bool); ok && is && strings.EqualFold(key, "cloudflare_error") {
+				cloudflareError = true
+			}
+		}
+		for key, child := range node {
+			if name, ok := child.(string); ok && strings.EqualFold(key, "error_name") &&
+				strings.EqualFold(strings.TrimSpace(name), "browser_signature_banned") {
+				return true
+			}
+			if cloudflareError && (strings.EqualFold(key, "code") || strings.EqualFold(key, "error_code")) &&
+				isCloudflareBotBlockCode(child) {
+				return true
+			}
+			if containsCloudflareBotBlock(child) {
+				return true
+			}
+		}
+	case []any:
+		return slices.ContainsFunc(node, containsCloudflareBotBlock)
+	}
+	return false
+}
+
+func isCloudflareBotBlockCode(value any) bool {
+	switch code := value.(type) {
+	case float64:
+		return code == 1010
+	case string:
+		return strings.TrimSpace(code) == "1010"
+	default:
+		return false
+	}
+}
+
 func isProtocolConversionNotImplemented(responseBody []byte) bool {
 	var payload struct {
 		Error struct {
@@ -1638,8 +1706,8 @@ func ClassifyError(err error) (statusCode int, errorLevel ErrorLevel, shouldRetr
 		return http.StatusBadGateway, ErrorLevelChannel, true
 	}
 
-	// 快速路径1.5：协议转换明确声明为客户端请求结构不支持
-	if errors.Is(err, protocol.ErrUnsupportedRequestShape) {
+	// 快速路径1.5：协议转换明确声明为客户端请求结构不支持，或上游拦截了提示词
+	if errors.Is(err, protocol.ErrUnsupportedRequestShape) || errors.Is(err, ErrUpstreamPromptBlocked) {
 		return http.StatusBadRequest, ErrorLevelClient, false
 	}
 

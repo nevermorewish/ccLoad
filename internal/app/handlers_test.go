@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"ccLoad/internal/model"
 	"github.com/gin-gonic/gin"
+
+	"ccLoad/internal/model"
 )
 
 func TestTimeHelpers(t *testing.T) {

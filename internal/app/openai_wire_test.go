@@ -53,7 +53,7 @@ func TestProxy_OpenAIChatMaxCompletionTokens(t *testing.T) {
 			env := setupProxyTestEnv(t, []testChannel{{customRequestRules: &model.CustomRequestRules{Passthrough: new(bool)},
 				name: "openai-max-tokens", upstreamProtocol: "openai", models: test.model,
 			}}, map[int]string{0: upstream.URL})
-			w := doProxyRequest(t, env.engine, "/v1/messages", map[string]any{
+			w := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
 				"model":      test.model,
 				"max_tokens": 128,
 				"messages":   []map[string]string{{"role": "user", "content": "hi"}},

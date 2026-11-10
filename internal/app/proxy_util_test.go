@@ -469,6 +469,7 @@ func TestApplyThinkingSuffixWritesClientProtocolFields(t *testing.T) {
 
 // Antigravity 把请求包进 {"project","request":{...}} 信封。后缀写在客户端 body 上，
 // 转换器负责放进信封；写在信封外层会被 prepareAntigravityRequestBody 整段丢弃。
+
 func TestApplyThinkingSuffixSurvivesAntigravityEnvelope(t *testing.T) {
 	t.Parallel()
 

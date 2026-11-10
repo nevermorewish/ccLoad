@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const { existsSync } = require('node:fs');
+const path = require('node:path');
 const { buildClientConfigSnippets } = require('./tokens.js');
 
 function parseToml(value) {
@@ -38,7 +40,12 @@ test('JSON, TOML and shell escaping preserve special characters without executin
   assert.equal(JSON.parse(snippets.claudeCode).env.ANTHROPIC_BASE_URL, origin);
   assert.equal(parseToml(snippets.codexToml).model_providers.ccload.base_url, origin + '/v1');
   // A shell function stands in for Codex and returns exactly the login command's stdin.
-  const result = spawnSync(process.platform === 'win32' ? 'sh' : '/bin/sh', ['-c', 'codex() { cat; }; ' + snippets.codexLogin], { encoding: 'utf8' });
+  const candidates = process.platform === 'win32'
+    ? ['sh', path.join(process.env.ProgramFiles || 'C:/Program Files', 'Git/bin/sh.exe'), path.join(process.env.LOCALAPPDATA || '', 'Programs/Git/bin/sh.exe')]
+    : ['/bin/sh'];
+  const shell = candidates.find(command => command.includes('/') || command.includes('\\') ? existsSync(command) : !spawnSync(command, ['-c', 'exit 0']).error);
+  assert.ok(shell, 'A POSIX shell (Git for Windows on Windows) is required to verify login command escaping');
+  const result = spawnSync(shell, ['-c', 'codex() { cat; }; ' + snippets.codexLogin], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, token + '\n');
 });

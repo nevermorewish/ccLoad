@@ -49,17 +49,26 @@ func newCostComponent(quantity int, pricePerMillion float64) CostComponent {
 	}
 }
 
-// newCacheWriteCostComponent 计算缓存创建成本。
-// 5 分钟档按显式单价或「生效输入价 × 1.25」；1 小时档恒为「生效输入价 × 2」
-// （OpenAI 不支持 cache_creation，只有 Claude 系会带 1h token）。
-func newCacheWriteCostComponent(cache5mTokens, cache1hTokens int, inputPricePerMillion, explicit5mPricePerMillion float64, hasExplicit5mPrice bool) CostComponent {
-	quantity := cache5mTokens + cache1hTokens
+/**
+ * @brief 合并各提供商独立缓存写入时长的费用与平均单价。
+ * @param cache5mTokens Anthropic 5m 或无明细的通用写入量。
+ * @param cache1hTokens Anthropic 1h 写入量。
+ * @param cache30mTokens OpenAI 30m 写入量。
+ * @param cache12hTokens OpenAI 12h 写入量。
+ * @param inputPricePerMillion 生效上下文档的输入单价。
+ * @param explicit5mPricePerMillion 通用短时写入单价。
+ * @param hasExplicit5mPrice 是否采用显式通用写入价，包括 0。
+ * @param cache12hPrice 生效 OpenAI 12h 单价。
+ * @return 全部写入时长的合计费用；无写入时平均单价为 0。
+ */
+func newCacheWriteCostComponent(cache5mTokens, cache1hTokens, cache30mTokens, cache12hTokens int, inputPricePerMillion, explicit5mPricePerMillion float64, hasExplicit5mPrice bool, cache12hPrice float64) CostComponent {
+	quantity := cache5mTokens + cache1hTokens + cache30mTokens + cache12hTokens
 	cache5mPrice := inputPricePerMillion * cacheWrite5mMultiplier
 	if hasExplicit5mPrice {
 		cache5mPrice = explicit5mPricePerMillion
 	}
 	cache1hPrice := inputPricePerMillion * cacheWrite1hMultiplier
-	cost := (float64(cache5mTokens)*cache5mPrice + float64(cache1hTokens)*cache1hPrice) / 1_000_000
+	cost := (float64(cache5mTokens+cache30mTokens)*cache5mPrice + float64(cache1hTokens)*cache1hPrice + float64(cache12hTokens)*cache12hPrice) / 1_000_000
 	pricePerMillion := 0.0
 	if quantity > 0 {
 		pricePerMillion = cost * 1_000_000 / float64(quantity)
@@ -153,9 +162,11 @@ const (
 
 	// cacheWrite1hMultiplier 1小时缓存写入价格倍数（相对于基础input价格）
 	// 1h Cache Write = Input Price × 2.0 (100%溢价)
-	// 仅适用于Claude模型（OpenAI不支持cache_creation）
+	// 仅适用于 Anthropic 1h 写入；OpenAI 12h 使用独立倍率。
 	// 参考：https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 	cacheWrite1hMultiplier = 2.0
+
+	cacheWrite12hMultiplier = 2.5 ///< OpenAI 12h 写入，官方 prompt-caching 计费规则。
 
 	// geminiLongContextThreshold Gemini长上下文阈值（tokens）
 	// 超过此阈值的请求将使用InputPriceHigh/OutputPriceHigh定价
@@ -235,21 +246,28 @@ func CalculateCostDetailed(model string, inputTokens, outputTokens, cacheReadTok
 func CalculateCostDetailedWithPrice(model string, price *CustomModelPrice, inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens int) float64 {
 	return calculateCostBreakdownDetailed(
 		model, resolveModelPriceOverride(model, price),
-		inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens,
+		inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens, 0, 0,
 	).Total
 }
 
-// CalculateStandardCostBreakdownWithPrice 返回日志页展示所需的标准成本计算过程。
-// serviceTier 与实际请求计费语义一致，包含 OpenAI priority/flex 和 Anthropic fast 定价；
-// rateCard 选择 OpenAI service_tier 倍率依据的价目（API 或 Codex 订阅额度/积分）。
-// price 非空时用它整份替换目录与全局自定义价格
-// （渠道模型价格）。model 仍决定长上下文阈值、缓存倍率回退与 service_tier 倍率；
-// Anthropic fast 模式按该价格的全部 token 费用翻倍，包括缓存读写。
+// CalculateStandardCostBreakdownWithPrice 按上下文分档与统一服务倍率计算真实 token 费用明细。
+// @param model 计费模型名称。
+// @param serviceTier 上游实际 service_tier 或 speed。
+// @param rateCard API 或 Codex OAuth 的倍率价目。
+// @param price 渠道价格覆盖，nil 时沿用全局或系统目录。
+// @param inputTokens 已归一化的普通输入量。
+// @param outputTokens 输出量。
+// @param cacheReadTokens 缓存读取量。
+// @param cache5mTokens Anthropic 5m 或无明细的通用写入量。
+// @param cache1hTokens Anthropic 1h 写入量。
+// @param cache30mTokens OpenAI 30m 写入量。
+// @param cache12hTokens OpenAI 12h 写入量。
+// @return 各费用分项与合计；模型无价格时返回零费用。
 func CalculateStandardCostBreakdownWithPrice(
 	model, serviceTier string,
 	rateCard OpenAIRateCard,
 	price *CustomModelPrice,
-	inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens int,
+	inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens, cache30mTokens, cache12hTokens int,
 ) StandardCostBreakdown {
 	override := resolveModelPriceOverride(model, price)
 	if serviceTier == "fast" && IsFastModeModel(model) {
@@ -257,7 +275,7 @@ func CalculateStandardCostBreakdownWithPrice(
 			return calculateFastModeCostBreakdown(model, inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens)
 		}
 		breakdown := calculateCostBreakdownDetailed(
-			model, override, inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens,
+			model, override, inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens, cache30mTokens, cache12hTokens,
 		)
 		return scaleFastModeCostBreakdown(breakdown)
 	}
@@ -268,7 +286,7 @@ func CalculateStandardCostBreakdownWithPrice(
 		outputTokens,
 		cacheReadTokens,
 		cache5mTokens,
-		cache1hTokens,
+		cache1hTokens, cache30mTokens, cache12hTokens,
 	)
 	multiplier := OpenAIServiceTierMultiplier(model, serviceTier, rateCard)
 	if multiplier != 1 {
@@ -299,9 +317,21 @@ func resolveModelPriceOverride(model string, price *CustomModelPrice) *ModelPric
 	return &pricing
 }
 
-func calculateCostBreakdownDetailed(model string, override *ModelPricing, inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens int) StandardCostBreakdown {
-	// 防御性检查:拒绝负数token
-	if inputTokens < 0 || outputTokens < 0 || cacheReadTokens < 0 || cache5mTokens < 0 || cache1hTokens < 0 {
+/**
+ * @brief 按普通输入、缓存及上下文分档生成标准费用。
+ * @param model 计费模型名称。
+ * @param override 显式价目，nil 时查找目录。
+ * @param inputTokens 已归一化的普通输入量。
+ * @param outputTokens 输出量。
+ * @param cacheReadTokens 缓存读取量。
+ * @param cache5mTokens Anthropic 5m 或无明细的通用写入量。
+ * @param cache1hTokens Anthropic 1h 写入量。
+ * @param cache30mTokens OpenAI 30m 写入量。
+ * @param cache12hTokens OpenAI 12h 写入量。
+ * @return 费用明细；未知模型或负 token 数返回零费用。
+ */
+func calculateCostBreakdownDetailed(model string, override *ModelPricing, inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens, cache30mTokens, cache12hTokens int) StandardCostBreakdown {
+	if inputTokens < 0 || outputTokens < 0 || cacheReadTokens < 0 || cache5mTokens < 0 || cache1hTokens < 0 || cache30mTokens < 0 || cache12hTokens < 0 {
 		log.Printf("[ERROR] 检测到负数 token（model=%s）: input=%d output=%d cache_read=%d cache_5m=%d cache_1h=%d",
 			model, inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens)
 		return StandardCostBreakdown{}
@@ -331,7 +361,7 @@ func calculateCostBreakdownDetailed(model string, override *ModelPricing, inputT
 	tierThreshold := getTierThresholdForModel(model)
 	tierInputTokens := inputTokens
 	if pricing.CacheReadCountsTowardTier {
-		tierInputTokens += cacheReadTokens + cache5mTokens + cache1hTokens
+		tierInputTokens += cacheReadTokens + cache5mTokens + cache1hTokens + cache30mTokens + cache12hTokens
 	}
 
 	// 选择适用的价格
@@ -383,8 +413,15 @@ func calculateCostBreakdownDetailed(model string, override *ModelPricing, inputT
 		cacheWritePrice = pricing.CacheWritePriceHigh
 		hasCacheWritePrice = true
 	}
+	cache12hPrice := inputPricePerM * cacheWrite12hMultiplier
+	if pricing.HasCacheWrite12hPrice {
+		cache12hPrice = pricing.CacheWrite12hPrice
+	}
+	if useHighPricing && pricing.HasCacheWrite12hPriceHigh {
+		cache12hPrice = pricing.CacheWrite12hPriceHigh
+	}
 	breakdown.CacheWrite = newCacheWriteCostComponent(
-		cache5mTokens, cache1hTokens, inputPricePerM, cacheWritePrice, hasCacheWritePrice,
+		cache5mTokens, cache1hTokens, cache30mTokens, cache12hTokens, inputPricePerM, cacheWritePrice, hasCacheWritePrice, cache12hPrice,
 	)
 
 	breakdown.Total = breakdown.Input.Cost + breakdown.Output.Cost +
@@ -650,12 +687,14 @@ func isOpusModel(model string) bool {
 	return strings.Contains(lowerModel, "opus")
 }
 
-// IsFastModeModel 判断模型是否支持 Anthropic fast mode。
-// 当前支持 Claude Opus 5.x 和 Claude Opus 4.8；Opus 4.6 已降级为标准速度。
+// IsFastModeModel 判断模型是否支持 Anthropic fast 模式计费。
+// @param model 模型名称，可带版本或思考等级后缀。
+// @return 已支持的 Opus 系列或 Fable 5.2 返回 true，其他模型返回 false。
 func IsFastModeModel(model string) bool {
 	lowerModel := strings.ToLower(model)
 	return strings.HasPrefix(lowerModel, "claude-opus-5") ||
-		strings.HasPrefix(lowerModel, "claude-opus-4-8")
+		strings.HasPrefix(lowerModel, "claude-opus-4-8") ||
+		strings.HasPrefix(lowerModel, "claude-fable-5-2")
 }
 
 // anthropicFastModeMultiplier 是 fast 模式全部 token 费用相对标准价的倍率。
@@ -681,7 +720,7 @@ func calculateFastModeCostBreakdown(model string, inputTokens, outputTokens, cac
 		return StandardCostBreakdown{}
 	}
 	breakdown := calculateCostBreakdownDetailed(
-		model, &pricing, inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens,
+		model, &pricing, inputTokens, outputTokens, cacheReadTokens, cache5mTokens, cache1hTokens, 0, 0,
 	)
 	return scaleFastModeCostBreakdown(breakdown)
 }

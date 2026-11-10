@@ -259,7 +259,7 @@ func TestHandleSuccessResponse_CodexMalformedFixtureEmitsIndependentEvents(t *te
 	}
 }
 
-func TestHandleSuccessResponse_DynamicCodexMalformedSSEUsesFraming(t *testing.T) {
+func TestHandleSuccessResponse_NativeCodexMalformedSSEUsesFraming(t *testing.T) {
 	reg := protocol.NewRegistry()
 	builtin.Register(reg)
 	s := &Server{protocolRegistry: reg}
@@ -268,8 +268,8 @@ func TestHandleSuccessResponse_DynamicCodexMalformedSSEUsesFraming(t *testing.T)
 		startTime:   time.Now(),
 		isStreaming: true,
 		transformPlan: protocol.TransformPlan{
-			ClientProtocol: protocol.Codex,
-			OriginalModel:  "gpt-5-codex",
+			ClientProtocol: protocol.Codex, UpstreamProtocol: protocol.Codex,
+			OriginalModel: "gpt-5-codex",
 		},
 	}
 	resp := &http.Response{
@@ -278,7 +278,7 @@ func TestHandleSuccessResponse_DynamicCodexMalformedSSEUsesFraming(t *testing.T)
 		Body:       io.NopCloser(bytes.NewReader(readCodexMalformedSSEFixture(t))),
 	}
 	rec := newRecorder()
-	res, _, err := s.handleSuccessResponse(reqCtx, resp, resp.Header.Clone(), rec, "", &streamReadStats{}, nil)
+	res, _, err := s.handleSuccessResponse(reqCtx, resp, resp.Header.Clone(), rec, "codex", &streamReadStats{}, nil)
 	if err != nil {
 		t.Fatalf("handleSuccessResponse() error = %v", err)
 	}
@@ -298,7 +298,7 @@ func TestHandleSuccessResponse_DynamicCodexMalformedSSEUsesFraming(t *testing.T)
 	}
 }
 
-func TestHandleSuccessResponse_DynamicCodexGluedSSEWithoutBlankLines(t *testing.T) {
+func TestHandleSuccessResponse_NativeCodexGluedSSEWithoutBlankLines(t *testing.T) {
 	reg := protocol.NewRegistry()
 	builtin.Register(reg)
 	s := &Server{protocolRegistry: reg}
@@ -308,8 +308,8 @@ func TestHandleSuccessResponse_DynamicCodexGluedSSEWithoutBlankLines(t *testing.
 		startTime:   time.Now(),
 		isStreaming: true,
 		transformPlan: protocol.TransformPlan{
-			ClientProtocol: protocol.Codex,
-			OriginalModel:  "gpt-5-codex",
+			ClientProtocol: protocol.Codex, UpstreamProtocol: protocol.Codex,
+			OriginalModel: "gpt-5-codex",
 		},
 	}
 	resp := &http.Response{
@@ -318,7 +318,7 @@ func TestHandleSuccessResponse_DynamicCodexGluedSSEWithoutBlankLines(t *testing.
 		Body:       io.NopCloser(strings.NewReader(input)),
 	}
 	rec := newRecorder()
-	res, _, err := s.handleSuccessResponse(reqCtx, resp, resp.Header.Clone(), rec, "", &streamReadStats{}, nil)
+	res, _, err := s.handleSuccessResponse(reqCtx, resp, resp.Header.Clone(), rec, "codex", &streamReadStats{}, nil)
 	if err != nil {
 		t.Fatalf("handleSuccessResponse() error = %v", err)
 	}
@@ -396,7 +396,7 @@ func TestHandleSuccessResponse_AnthropicStreamingSSEPassesThroughUnchanged(t *te
 	}
 }
 
-func TestHandleTranslatedStreamSuccessResponse_CodexMalformedSSEFramesEachEvent(t *testing.T) {
+func TestHandleNativeStreamSuccessResponse_CodexMalformedSSEFramesEachEvent(t *testing.T) {
 	reg := protocol.NewRegistry()
 	builtin.Register(reg)
 	s := &Server{protocolRegistry: reg}
@@ -405,11 +405,11 @@ func TestHandleTranslatedStreamSuccessResponse_CodexMalformedSSEFramesEachEvent(
 		startTime:   time.Now(),
 		isStreaming: true,
 		transformPlan: protocol.TransformPlan{
-			ClientProtocol:   protocol.OpenAI,
+			ClientProtocol:   protocol.Codex,
 			UpstreamProtocol: protocol.Codex,
 			OriginalModel:    "gpt-4o",
 			ActualModel:      "gpt-5-codex",
-			NeedsTransform:   true,
+			NeedsTransform:   false,
 		},
 	}
 	resp := &http.Response{
@@ -425,26 +425,9 @@ func TestHandleTranslatedStreamSuccessResponse_CodexMalformedSSEFramesEachEvent(
 	if res == nil || !res.ResponseCommitted {
 		t.Fatalf("translated response not committed: %#v", res)
 	}
-	body := strings.ReplaceAll(rec.Body.String(), "\r\n", "\n")
-	if !strings.Contains(body, "data: [DONE]\n\n") {
-		t.Fatalf("translated response missing terminal [DONE]: %q", body)
-	}
-	dataFrames := 0
-	for _, frame := range strings.Split(strings.TrimSuffix(body, "\n\n"), "\n\n") {
-		if !strings.HasPrefix(frame, "data: ") {
-			t.Fatalf("translated output contains unframed chunk: %q", frame)
-		}
-		data := strings.TrimPrefix(frame, "data: ")
-		if data == "[DONE]" {
-			continue
-		}
-		if !json.Valid([]byte(data)) {
-			t.Fatalf("translated data frame is not JSON: %q", frame)
-		}
-		dataFrames++
-	}
-	if dataFrames == 0 || strings.Count(body, "hello") != 1 {
-		t.Fatalf("translated data frames=%d, hello count=%d; body=%q", dataFrames, strings.Count(body, "hello"), body)
+	got := parseCodexResponseEventTypes(t, rec.Body.String())
+	if !slices.Equal(got, []string{"response.output_text.delta", "response.completed"}) {
+		t.Fatalf("native event framing: %v body=%s", got, rec.Body.String())
 	}
 }
 
@@ -1132,57 +1115,6 @@ func TestOpenAIStreamCompleteWithoutDoneMarkerSurvivesClientCancel(t *testing.T)
 }
 
 // Antigravity 在终态块（finishReason）之后客户端断开时，数据已完整，按成功记账。
-func TestAntigravityStreamCompleteSurvivesClientCancel(t *testing.T) {
-	t.Parallel()
-
-	partial := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}]}}` + "\n\n"
-	complete := partial + `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":5,"totalTokenCount":12}}}` + "\n\n"
-	reg := protocol.NewRegistry()
-	builtin.Register(reg)
-	original := []byte(`{"model":"gemini-3-flash","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	translated, err := reg.TranslateRequest(protocol.Anthropic, protocol.Gemini, "gemini-3-flash", original, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	translated = append(append([]byte(`{"request":`), translated...), '}')
-	run := func(sse string) (*fwResult, error) {
-		reqCtx := &requestContext{
-			ctx: context.Background(), startTime: time.Now(), isStreaming: true, antigravityOAuth: true,
-			clientProtocol: protocol.Anthropic, upstreamProtocol: protocol.Gemini,
-			transformPlan: protocol.TransformPlan{ClientProtocol: protocol.Anthropic, UpstreamProtocol: protocol.Gemini, OriginalModel: "gemini-3-flash", ActualModel: "gemini-3-flash", OriginalBody: original, TranslatedBody: translated, NeedsTransform: true},
-		}
-		resp := &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-			Body:       io.NopCloser(io.MultiReader(strings.NewReader(sse), iotest.ErrReader(context.Canceled))),
-		}
-		result, _, err := (&Server{protocolRegistry: reg}).handleSuccessResponse(
-			reqCtx, resp, resp.Header.Clone(), newRecorder(), string(protocol.Gemini), &streamReadStats{}, nil,
-		)
-		return result, err
-	}
-
-	t.Run("cancel after finish reason", func(t *testing.T) {
-		t.Parallel()
-		result, err := run(complete)
-		if err != nil {
-			t.Fatalf("终态块之后的客户端取消不得判为失败: %v", err)
-		}
-		if result.Status != http.StatusOK || result.StreamDiagMsg != "" {
-			t.Fatalf("status=%d diag=%q", result.Status, result.StreamDiagMsg)
-		}
-		if result.OutputTokens != 5 {
-			t.Fatalf("usage 未计入: %#v", result)
-		}
-	})
-
-	t.Run("cancel before finish reason", func(t *testing.T) {
-		t.Parallel()
-		if _, err := run(partial); err == nil {
-			t.Fatal("未见终态就取消必须保留失败语义，交给 499 路径")
-		}
-	})
-}
 
 // 598 语义比 599 更精确（冷却时长不同），流诊断不得把它降级覆盖。
 func TestMarkIncompleteStreamForwardResultKeepsFirstByteTimeout(t *testing.T) {
@@ -1344,6 +1276,32 @@ func TestHandleSuccessResponse_StreamDiagMsg_AnthropicMissingMessageStop(t *test
 
 	if res.StreamDiagMsg == "" {
 		t.Fatal("expected StreamDiagMsg for Anthropic stream without message_stop")
+	}
+}
+
+// Anthropic 的语义终态是 message_delta.stop_reason：之后断流不算截断；
+// 随后的 message_stop 仍要原样透传，不能读到 stop_reason 就停止读取。
+func TestHandleSuccessResponse_AnthropicStopReasonIsTerminal(t *testing.T) {
+	const (
+		delta     = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"
+		nullDelta = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null},\"usage\":{\"output_tokens\":1}}\n\n"
+		stop      = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	)
+	for _, tt := range []struct {
+		name     string
+		body     string
+		wantDiag bool
+	}{
+		{name: "stop_reason without message_stop", body: delta},
+		{name: "stop_reason then message_stop", body: delta + stop},
+		{name: "null stop_reason", body: nullDelta, wantDiag: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			res, got := runHandleSuccessResponse(t, tt.body, http.Header{"Content-Type": []string{"text/event-stream"}}, true, "anthropic")
+			if (res.StreamDiagMsg != "") != tt.wantDiag || got != tt.body {
+				t.Fatalf("StreamDiagMsg=%q body=%q, want diag=%v and passthrough %q", res.StreamDiagMsg, got, tt.wantDiag, tt.body)
+			}
+		})
 	}
 }
 
@@ -4034,6 +3992,14 @@ func TestPrepareTranslatedUpstreamBodyFillsXAIAnthropicToolDescriptions(t *testi
 	}
 }
 
+// TestAnthropicNativeClaudeCodeWithoutCCHPassesThrough 守住入站判据不看 CCH。
+//
+// 下游 Claude Code 指向 ccLoad 时看到的是非第一方 base URL，native gate
+// (`s = firstParty || vertex ? " cch=00000;" : ""`) 直接省略 cch，但 X-App/UA/beta/
+// metadata.user_id 四个身份信号一个不少。把 ` cch=` 当必要条件会让**所有**真实
+// Claude Code 请求落进重写路径：system 被重建成 CLI 三段式、客户端 system block 上
+// 的 cache_control 随 anthropicSystemText 降级整段丢弃、剩余断点再被
+// enforceAnthropicCacheControlLimit 裁剪——客户端自管的 prompt cache 就此失效。
 func TestPrepareTranslatedUpstreamBodyCapsAntigravityOutputUsingRequestModel(t *testing.T) {
 	t.Parallel()
 	const modelName = "claude-opus-4-6-thinking"
@@ -4060,14 +4026,6 @@ func TestPrepareTranslatedUpstreamBodyCapsAntigravityOutputUsingRequestModel(t *
 	}
 }
 
-// TestAnthropicNativeClaudeCodeWithoutCCHPassesThrough 守住入站判据不看 CCH。
-//
-// 下游 Claude Code 指向 ccLoad 时看到的是非第一方 base URL，native gate
-// (`s = firstParty || vertex ? " cch=00000;" : ""`) 直接省略 cch，但 X-App/UA/beta/
-// metadata.user_id 四个身份信号一个不少。把 ` cch=` 当必要条件会让**所有**真实
-// Claude Code 请求落进重写路径：system 被重建成 CLI 三段式、客户端 system block 上
-// 的 cache_control 随 anthropicSystemText 降级整段丢弃、剩余断点再被
-// enforceAnthropicCacheControlLimit 裁剪——客户端自管的 prompt cache 就此失效。
 func TestAnthropicNativeClaudeCodeWithoutCCHPassesThrough(t *testing.T) {
 	const sessionID = "f2e293f7-b6ee-48f7-9258-95be092aae58"
 	identity := fmt.Sprintf(`{"device_id":%q,"account_uuid":%q,"session_id":%q}`,
@@ -4452,4 +4410,51 @@ func TestAnthropicNativeTitleHelperPreservesStructuredOutput(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGeminiStreamCompleteSurvivesClientCancel(t *testing.T) {
+	t.Parallel()
+
+	partial := `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}]}` + "\n\n"
+	complete := partial + `data: {"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":5,"totalTokenCount":12}}` + "\n\n"
+	reg := protocol.NewRegistry()
+	builtin.Register(reg)
+	original := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	run := func(sse string) (*fwResult, error) {
+		reqCtx := &requestContext{
+			ctx: context.Background(), startTime: time.Now(), isStreaming: true, antigravityOAuth: false,
+			clientProtocol: protocol.Gemini, upstreamProtocol: protocol.Gemini,
+			transformPlan: protocol.TransformPlan{ClientProtocol: protocol.Gemini, UpstreamProtocol: protocol.Gemini, OriginalModel: "gemini-3-flash", ActualModel: "gemini-3-flash", OriginalBody: original, TranslatedBody: original, NeedsTransform: false},
+		}
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(io.MultiReader(strings.NewReader(sse), iotest.ErrReader(context.Canceled))),
+		}
+		result, _, err := (&Server{protocolRegistry: reg}).handleSuccessResponse(
+			reqCtx, resp, resp.Header.Clone(), newRecorder(), string(protocol.Gemini), &streamReadStats{}, nil,
+		)
+		return result, err
+	}
+
+	t.Run("cancel after finish reason", func(t *testing.T) {
+		t.Parallel()
+		result, err := run(complete)
+		if err != nil {
+			t.Fatalf("终态块之后的客户端取消不得判为失败: %v", err)
+		}
+		if result.Status != http.StatusOK || result.StreamDiagMsg != "" {
+			t.Fatalf("status=%d diag=%q", result.Status, result.StreamDiagMsg)
+		}
+		if result.OutputTokens != 5 {
+			t.Fatalf("usage 未计入: %#v", result)
+		}
+	})
+
+	t.Run("cancel before finish reason", func(t *testing.T) {
+		t.Parallel()
+		if _, err := run(partial); err == nil {
+			t.Fatal("未见终态就取消必须保留失败语义，交给 499 路径")
+		}
+	})
 }

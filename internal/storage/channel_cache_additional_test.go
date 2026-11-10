@@ -324,7 +324,8 @@ func TestChannelCache_APIKeysCacheExpires(t *testing.T) {
 		t.Fatalf("CreateAPIKeysBatch failed: %v", err)
 	}
 
-	cache := storage.NewChannelCache(store, 0)
+	// A past TTL expires even when two reads share the same Windows clock tick.
+	cache := storage.NewChannelCache(store, -time.Nanosecond)
 	if keys, err := cache.GetAPIKeys(ctx, channel.ID); err != nil || len(keys) != 1 {
 		t.Fatalf("initial GetAPIKeys = (%+v, %v)", keys, err)
 	}

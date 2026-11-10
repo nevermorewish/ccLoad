@@ -16,7 +16,7 @@ type LogRow = {
   status_code?: number; error_category?: string; message?: string; duration?: number; is_streaming?: boolean; upstream_websocket?: boolean; first_byte_time?: number
   api_key_used?: string; api_key_hash?: string; auth_token_id?: number; auth_token_description?: string; client_protocol?: string; upstream_protocol?: string
   client_ip?: string; base_url?: string; service_tier?: string; thinking_effort?: string; input_tokens?: number; output_tokens?: number; reasoning_tokens?: number
-  cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cache_5m_input_tokens?: number; cache_1h_input_tokens?: number
+  cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cache_5m_input_tokens?: number; cache_1h_input_tokens?: number; cache_30m_input_tokens?: number; cache_12h_input_tokens?: number
   cost?: number; cost_multiplier?: number; effective_cost?: number
   cost_breakdown?: { input?: { tokens?: number; price?: number; cost?: number }; output?: { tokens?: number; price?: number; cost?: number }; cache_read?: { tokens?: number; price?: number; cost?: number }; cache_write?: { tokens?: number; price?: number; cost?: number }; total?: number; service_tier_multiplier?: number }
 }
@@ -328,7 +328,7 @@ function LogTableRow({ row, show, tokenLabel, readOnly, onChannel, onDebug, onTe
     {show('input') && <td>{num(row.input_tokens) ? formatCompact(row.input_tokens) : ''}</td>}
     {show('output') && <td>{output ? formatCompact(output) : ''}</td>}
     {show('cache_read') && <td>{num(row.cache_read_input_tokens) ? formatCompact(row.cache_read_input_tokens) : ''}</td>}
-    {show('cache_write') && <td className="cell-stack">{num(row.cache_creation_input_tokens) ? <><span>{formatCompact(row.cache_creation_input_tokens)}</span><span className="table-note">{num(row.cache_5m_input_tokens) ? `5m ${formatCompact(row.cache_5m_input_tokens)} ` : ''}{num(row.cache_1h_input_tokens) ? `1h ${formatCompact(row.cache_1h_input_tokens)}` : ''}</span></> : ''}</td>}
+    {show('cache_write') && <td className="cell-stack">{num(row.cache_creation_input_tokens) ? <><span>{formatCompact(row.cache_creation_input_tokens)}</span><span className="table-note">{num(row.cache_5m_input_tokens) ? `5m ${formatCompact(row.cache_5m_input_tokens)} ` : ''}{num(row.cache_1h_input_tokens) ? `1h ${formatCompact(row.cache_1h_input_tokens)} ` : ''}{num(row.cache_30m_input_tokens) ? `30m ${formatCompact(row.cache_30m_input_tokens)} ` : ''}{num(row.cache_12h_input_tokens) ? `12h ${formatCompact(row.cache_12h_input_tokens)}` : ''}</span></> : ''}</td>}
     {show('hit') && <td>{cacheHitRate(row.input_tokens, row.cache_read_input_tokens, row.cache_creation_input_tokens)}</td>}
     {show('cost') && <td title={costTip || undefined} className="cell-stack">{num(row.cost) || effective ? <><span>{formatUSD(effective)}</span>{Math.abs(effective - num(row.cost)) > 1e-9 && <span className="table-note">标准 {formatUSD(row.cost)}</span>}{row.service_tier && <span className="badge">{row.service_tier}</span>}</> : ''}</td>}
     {show('info') && <td className="log-message">

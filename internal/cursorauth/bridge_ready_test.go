@@ -107,7 +107,7 @@ func TestBridgeSpawnPreservesExecutableStartError(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("bridge"), 0o755); err != nil {
 		t.Fatalf("write bridge binary: %v", err)
 	}
-	missing := filepath.Join(t.TempDir(), "missing-cursor-sdk-bridge")
+	missing := filepath.Join(t.TempDir(), "missing-cursor-sdk-bridge.exe")
 	bridge := newBridge(binary)
 	defer bridge.lifeStop()
 	bridge.command = func(string, ...string) *exec.Cmd {
@@ -142,7 +142,7 @@ func TestBridgeStateRootFallsBackWhenCacheCannotBeCreated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat fallback state root: %v", err)
 	}
-	if info.Mode().Perm() != 0o700 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
 		t.Fatalf("fallback state root mode = %v, want 0700", info.Mode())
 	}
 }

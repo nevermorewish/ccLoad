@@ -1,5 +1,13 @@
 package schema
 
+// DefineCodexRefreshJournalTable 定义不随渠道生命周期清理的 Codex 刷新申领与最终回执表
+// @return 使用 SHA-256 授权摘要主键、可空回执的永久表定义
+func DefineCodexRefreshJournalTable() *TableBuilder {
+	return NewTable("codex_refresh_journal").
+		Column("grant_key VARCHAR(64) PRIMARY KEY").
+		Column("receipt TEXT NULL")
+}
+
 // DefineOAuthQuotaCostLedgerTable 定义独立于日志保留期的 OAuth 周期额度成本账本。
 func DefineOAuthQuotaCostLedgerTable() *TableBuilder {
 	return NewTable("oauth_quota_cost_ledger").
@@ -226,7 +234,9 @@ func DefineLogsTable() *TableBuilder {
 		Column("cache_read_input_tokens INT NOT NULL DEFAULT 0").
 		Column("cache_creation_input_tokens INT NOT NULL DEFAULT 0"). // 5m+1h缓存总和（兼容字段）
 		Column("cache_5m_input_tokens INT NOT NULL DEFAULT 0").       // 5分钟缓存写入Token数（新增2025-12）
-		Column("cache_1h_input_tokens INT NOT NULL DEFAULT 0").       // 1小时缓存写入Token数（新增2025-12）
+		Column("cache_30m_input_tokens INT NOT NULL DEFAULT 0").
+		Column("cache_12h_input_tokens INT NOT NULL DEFAULT 0").
+		Column("cache_1h_input_tokens INT NOT NULL DEFAULT 0"). // 1小时缓存写入Token数（新增2025-12）
 		Column("cost DOUBLE NOT NULL DEFAULT 0.0").
 		Column("cost_multiplier DOUBLE NOT NULL DEFAULT 1").
 		Index("idx_logs_time_model", "time, model").

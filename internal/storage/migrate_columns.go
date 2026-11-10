@@ -187,6 +187,11 @@ func sqliteExistingColumns(ctx context.Context, db *sql.DB, table string) (map[s
 
 // ensureLogsNewColumns 确保logs表有新增字段(2025-12新增,支持MySQL和SQLite)
 func ensureLogsNewColumns(ctx context.Context, db *sql.DB, dialect Dialect) error {
+	for _, column := range []string{"cache_30m_input_tokens", "cache_12h_input_tokens"} {
+		if err := ensureColumn(ctx, db, dialect, "logs", column, "BIGINT NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
 	if err := ensureColumn(ctx, db, dialect, "logs", "reasoning_decision", "TEXT NULL", "TEXT NULL"); err != nil {
 		return err
 	}
@@ -253,7 +258,7 @@ func ensureLogsColumnsPostgres(ctx context.Context, db *sql.DB) error {
 	const cache5mBackfillMarker = "cache_5m_backfill_done"
 	if !hasMigration(ctx, db, cache5mBackfillMarker, DialectPostgres) {
 		if _, err := db.ExecContext(ctx,
-			"UPDATE logs SET cache_5m_input_tokens = cache_creation_input_tokens WHERE cache_5m_input_tokens = 0 AND cache_1h_input_tokens = 0 AND cache_creation_input_tokens > 0",
+			"UPDATE logs SET cache_5m_input_tokens = cache_creation_input_tokens WHERE cache_5m_input_tokens = 0 AND cache_1h_input_tokens = 0 AND cache_30m_input_tokens = 0 AND cache_12h_input_tokens = 0 AND cache_creation_input_tokens > 0",
 		); err != nil {
 			return fmt.Errorf("migrate cache_5m data: %w", err)
 		}
@@ -303,7 +308,7 @@ func ensureLogsColumnsSQLite(ctx context.Context, db *sql.DB) error {
 	const cache5mBackfillMarker = "cache_5m_backfill_done"
 	if !hasMigration(ctx, db, cache5mBackfillMarker, DialectSQLite) {
 		_, err := db.ExecContext(ctx,
-			"UPDATE logs SET cache_5m_input_tokens = cache_creation_input_tokens WHERE cache_5m_input_tokens = 0 AND cache_1h_input_tokens = 0 AND cache_creation_input_tokens > 0",
+			"UPDATE logs SET cache_5m_input_tokens = cache_creation_input_tokens WHERE cache_5m_input_tokens = 0 AND cache_1h_input_tokens = 0 AND cache_30m_input_tokens = 0 AND cache_12h_input_tokens = 0 AND cache_creation_input_tokens > 0",
 		)
 		if err != nil {
 			return fmt.Errorf("migrate cache_5m data: %w", err)
@@ -394,7 +399,7 @@ func ensureLogsCacheFieldsMySQL(ctx context.Context, db *sql.DB) error {
 
 	// 迁移历史数据，将cache_creation_input_tokens复制到cache_5m_input_tokens
 	if _, err := db.ExecContext(ctx,
-		"UPDATE logs SET cache_5m_input_tokens = cache_creation_input_tokens WHERE cache_5m_input_tokens = 0 AND cache_creation_input_tokens > 0",
+		"UPDATE logs SET cache_5m_input_tokens = cache_creation_input_tokens WHERE cache_5m_input_tokens = 0 AND cache_1h_input_tokens = 0 AND cache_30m_input_tokens = 0 AND cache_12h_input_tokens = 0 AND cache_creation_input_tokens > 0",
 	); err != nil {
 		return fmt.Errorf("migrate cache_5m data: %w", err)
 	}

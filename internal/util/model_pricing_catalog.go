@@ -11,7 +11,7 @@ import (
 // 一次成功调用 = 1 search_call = $0.01。
 const BillingModelSearchCall = "search_call"
 
-// ModelPricing AI模型定价（单位：美元/百万tokens）
+// ModelPricing 模型计费价目（美元/百万 token），显式价格标志区分默认值与免费。
 type ModelPricing struct {
 	InputPrice         float64 // 基础输入token价格（$/1M tokens, ≤200k context for Gemini）
 	OutputPrice        float64 // 输出token价格（$/1M tokens, ≤200k context for Gemini）
@@ -27,7 +27,11 @@ type ModelPricing struct {
 	CacheWritePriceHigh float64
 	HasCacheWritePrice  bool // 是否使用显式 5 分钟缓存创建价格；false 时按缓存时长倍率回退计算
 	// HasCacheWritePriceHigh 区分高上下文缓存创建价「未配置」与「显式为 0」。
-	HasCacheWritePriceHigh bool
+	HasCacheWritePriceHigh    bool
+	CacheWrite12hPrice        float64 ///< OpenAI 12h 写入单价（美元/百万 token）。
+	CacheWrite12hPriceHigh    float64 ///< 高上下文 OpenAI 12h 写入单价。
+	HasCacheWrite12hPrice     bool    ///< 区分未配置和显式免费。
+	HasCacheWrite12hPriceHigh bool    ///< 区分高上下文价未配置和显式免费。
 
 	// 缓存 token（读与写）是否参与高/低档选择。
 	// Claude 长上下文按「input + cache_read + cache_creation」判定 200K；OpenAI context tiers、
@@ -193,6 +197,10 @@ var basePricing = map[string]ModelPricing{
 		InputPrice: 4.00, OutputPrice: 20.00,
 		CacheReadPrice: 0.20, HasCacheReadPrice: true,
 		CacheWritePrice: 5.00, HasCacheWritePrice: true,
+	},
+	// https://platform.claude.com/docs/en/about-claude/pricing （2026-11-10）
+	"claude-fable-5-2": {
+		InputPrice: 8.00, OutputPrice: 40.00, CacheReadPrice: 0.20, HasCacheReadPrice: true,
 	},
 	"claude-fable-5-1": {
 		InputPrice: 10.00, OutputPrice: 50.00, CacheReadPrice: 0.25, HasCacheReadPrice: true,
@@ -1134,9 +1142,12 @@ func lookupModelPricingWithFallback(
 	return ModelPricing{}, false
 }
 
-// withEffectiveSystemDefaults expands implicit system cache prices for editing.
-// The runtime calculator still keeps the original implicit multipliers; these
-// values are only returned to the admin editor as useful defaults.
+/**
+ * @brief 展开编辑器使用的隐式缓存价，保持保存前后的实际计费一致。
+ * @param model 已归一化的模型 ID。
+ * @param pricing 当前生效价格。
+ * @return 可直接预填的价格副本。
+ */
 func withEffectiveSystemDefaults(model string, pricing ModelPricing) ModelPricing {
 	pricing = cloneModelPricing(pricing)
 	cacheMultiplier := cacheReadMultiplierClaude
@@ -1167,12 +1178,28 @@ func withEffectiveSystemDefaults(model string, pricing ModelPricing) ModelPricin
 	// keeps the correct duration multiplier instead of being flattened to one
 	// base price in the editor.
 	if len(pricing.TokenPricingTiers) == 0 {
-		if !pricing.HasCacheWritePrice {
+		hasCacheWrite12hPrice := pricing.HasCacheWrite12hPrice
+		if !hasCacheWrite12hPrice {
+			pricing.CacheWrite12hPrice = pricing.InputPrice * cacheWrite12hMultiplier
+			pricing.HasCacheWrite12hPrice = true
+		}
+		if (pricing.HasInputPriceHigh || pricing.InputPriceHigh > 0) && !pricing.HasCacheWrite12hPriceHigh {
+			if hasCacheWrite12hPrice {
+				pricing.CacheWrite12hPriceHigh = pricing.CacheWrite12hPrice
+			} else {
+				pricing.CacheWrite12hPriceHigh = pricing.InputPriceHigh * cacheWrite12hMultiplier
+			}
+			pricing.HasCacheWrite12hPriceHigh = true
+		}
+		hasCacheWritePrice := pricing.HasCacheWritePrice
+		if !hasCacheWritePrice {
 			pricing.CacheWritePrice = pricing.InputPrice * cacheWrite5mMultiplier
 			pricing.HasCacheWritePrice = true
 		}
 		if (pricing.HasInputPriceHigh || pricing.InputPriceHigh > 0) && !pricing.HasCacheWritePriceHigh {
-			if pricing.CacheWritePriceHigh == 0 {
+			if hasCacheWritePrice {
+				pricing.CacheWritePriceHigh = pricing.CacheWritePrice
+			} else if pricing.CacheWritePriceHigh == 0 {
 				pricing.CacheWritePriceHigh = pricing.InputPriceHigh * cacheWrite5mMultiplier
 			}
 			pricing.HasCacheWritePriceHigh = true

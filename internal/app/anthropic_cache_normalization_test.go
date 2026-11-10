@@ -179,6 +179,12 @@ func TestProxyAnthropicInclusiveCacheNativeAndConverted(t *testing.T) {
 					request["input"] = "hi"
 				}
 				got := doProxyRequest(t, env.engine, path, request, nil)
+				if client != "anthropic" {
+					if got.Code != http.StatusServiceUnavailable {
+						t.Fatalf("foreign protocol admitted: %d %s", got.Code, got.Body.String())
+					}
+					return
+				}
 				if got.Code != 200 {
 					t.Fatalf("status=%d %s", got.Code, got.Body.String())
 				}

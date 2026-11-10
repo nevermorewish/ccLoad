@@ -2695,7 +2695,7 @@ func (s *Server) parseTestTranslatedSSEResponse(
 			if requestPlan.codeBuddyOAuth {
 				return codeBuddyDone
 			}
-			return upstreamParser.IsStreamComplete() && translatedComplete
+			return upstreamParser.IsStreamEnded() && translatedComplete
 		},
 	)
 	if streamErr != nil {
@@ -2905,6 +2905,7 @@ func populateTestSSEUsageAndCost(
 func normalizedTestUsage(parser usageParser) (map[string]any, bool) {
 	input, output, cacheRead, cacheCreation := parser.GetUsage()
 	cache5m, cache1h, _ := parser.GetCacheBreakdown()
+	cache30m, cache12h := parser.GetOpenAICacheBreakdown()
 	reasoningTokens := parser.GetReasoningTokens()
 	if input+output+cacheRead+cacheCreation+cache5m+cache1h+reasoningTokens == 0 {
 		return nil, false
@@ -2917,6 +2918,8 @@ func normalizedTestUsage(parser usageParser) (map[string]any, bool) {
 		"cache_creation_input_tokens": cacheCreation,
 		"cache_5m_input_tokens":       cache5m,
 		"cache_1h_input_tokens":       cache1h,
+		"cache_30m_input_tokens":      cache30m,
+		"cache_12h_input_tokens":      cache12h,
 	}, true
 }
 
@@ -2954,6 +2957,7 @@ func (s *Server) bindChannelTestBilling(cfg *model.Config, testReq *testutil.Tes
 func channelTestCostUSD(testReq *testutil.TestChannelRequest, actualModel, requestedServiceTier string, parser usageParser) (float64, bool) {
 	input, output, cacheRead, cacheCreation := parser.GetUsage()
 	cache5m, cache1h, observedServiceTier := parser.GetCacheBreakdown()
+	cache30m, cache12h := parser.GetOpenAICacheBreakdown()
 	toolCost := parser.GetToolCostUSD()
 	if input+output+cacheRead+cacheCreation <= 0 {
 		return toolCost, toolCost > 0
@@ -2971,6 +2975,8 @@ func channelTestCostUSD(testReq *testutil.TestChannelRequest, actualModel, reque
 		CacheCreationInputTokens: cacheCreation,
 		Cache5mInputTokens:       cache5m,
 		Cache1hInputTokens:       cache1h,
+		Cache30mInputTokens:      cache30m,
+		Cache12hInputTokens:      cache12h,
 		ServiceTier:              serviceTier,
 		RateCard:                 openAIRateCard(testReq.CodexOAuth, parser.GetCodexHasCredits()),
 		ToolCostUSD:              toolCost,

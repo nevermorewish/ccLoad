@@ -274,11 +274,13 @@ const PRICE_FIELDS: Array<{ key: string; label: string; required?: boolean }> = 
   { key: 'input_price', label: '输入', required: true },
   { key: 'output_price', label: '输出', required: true },
   { key: 'cache_read_price', label: '缓存读取' },
-  { key: 'cache_write_price', label: '缓存写入' },
+  { key: 'cache_write_price', label: '缓存写入（通用 / OpenAI 30m）' },
+  { key: 'cache_write_12h_price', label: 'OpenAI 12h 缓存写入' },
   { key: 'input_price_high', label: '输入（高上下文）' },
   { key: 'output_price_high', label: '输出（高上下文）' },
   { key: 'cache_read_price_high', label: '缓存读取（高上下文）' },
   { key: 'cache_write_price_high', label: '缓存写入（高上下文）' },
+  { key: 'cache_write_12h_price_high', label: 'OpenAI 12h 写入（高上下文）' },
 ]
 
 /** 渠道级模型价格：整份替换该模型全局价格；全部留空=恢复全局价格。单位：美元 / 百万 token。 */
@@ -295,7 +297,7 @@ export function ModelPricingDialog({ open, entry, onClose, onApply }: { open: bo
     setStatus('加载中…')
     try {
       const result = await getJSON<{ found?: boolean; pricing?: Record<string, unknown> }>('/admin/model-pricing', { model: lookupModel, effective: 1 })
-      // 分段计价模型无法用 8 项价目表达，拒绝加载默认值。
+      // 分段计价模型无法用 当前价目表达，拒绝加载默认值。
       if (Array.isArray(result.pricing?.token_pricing_tiers) && result.pricing.token_pricing_tiers.length) { setStatus('该模型使用分段计价，无法加载默认值'); return }
       if (!result.found) { setStatus('没有找到该模型的全局价格'); return }
       setValues(Object.fromEntries(PRICE_FIELDS.map((field) => [field.key, result.pricing?.[field.key] == null ? '' : String(result.pricing[field.key])])))

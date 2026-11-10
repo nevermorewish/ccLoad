@@ -21,9 +21,9 @@ import (
 // SSE Usage 解析器 (重构版 - 遵循SRP)
 // ============================================================================
 
-// sseUsageParser SSE流式响应的usage数据解析器
-// 设计原则（SRP）：仅负责从SSE事件流中提取token统计信息，不负责I/O
-// 采用增量解析避免重复扫描（O(n²) → O(n)）
+/**
+ * @brief 保存上游原始累计用量；Anthropic 与 OpenAI 写入时长使用独立分桶。
+ */
 type usageAccumulator struct {
 	InputTokens              int
 	OutputTokens             int
@@ -32,6 +32,8 @@ type usageAccumulator struct {
 	CacheCreationInputTokens int
 	Cache5mInputTokens       int
 	Cache1hInputTokens       int
+	Cache30mInputTokens      int ///< OpenAI 30 分钟写入，与 Anthropic 分桶互斥。
+	Cache12hInputTokens      int ///< OpenAI 12 小时写入，与 Anthropic 分桶互斥。
 	ToolCostUSD              float64
 	WebSearchRequests        int                           // Anthropic server_tool_use 累计快照，GetToolCostUSD 按次折价
 	ImageUsage               util.ImageGenerationToolUsage // Native Images usage, distinct from Responses tool usage.
@@ -63,10 +65,13 @@ type sseUsageParser struct {
 	// [INFO] 新增：存储SSE流中检测到的error事件（用于1308等错误的延迟处理）
 	lastError []byte // 最后一个error事件的完整JSON（data字段内容）
 
-	// [INFO] 新增：流结束标志（用于判断流是否正常完成）
-	// OpenAI: data: [DONE]
-	// Anthropic: event: message_stop
+	// streamComplete 表示上游已给出语义终态，用于判定流是否完整：[DONE]、message_stop、
+	// Responses/Images 终态，以及 OpenAI finish_reason、Gemini finishReason、
+	// Anthropic message_delta.stop_reason。
 	streamComplete bool
+	// streamEnded 表示已收到协议的最后一个事件（[DONE]、message_stop、Responses/Images 终态）。
+	// 提前结束读取只能看它：语义终态之后还有 usage、message_stop 等收尾事件要转发。
+	streamEnded bool
 
 	// hasStreamOutput 表示已经看到应转发给客户端的非心跳流事件。
 	// ping 只是上游保活，不能让 200 空流被误判为成功。
@@ -117,18 +122,27 @@ type sseLargeFieldSanitizer struct {
 	dropEscape    bool
 }
 
+/**
+ * @brief 从上游响应提取原始计费用量及流语义，不依赖下游协议转换结果。
+ */
 type usageParser interface {
 	Feed([]byte) error
 	GetUsage() (inputTokens, outputTokens, cacheRead, cacheCreation int)
 	GetCacheBreakdown() (cache5m, cache1h int, serviceTier string) // 返回缓存分桶与上游 service_tier/speed
-	GetToolCostUSD() float64                                       // 返回服务端工具调用（Responses 图像、Anthropic web_search）的额外费用
+	/**
+	 * @brief 返回由完整上游明细确定的 OpenAI 写入 token。
+	 * @return cache30m 30 分钟写入 token。
+	 * @return cache12h 12 小时写入 token。
+	 */
+	GetOpenAICacheBreakdown() (cache30m, cache12h int)
+	GetToolCostUSD() float64 // 返回服务端工具调用（Responses 图像、Anthropic web_search）的额外费用
 	GetImageUsage() util.ImageGenerationToolUsage
 	GetThinkingEffort() string
 	GetReasoningTokens() int
 	GetResponseModel() string
 	GetCodexHasCredits() bool
 	GetLastError() []byte       // [INFO] 返回SSE流中检测到的最后一个error事件（用于1308等错误的延迟处理）
-	IsStreamComplete() bool     // [INFO] 返回是否检测到流结束标志（[DONE]/message_stop）
+	IsStreamComplete() bool     // 返回上游是否已给出语义终态（见 sseUsageParser.streamComplete）
 	HasStreamOutput() bool      // 语义输出，提交给客户端后不可再内部切渠道
 	HasResponsesMetadata() bool // Responses 元数据（created 等），算上游已返回数据，但不提交
 	GetResponsesTurnResult() (responsesWebsocketTurnResult, bool)
@@ -137,6 +151,13 @@ type usageParser interface {
 // GetCacheBreakdown 由 sseUsageParser/jsonUsageParser 通过嵌入共享。
 func (u *usageAccumulator) GetCacheBreakdown() (cache5m, cache1h int, serviceTier string) {
 	return u.Cache5mInputTokens, u.Cache1hInputTokens, u.ServiceTier
+}
+
+// GetOpenAICacheBreakdown 返回上游已确认的 OpenAI 缓存写入时长分桶。
+// @return 30 分钟写入 token 数，未报告有效明细时为 0。
+// @return 12 小时写入 token 数，未报告有效明细时为 0。
+func (u *usageAccumulator) GetOpenAICacheBreakdown() (cache30m, cache12h int) {
+	return u.Cache30mInputTokens, u.Cache12hInputTokens
 }
 
 func (u *usageAccumulator) GetToolCostUSD() float64 {
@@ -280,6 +301,8 @@ func (p *sseUsageParser) scanUsageFragments(data []byte) {
 		p.CacheCreationInputTokens = p.scanner.CacheCreationInputTokens
 		p.Cache5mInputTokens = p.scanner.Cache5mInputTokens
 		p.Cache1hInputTokens = p.scanner.Cache1hInputTokens
+		p.Cache30mInputTokens = p.scanner.Cache30mInputTokens
+		p.Cache12hInputTokens = p.scanner.Cache12hInputTokens
 		p.WebSearchRequests = p.scanner.WebSearchRequests
 		p.ImageUsage = p.scanner.ImageUsage
 		p.scanVersion = p.scanner.usageVersion
@@ -540,7 +563,7 @@ func (p *sseUsageParser) parseEvent(eventType, data string) error {
 	// 方案：改为黑名单模式 - 只过滤已知无用事件，其他都尝试解析
 
 	if data == "[DONE]" {
-		p.streamComplete = true
+		p.streamComplete, p.streamEnded = true, true
 		return nil
 	}
 	if isHeartbeatEvent(eventType, data) {
@@ -600,11 +623,10 @@ func (p *sseUsageParser) parseEvent(eventType, data string) error {
 		return nil
 	}
 
-	// Responses 元数据事件不构成语义输出：客户端可以在这些事件后重新开始回合，
-	// 与原生 WS 路径的 isCodexWebsocketSemanticEvent 判定对齐。event: 行与
-	// JSON type 都要认，和 isSuccessfulResponsesTerminal 一样。只有真正的内容
-	// 事件才标记为有流输出，以便 deferredWriter 在 error 到来前不会过早 commit。
-	if isResponsesMetadataEvent(payloadType) || isResponsesMetadataEvent(eventType) {
+	// Responses 元数据与空骨架事件不构成语义输出：客户端可以在这些事件后重新开始回合。
+	// event: 行与 JSON type 都要认，和 isSuccessfulResponsesTerminal 一样。只有真正的
+	// 内容事件才标记为有流输出，以便 deferredWriter 在 error 到来前不会过早 commit。
+	if isResponsesPreOutputEvent(payloadType, data) || isResponsesPreOutputEvent(eventType, data) {
 		p.hasResponsesMetadata = true
 	} else {
 		p.hasStreamOutput = true
@@ -621,15 +643,15 @@ func (p *sseUsageParser) parseEvent(eventType, data string) error {
 	}
 	isAnthropicTerminal := payloadType == "message_stop" || (payloadType == "" && eventType == "message_stop")
 	if isAnthropicTerminal || isSuccessfulResponsesTerminal(eventType) || isSuccessfulResponsesTerminal(payloadType) {
-		p.streamComplete = true
+		p.streamComplete, p.streamEnded = true, true
 	}
 	if isImagesStreamTerminal(payloadType) || (payloadType == "" && isImagesStreamTerminal(eventType)) {
-		p.streamComplete = true
+		p.streamComplete, p.streamEnded = true, true
 	}
-	// OpenAI Chat Completions 与 Gemini 在 finish_reason 处就已给出语义终态，
-	// 之后的 usage 分片和 [DONE] 都是可选尾巴。客户端常在读到 finish_reason 时
-	// 立刻断开，此处不认终态会把完整响应误判成 499（客户端取消）或 599（流不完整）。
-	if openAIStreamPayloadComplete(event) || geminiStreamPayloadComplete(event) {
+	// OpenAI Chat Completions 与 Gemini 在 finish_reason 处、Anthropic 在 message_delta.stop_reason
+	// 处就已给出语义终态，之后的 usage 分片、[DONE]、message_stop 都是可选尾巴。客户端常在读到
+	// 终态时立刻断开，此处不认终态会把完整响应误判成 499（客户端取消）或 599（流不完整）。
+	if openAIStreamPayloadComplete(event) || geminiStreamPayloadComplete(event) || anthropicStreamPayloadComplete(event) {
 		p.streamComplete = true
 	}
 	if isSuccessfulResponsesTerminal(payloadType) {
@@ -706,9 +728,14 @@ func (p *sseUsageParser) GetLastError() []byte {
 	return p.lastError
 }
 
-// [INFO] IsStreamComplete 返回是否检测到流结束标志
+// IsStreamComplete 返回上游是否已给出语义终态。
 func (p *sseUsageParser) IsStreamComplete() bool {
 	return p.streamComplete
+}
+
+// IsStreamEnded 返回是否已收到协议的最后一个事件，之后可以停止读取上游。
+func (p *sseUsageParser) IsStreamEnded() bool {
+	return p.streamEnded
 }
 
 func (p *sseUsageParser) HasStreamOutput() bool {
@@ -725,12 +752,68 @@ func (p *sseUsageParser) GetResponsesTurnResult() (responsesWebsocketTurnResult,
 
 // isResponsesMetadataEvent 判断 Responses 流事件是否只是元数据（非语义输出）。
 // response.created/queued/in_progress 不算语义输出，出现 error 时仍可切换渠道重试。
+// response.metadata 只携带提示审核标记，上游会把它插在 in_progress 与
+// server_is_overloaded 之间（CLIProxyAPI #6856、sub2api e068c3d02）。
 // 空字符串不是元数据：Chat Completions 没有 type，必须算有流输出。
 func isResponsesMetadataEvent(payloadType string) bool {
 	switch payloadType {
 	case "response.created", "response.queued", "response.in_progress",
-		"codex.rate_limits", "codex.response.metadata":
+		"codex.rate_limits", "codex.response.metadata", "response.metadata":
 		return true
+	default:
+		return false
+	}
+}
+
+// isResponsesPreOutputEvent 判断 Responses 流事件是否尚无可观察输出：元数据，或只宣告
+// 条目/片段而内容仍为空的骨架（对齐 CLIProxyAPI isCodexBootstrapBufferableEvent）。
+// 上游会在过载拒绝前先发这些空骨架，按输出提交会把随后的拒绝漏给客户端。
+// 清单刻意封闭：web_search_call 等服务端工具宣告时已在执行，换渠道重放会重复副作用，
+// 未识别的条目与片段类型一律按已输出处理。
+func isResponsesPreOutputEvent(eventType, data string) bool {
+	switch eventType {
+	case "response.output_item.added":
+		return isResponsesEmptyOutputItem(gjson.Get(data, "item"))
+	case "response.content_part.added", "response.reasoning_summary_part.added":
+		return isResponsesEmptyPart(gjson.Get(data, "part"))
+	default:
+		return isResponsesMetadataEvent(eventType)
+	}
+}
+
+func isResponsesEmptyOutputItem(item gjson.Result) bool {
+	switch item.Get("type").String() {
+	case "message":
+		return isResponsesEmptyParts(item.Get("content"))
+	case "reasoning":
+		return item.Get("encrypted_content").String() == "" &&
+			isResponsesEmptyParts(item.Get("summary")) && isResponsesEmptyParts(item.Get("content"))
+	case "function_call":
+		return item.Get("arguments").String() == ""
+	case "custom_tool_call":
+		return item.Get("input").String() == ""
+	default:
+		return false
+	}
+}
+
+func isResponsesEmptyParts(parts gjson.Result) bool {
+	for _, part := range parts.Array() {
+		if !isResponsesEmptyPart(part) {
+			return false
+		}
+	}
+	return true
+}
+
+// isResponsesEmptyPart 只认已知的文本片段：其他类型可能把内容放在这里看不到的字段
+// （如 output_audio 的 audio），按已输出处理。
+func isResponsesEmptyPart(part gjson.Result) bool {
+	switch part.Get("type").String() {
+	case "output_text", "summary_text", "text", "reasoning_text":
+		return part.Get("text").String() == ""
+	case "refusal":
+		return part.Get("refusal").String() == ""
 	default:
 		return false
 	}
@@ -834,14 +917,19 @@ func markSSETerminalFromRaw(p *sseUsageParser, eventType, data string) {
 	isAnthropicTerminal := payloadType == "message_stop" || (payloadType == "" && eventType == "message_stop")
 	if isAnthropicTerminal || isSuccessfulResponsesTerminal(payloadType) ||
 		(payloadType == "" && isSuccessfulResponsesTerminal(eventType)) {
-		p.streamComplete = true
+		p.streamComplete, p.streamEnded = true, true
 	}
 	if isImagesStreamTerminal(payloadType) || (payloadType == "" && isImagesStreamTerminal(eventType)) {
+		p.streamComplete, p.streamEnded = true, true
+	}
+	if gjsonOpenAIStreamComplete(payload) || gjsonGeminiStreamComplete(payload) || gjsonAnthropicStreamComplete(payload) {
 		p.streamComplete = true
 	}
-	if gjsonOpenAIStreamComplete(payload) || gjsonGeminiStreamComplete(payload) {
-		p.streamComplete = true
-	}
+}
+
+func gjsonAnthropicStreamComplete(data string) bool {
+	return gjson.Get(data, "type").String() == "message_delta" &&
+		strings.TrimSpace(gjson.Get(data, "delta.stop_reason").String()) != ""
 }
 
 func gjsonOpenAIStreamComplete(data string) bool {
@@ -886,12 +974,7 @@ func observedServiceTierFromEvent(eventType, payloadType string, event map[strin
 	if !terminal && (eventType != "" || payloadType != "") {
 		// Responses 的 typed delta 一律忽略，避免读取请求回显；没有 type
 		// 的自定义 Chat 事件仍可读取 service_tier。
-		if payloadType != "" {
-			return ""
-		}
-		switch eventType {
-		case "response.created", "response.queued", "response.in_progress",
-			"codex.rate_limits", "codex.response.metadata":
+		if payloadType != "" || isResponsesMetadataEvent(eventType) {
 			return ""
 		}
 	}
@@ -926,6 +1009,17 @@ func openAIStreamPayloadComplete(payload map[string]any) bool {
 		return true
 	}
 	return false
+}
+
+// anthropicStreamPayloadComplete 判断 Anthropic 流分片是否给出终态：message_delta 带非空
+// stop_reason 时回复已经完整，随后的 message_stop 只是收尾事件。
+func anthropicStreamPayloadComplete(payload map[string]any) bool {
+	if payloadType, _ := payload["type"].(string); payloadType != "message_delta" {
+		return false
+	}
+	delta, _ := payload["delta"].(map[string]any)
+	reason, _ := delta["stop_reason"].(string)
+	return strings.TrimSpace(reason) != ""
 }
 
 // geminiStreamPayloadComplete 判断 Gemini 流分片是否给出终态。
@@ -1718,6 +1812,7 @@ func (u *usageAccumulator) applyOpenAIChatUsage(usage map[string]any) {
 	}
 	// OpenAI Chat Completions缓存字段: prompt_tokens_details.cached_tokens
 	if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+		u.applyOpenAICacheWrite(details)
 		if val, ok := usageTokenCount(details["cached_tokens"]); ok {
 			u.CacheReadInputTokens = val
 		}
@@ -1794,10 +1889,7 @@ func (u *usageAccumulator) applyAnthropicOrResponsesUsage(usage map[string]any) 
 		}
 		// 仅在尚未拿到 Anthropic 风格 cache_creation 字段时采用 cache_write_tokens
 		if !hasAggregateCacheCreation && !hasDetailedCacheCreation {
-			if val, ok := usageTokenCount(details["cache_write_tokens"]); ok && val > 0 {
-				// OpenAI cache write 无 5m/1h 细分，按 5m 写价（1.25x）计费
-				u.setCacheCreationSnapshot(val, 0)
-			}
+			u.applyOpenAICacheWrite(details)
 		}
 	}
 
@@ -1822,6 +1914,8 @@ func (u *usageAccumulator) applyAnthropicOrResponsesUsage(usage map[string]any) 
 func (u *usageAccumulator) setCacheCreationSnapshot(cache5m, cache1h int) {
 	u.Cache5mInputTokens = cache5m
 	u.Cache1hInputTokens = cache1h
+	u.Cache30mInputTokens = 0
+	u.Cache12hInputTokens = 0
 	u.CacheCreationInputTokens = cache5m + cache1h
 }
 
@@ -1891,4 +1985,34 @@ func extractUsage(payload map[string]any) map[string]any {
 	}
 
 	return nil
+}
+
+func (u *usageAccumulator) applyOpenAICacheWrite(details map[string]any) {
+	total, ok := usageTokenCount(details["cache_write_tokens"])
+	if !ok || total <= 0 {
+		return
+	}
+	_, hasDetails := details["cache_write_tokens_details"]
+	if !hasDetails && total == u.Cache30mInputTokens+u.Cache12hInputTokens {
+		return
+	}
+	u.setCacheCreationSnapshot(total, 0)
+	split, _ := details["cache_write_tokens_details"].(map[string]any)
+	short, shortOK := cacheCreationCount(split["ttl_30m_tokens"])
+	long, longOK := cacheCreationCount(split["ttl_12h_tokens"])
+	aggregate, aggregateOK := cacheCreationCount(details["cache_write_tokens"])
+	if !aggregateOK || !shortOK || !longOK || short > aggregate || long != aggregate-short {
+		return
+	}
+	u.Cache5mInputTokens = 0
+	u.Cache30mInputTokens = short
+	u.Cache12hInputTokens = long
+}
+
+func cacheCreationCount(value any) (int, bool) {
+	count, ok := value.(float64)
+	if !ok || count < 0 || count >= math.MaxInt || math.Trunc(count) != count {
+		return 0, false
+	}
+	return int(count), true
 }

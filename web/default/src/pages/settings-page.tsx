@@ -394,9 +394,9 @@ function FallbackDialog({ open, value, onClose, onSaved }: { open: boolean; valu
 
 // ---------------------------------------------------------------- 自定义模型价格（热更新，立即保存）
 
-const BASIC = ['input_price', 'output_price', 'cache_read_price', 'cache_write_price'] as const
-const HIGH = ['input_price_high', 'output_price_high', 'cache_read_price_high', 'cache_write_price_high'] as const
-const PRICE_LABELS: Record<string, string> = { input_price: '输入', output_price: '输出', cache_read_price: '缓存读', cache_write_price: '缓存写', input_price_high: '输入(高)', output_price_high: '输出(高)', cache_read_price_high: '缓存读(高)', cache_write_price_high: '缓存写(高)' }
+const BASIC = ['input_price', 'output_price', 'cache_read_price', 'cache_write_price', 'cache_write_12h_price'] as const
+const HIGH = ['input_price_high', 'output_price_high', 'cache_read_price_high', 'cache_write_price_high', 'cache_write_12h_price_high'] as const
+const PRICE_LABELS: Record<string, string> = { input_price: '输入', output_price: '输出', cache_read_price: '缓存读', cache_write_price: '缓存写 / 30m', cache_write_12h_price: 'OpenAI 12h 写', cache_write_12h_price_high: 'OpenAI 12h 写(高)', input_price_high: '输入(高)', output_price_high: '输出(高)', cache_read_price_high: '缓存读(高)', cache_write_price_high: '缓存写(高)' }
 const MODEL_ID = /^[a-z0-9][a-z0-9._:/-]*$/
 type PriceRow = { id: string; values: Record<string, string>; tiered?: boolean }
 

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-ccLoad 是 Claude/OpenAI/Gemini/Codex 多协议 API 网关，负责渠道选择、故障切换、协议转换与成本计量。
+ccLoad 是 Claude/OpenAI/Gemini/Codex 多协议 API 网关，负责渠道选择、故障切换、原生协议透传与成本计量；代理入口不启用跨协议转换。
 
 ## 工作方式
 
@@ -25,7 +25,7 @@ golangci-lint run ./...        # Go 改动提交前零警告
 
 - 迭代运行受影响包；Go 改动提交前运行全量 `./internal/...` 与 lint，前端改动运行 `make verify-web`。
 - 不用 `-count=1`，除非排查缓存、不稳定测试或测量性能。独立检查可并行。
-- 调整测试并行度时读 [测试并行化](.claude/agent-guide/testing.md)。发布和核心同步的专属验证命令见各自技能。
+- 测试行为与并行约束见 [项目测试契约](.claude/agent-guide/testing.md)。发布和核心同步的专属验证命令见各自技能。
 
 ## 通用代码约束
 

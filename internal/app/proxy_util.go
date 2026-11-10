@@ -127,6 +127,60 @@ func writeAnthropicStreamErrorEvent(w http.ResponseWriter, message string) {
 	}
 }
 
+// responsesStreamCursor 记录已发给 Responses 客户端的转换流位置，补写终态时沿用。
+type responsesStreamCursor struct {
+	responseID   string
+	nextSequence int64
+}
+
+func (c *responsesStreamCursor) observe(data []byte) {
+	if seq := gjson.GetBytes(data, "sequence_number"); seq.Exists() {
+		c.nextSequence = seq.Int() + 1
+	}
+	if c.responseID == "" {
+		c.responseID = gjson.GetBytes(data, "response.id").String()
+	}
+}
+
+// writeResponsesStreamFailedEvent 在已提交的 Responses SSE 流末尾追加 response.failed，
+// 接续流内的 response id 与 sequence_number。
+func writeResponsesStreamFailedEvent(w http.ResponseWriter, cursor responsesStreamCursor, message string) {
+	payload := []byte(`{"type":"response.failed","sequence_number":0,"response":{"id":"","object":"response","status":"failed","error":{"type":"server_error","code":"upstream_stream_interrupted","message":"","param":null}}}`)
+	payload, _ = sjson.SetBytes(payload, "sequence_number", cursor.nextSequence)
+	payload, _ = sjson.SetBytes(payload, "response.id", cursor.responseID)
+	payload, _ = sjson.SetBytes(payload, "response.error.message", message)
+	if _, err := fmt.Fprintf(w, "event: response.failed\ndata: %s\n\n", payload); err != nil {
+		return
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// writeOpenAIStreamErrorEvent 在已提交的 OpenAI Chat SSE 流末尾追加错误帧；
+// OpenAI SDK 读到带 error 字段的数据帧会抛错。不补 [DONE]，它表示正常结束。
+func writeOpenAIStreamErrorEvent(w http.ResponseWriter, message string) {
+	payload := []byte(`{"error":{"message":"","type":"server_error","code":"upstream_stream_interrupted","param":null}}`)
+	payload, _ = sjson.SetBytes(payload, "error.message", message)
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+		return
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// committedStreamFailureMessage 是已提交流补写错误事件时的提示：上游给过错误事件就用它的原因。
+func committedStreamFailureMessage(sseErrorEvent []byte) string {
+	if len(sseErrorEvent) == 0 {
+		return "upstream stream interrupted before completion"
+	}
+	if message := gjson.GetBytes(sseErrorEvent, "error.message").String(); message != "" {
+		return message
+	}
+	return "upstream stream failed before completion"
+}
+
 // anthropicLocalFailureBody 把没有上游响应头的本地失败（网络错误、凭证不可用等）
 // 改写为 Anthropic 错误体；已是 Anthropic 错误体的保持原样。
 func anthropicLocalFailureBody(status int, body []byte) []byte {
@@ -202,7 +256,8 @@ type upstreamWireAliases struct {
 // fwResult 转发结果
 type fwResult struct {
 	Status              int
-	UpstreamStatus      int // 原始上游 HTTP 状态码；Status 可被改写为 596-599 等内部分类码
+	UpstreamStatus      int                           // 原始上游 HTTP 状态码；Status 可被改写为 596-599 等内部分类码
+	ConfiguredDetection *cooldown.DetectionEvaluation ///< 成功响应探测已确认的规则与截止时间，错误处理不重新匹配
 	Header              http.Header
 	Body                []byte              // filled for non-2xx or when needed
 	upstreamRequestBody []byte              // 实际发送的 provider wire body，仅用于同请求内安全降级重试
@@ -216,6 +271,8 @@ type fwResult struct {
 	CacheReadInputTokens     int
 	CacheCreationInputTokens int // 5m+1h缓存总和（兼容字段）
 	Cache5mInputTokens       int // 5分钟缓存写入Token数（新增2025-12）
+	Cache30mInputTokens      int ///< OpenAI 30 分钟缓存写入。
+	Cache12hInputTokens      int ///< OpenAI 12 小时缓存写入。
 	Cache1hInputTokens       int // 1小时缓存写入Token数（新增2025-12）
 	ToolCostUSD              float64
 	ImageUsage               *util.ImageGenerationToolUsage
@@ -261,6 +318,9 @@ type fwResult struct {
 
 	ResponsesTurnResult    responsesWebsocketTurnResult
 	HasResponsesTurnResult bool
+	// UnterminatedTranslatedStream 非空表示发给 Responses/OpenAI Chat 客户端的转换流既没有终态
+	// 也没有错误事件；Responses 补写终态时沿用其中的 response id 与 sequence_number。
+	UnterminatedTranslatedStream *responsesStreamCursor
 }
 
 // ForwardObserver 封装转发过程中的观测回调（遵循SRP，避免函数签名膨胀）
@@ -1298,6 +1358,8 @@ func buildLogEntry(p logEntryParams) *model.LogEntry {
 		entry.CacheCreationInputTokens = res.CacheCreationInputTokens
 		entry.Cache5mInputTokens = res.Cache5mInputTokens
 		entry.Cache1hInputTokens = res.Cache1hInputTokens
+		entry.Cache30mInputTokens = res.Cache30mInputTokens
+		entry.Cache12hInputTokens = res.Cache12hInputTokens
 		entry.ServiceTier = res.ServiceTier
 
 		if billableResult(p.StatusCode, res) {
@@ -1355,7 +1417,7 @@ func computeRequestCostWithPrice(model string, serviceTier string, price *util.C
 		res.OutputTokens,
 		res.CacheReadInputTokens,
 		res.Cache5mInputTokens,
-		res.Cache1hInputTokens,
+		res.Cache1hInputTokens, res.Cache30mInputTokens, res.Cache12hInputTokens,
 	).Total + res.ToolCostUSD
 }
 

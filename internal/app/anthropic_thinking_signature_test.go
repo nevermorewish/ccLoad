@@ -287,21 +287,6 @@ func TestCloakOfficialAnthropicThinkingHistoryOmitsForeignCarriers(t *testing.T)
 	}
 }
 
-func TestCloakOfficialAnthropicThinkingHistoryOmitsAntigravityCAQS(t *testing.T) {
-	t.Parallel()
-	// Antigravity 的双层 CAQS 被识别为 Claude 签名，但官方端点不接受该包装。
-	for _, signature := range []string{signaturetest.AntigravityCAQS(), "claude#" + signaturetest.AntigravityCAQS()} {
-		body, err := sjson.SetBytes([]byte(`{"thinking":{"type":"adaptive"},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":""},{"type":"text","text":"ok"}]}]}`), "messages.0.content.0.signature", signature)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, ok := cloakOfficialAnthropicThinkingHistory(body)
-		if !ok || gjson.GetBytes(got, `messages.0.content.#(type=="thinking")`).Exists() {
-			t.Fatalf("Antigravity CAQS thinking survived (signature prefix %q): %s", signature[:7], got)
-		}
-	}
-}
-
 // anthropicNativeCAQS mirrors the single-layer CAQS that api.anthropic.com
 // issues for Claude 5.5 thinking (captured from Claude Code): unlike the
 // Antigravity envelope, it is one base64 layer and its channel has no
@@ -327,6 +312,21 @@ func anthropicNativeCAQS() string {
 	payload = appendBytes(payload, 2, container)
 	payload = appendVarint(payload, 3, 1)
 	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func TestCloakOfficialAnthropicThinkingHistoryOmitsAntigravityCAQS(t *testing.T) {
+	t.Parallel()
+	// Antigravity 的双层 CAQS 被识别为 Claude 签名，但官方端点不接受该包装。
+	for _, signature := range []string{signaturetest.AntigravityCAQS(), "claude#" + signaturetest.AntigravityCAQS()} {
+		body, err := sjson.SetBytes([]byte(`{"thinking":{"type":"adaptive"},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":""},{"type":"text","text":"ok"}]}]}`), "messages.0.content.0.signature", signature)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, ok := cloakOfficialAnthropicThinkingHistory(body)
+		if !ok || gjson.GetBytes(got, `messages.0.content.#(type=="thinking")`).Exists() {
+			t.Fatalf("Antigravity CAQS thinking survived (signature prefix %q): %s", signature[:7], got)
+		}
+	}
 }
 
 func TestFinishAnthropicPassthroughKeepsOfficialNativeCAQS(t *testing.T) {

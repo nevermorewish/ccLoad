@@ -313,6 +313,52 @@ func TestClassifyHTTPResponseCloudflareChallenge(t *testing.T) {
 			reason:   "封锁页共用同一判定函数，行为不应回归",
 		},
 		{
+			name:                  "cloudflare_1010_plain_text",
+			status:                http.StatusForbidden,
+			body:                  "error code: 1010",
+			expected:              ErrorLevelChannel,
+			expectedChannelReason: "cloudflare_challenge",
+			reason:                "1010 浏览器签名封禁由出口指纹决定，换 Key 无意义",
+		},
+		{
+			name:                  "cloudflare_1010_structured_json",
+			status:                http.StatusForbidden,
+			body:                  `{"title":"Error 1010: Access denied","status":403,"error_code":1010,"error_name":"browser_signature_banned","cloudflare_error":true,"retryable":false}`,
+			expected:              ErrorLevelChannel,
+			expectedChannelReason: "cloudflare_challenge",
+			reason:                "Cloudflare 结构化 JSON 错误同样是边缘拦截",
+		},
+		{
+			name:                  "cloudflare_1010_nested_string_code",
+			status:                http.StatusForbidden,
+			body:                  `{"errors":[{"cloudflare_error":true,"code":"1010"}]}`,
+			expected:              ErrorLevelChannel,
+			expectedChannelReason: "cloudflare_challenge",
+			reason:                "中转包装后的 Cloudflare 错误仍应识别",
+		},
+		{
+			name:                  "browser_signature_banned_name_only",
+			status:                http.StatusForbidden,
+			body:                  `{"error_name":"browser_signature_banned","detail":"blocked by Cloudflare"}`,
+			expected:              ErrorLevelChannel,
+			expectedChannelReason: "cloudflare_challenge",
+			reason:                "error_name 是 1010 的权威标识",
+		},
+		{
+			name:     "unrelated_json_code_1010_keeps_key_level",
+			status:   http.StatusForbidden,
+			body:     `{"error":{"code":1010,"message":"forbidden"}}`,
+			expected: ErrorLevelKey,
+			reason:   "非 Cloudflare 的业务错误码 1010 不应升级为渠道级",
+		},
+		{
+			name:     "json_message_mentioning_1010_keeps_key_level",
+			status:   http.StatusForbidden,
+			body:     `{"message":"error code: 1010"}`,
+			expected: ErrorLevelKey,
+			reason:   "JSON 正文只是提到 1010 不算边缘拦截",
+		},
+		{
 			name:     "non_challenge_mitigated_value_keeps_key_level",
 			status:   http.StatusForbidden,
 			headers:  map[string][]string{"cf-mitigated": {"managed"}},
@@ -1270,6 +1316,10 @@ func TestClassifyHTTPResponseContextLengthExceededIsClientError(t *testing.T) {
 			name: "invalid_request_message_fallback",
 			body: []byte(`{"error":{"type":"invalid_request_error","message":"Maximum context length exceeded."}}`),
 		},
+		{
+			name: "anthropic_prompt_too_long",
+			body: []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 215000 tokens > 200000 maximum"}}`),
+		},
 	}
 
 	for _, tt := range tests {
@@ -1302,6 +1352,31 @@ func TestClassifyHTTPResponseContextLengthMessageDoesNotHideServerError(t *testi
 			classification := ClassifyHTTPResponseWithMeta(http.StatusBadRequest, nil, tt.body)
 			if classification.Level == ErrorLevelClient || !classification.ModelScoped {
 				t.Fatalf("classification=%+v, want existing model-scoped handling", classification)
+			}
+		})
+	}
+}
+
+func TestClassifyHTTPResponseUnprocessableImageIsClientError(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{
+			name: "anthropic",
+			body: []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"Could not process image"},"request_id":"req_011CgS2teyVeuy1GdTJkaVLr"}`),
+		},
+		{
+			name: "antigravity_wrapped",
+			body: []byte(`{"error":{"code":400,"message":"{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Could not process image\"},\"request_id\":\"req_vrtx_011CgS2teyVeuy1GdTJkaVLr\"}","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"INVALID_MEDIA","domain":"cloudcode-pa.googleapis.com","metadata":{"error_number":"2011"}}]}}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			classification := ClassifyHTTPResponseWithMeta(http.StatusBadRequest, nil, tt.body)
+			if classification.Level != ErrorLevelClient || classification.ModelScoped {
+				t.Fatalf("classification=%+v, want client-level without model scope", classification)
 			}
 		})
 	}

@@ -37,14 +37,14 @@ func scanLogEntry(scanner interface {
 	var serviceTier sql.NullString
 	var thinkingEffort sql.NullString
 	var reasoningDecision sql.NullString
-	var inputTokens, outputTokens, reasoningTokens, cacheReadTokens, cacheCreationTokens, cache5mTokens, cache1hTokens sql.NullInt64
+	var inputTokens, outputTokens, reasoningTokens, cacheReadTokens, cacheCreationTokens, cache5mTokens, cache1hTokens, cache30mTokens, cache12hTokens sql.NullInt64
 	var cost sql.NullFloat64
 	var costMultiplier sql.NullFloat64
 	var codexHasCredits int
 
 	if err := scanner.Scan(&e.ID, &timeMs, &e.Model, &actualModel, &responseModel, &logSource, &e.ChannelID,
 		&e.StatusCode, &e.Message, &duration, &isStreamingInt, &upstreamWebsocketInt, &firstByteTime, &apiKeyUsed, &apiKeyHash, &e.AuthTokenID, &clientProtocol, &upstreamProtocol, &clientIP, &baseURL, &serviceTier, &thinkingEffort,
-		&inputTokens, &outputTokens, &reasoningTokens, &cacheReadTokens, &cacheCreationTokens, &cache5mTokens, &cache1hTokens, &cost, &costMultiplier, &codexHasCredits, &reasoningDecision); err != nil {
+		&inputTokens, &outputTokens, &reasoningTokens, &cacheReadTokens, &cacheCreationTokens, &cache5mTokens, &cache1hTokens, &cache30mTokens, &cache12hTokens, &cost, &costMultiplier, &codexHasCredits, &reasoningDecision); err != nil {
 		return nil, err
 	}
 
@@ -116,6 +116,12 @@ func scanLogEntry(scanner interface {
 	}
 	if cache1hTokens.Valid {
 		e.Cache1hInputTokens = int(cache1hTokens.Int64)
+	}
+	if cache30mTokens.Valid {
+		e.Cache30mInputTokens = int(cache30mTokens.Int64)
+	}
+	if cache12hTokens.Valid {
+		e.Cache12hInputTokens = int(cache12hTokens.Int64)
 	}
 	if cost.Valid {
 		e.Cost = cost.Float64
@@ -229,11 +235,11 @@ func (s *SQLStore) addLog(ctx context.Context, e *model.LogEntry, updateOAuthQuo
 }
 
 const logsInsertColumns = `INSERT INTO logs(time, minute_bucket, model, actual_model, response_model, log_source, channel_id, status_code, message, duration, is_streaming, upstream_websocket, first_byte_time, api_key_used, api_key_hash, auth_token_id, client_protocol, upstream_protocol, client_ip, base_url, service_tier, thinking_effort,
-				input_tokens, output_tokens, reasoning_tokens, cache_read_input_tokens, cache_creation_input_tokens, cache_5m_input_tokens, cache_1h_input_tokens, cost, cost_multiplier, codex_has_credits, reasoning_decision) VALUES `
+				input_tokens, output_tokens, reasoning_tokens, cache_read_input_tokens, cache_creation_input_tokens, cache_5m_input_tokens, cache_1h_input_tokens, cache_30m_input_tokens, cache_12h_input_tokens, cost, cost_multiplier, codex_has_credits, reasoning_decision) VALUES `
 
-const logRowPlaceholders = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const logRowPlaceholders = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-const logRowParams = 33
+const logRowParams = 35
 
 // BatchAddLogs 批量写入日志（单事务，多值 INSERT 提升刷盘吞吐）
 // 设计：
@@ -434,14 +440,14 @@ func logRowArgs(e *model.LogEntry) []any {
 		e.IsStreaming, e.UpstreamWebsocket, e.FirstByteTime, maskedKey, apiKeyHash,
 		e.AuthTokenID, e.ClientProtocol, e.UpstreamProtocol, e.ClientIP, e.BaseURL, e.ServiceTier, e.ThinkingEffort,
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CacheReadInputTokens, e.CacheCreationInputTokens,
-		e.Cache5mInputTokens, e.Cache1hInputTokens, e.Cost,
+		e.Cache5mInputTokens, e.Cache1hInputTokens, e.Cache30mInputTokens, e.Cache12hInputTokens, e.Cost,
 		normalizeCostMultiplier(e.CostMultiplier),
 		e.CodexHasCredits, decisionJSON,
 	}
 }
 
 const logListQuery = `SELECT id, time, model, actual_model, response_model, log_source, channel_id, status_code, message, duration, is_streaming, upstream_websocket, first_byte_time, api_key_used, api_key_hash, auth_token_id, client_protocol, upstream_protocol, client_ip, base_url, service_tier, thinking_effort,
-	input_tokens, output_tokens, reasoning_tokens, cache_read_input_tokens, cache_creation_input_tokens, cache_5m_input_tokens, cache_1h_input_tokens, cost, cost_multiplier, codex_has_credits, reasoning_decision
+	input_tokens, output_tokens, reasoning_tokens, cache_read_input_tokens, cache_creation_input_tokens, cache_5m_input_tokens, cache_1h_input_tokens, cache_30m_input_tokens, cache_12h_input_tokens, cost, cost_multiplier, codex_has_credits, reasoning_decision
 	FROM logs`
 
 // ListLogs 查询日志列表

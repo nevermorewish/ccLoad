@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -885,7 +887,7 @@ func streamAndParseResponse(
 					return err
 				}
 				offset = end
-				if parser.IsStreamComplete() {
+				if parser.IsStreamEnded() {
 					return &stopStreamAfterWriteError{writeBytes: offset}
 				}
 			}
@@ -942,7 +944,7 @@ func isClientDisconnectError(err error) bool {
 
 // buildStreamDiagnostics 生成流诊断消息
 // 触发条件：流传输错误且未检测到流完成语义（原始结束标志或已转译终态）；
-// Anthropic 上游即使干净 EOF，缺少 message_stop 也算不完整。
+// Anthropic 上游即使干净 EOF，没有 stop_reason/message_stop 也算不完整。
 // streamComplete: 是否已确认流完成（比 hasUsage 更可靠，因为不是所有请求都有 usage）
 func buildStreamDiagnostics(streamErr error, readStats *streamReadStats, streamComplete bool, upstreamProtocol string, contentType string) string {
 	if readStats == nil {
@@ -964,12 +966,12 @@ func buildStreamDiagnostics(streamErr error, readStats *streamReadStats, streamC
 			streamTimingDiagnostics(readStats))
 	}
 
-	// Anthropic 流必以 message_stop 收尾：干净 EOF 却没有终止事件，说明上游半路断了。
+	// Anthropic 流必有 stop_reason/message_stop：干净 EOF 却两者都没有，说明上游半路断了。
 	// 其他协议存在合法省略终止标记的上游，只按传输错误判定。
 	if streamErr == nil && !streamComplete && bytesRead > 0 &&
 		upstreamProtocol == string(protocol.Anthropic) &&
 		strings.Contains(strings.ToLower(contentType), "text/event-stream") {
-		return fmt.Sprintf("[WARN] 流响应不完整: 正常EOF但缺少message_stop | 已读取=%d字节(分%d次) | 渠道=%s | Content-Type=%s | %s",
+		return fmt.Sprintf("[WARN] 流响应不完整: 正常EOF但缺少stop_reason/message_stop | 已读取=%d字节(分%d次) | 渠道=%s | Content-Type=%s | %s",
 			bytesRead, readCount, upstreamProtocol, contentType, streamTimingDiagnostics(readStats))
 	}
 
@@ -1045,7 +1047,10 @@ func translatedStreamChunkCompletes(clientProtocol protocol.Protocol, chunk []by
 // sseSynthesizedDoneEvent 是网关补喂给转换器的流终止哨兵。
 var sseSynthesizedDoneEvent = []byte("data: [DONE]\n\n")
 
-// needsSynthesizedStreamTerminator 判断跨协议转换是否要补一个终止序列。
+// sseSynthesizedMessageStopEvent 是 Anthropic 上游给了 stop_reason 却没发 message_stop 时补喂的收尾事件。
+var sseSynthesizedMessageStopEvent = []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+
+// synthesizedStreamTerminator 返回跨协议转换要补喂给转换器的终止事件，不需要补时返回 nil。
 //
 // OpenAI Chat Completions 的终止哨兵是 [DONE]，openai→{anthropic,codex,gemini}
 // 三个转换器都只在收到它时才吐出终止事件（Anthropic 的 message_delta+message_stop、
@@ -1054,24 +1059,36 @@ var sseSynthesizedDoneEvent = []byte("data: [DONE]\n\n")
 //
 // Gemini 线协议没有 [DONE]，但 CLIProxyAPI executor 会在 EOF 补喂一次；
 // gemini→{Responses,Claude} 转换器在 finishReason 后等 usage 或 [DONE] 才发终态，
-// 末帧不带 usageMetadata、或只回 promptFeedback.blockReason 时同样要靠这里收尾。
+// 末帧不带 usageMetadata 时同样要靠这里收尾（只回 promptFeedback.blockReason 的拦截
+// 在提交前已按客户端错误返回，见 translatedGeminiPromptBlockError）。
 // 转换器在 [DONE] 上沿用已记下的 finishReason，MAX_TOKENS 不会被改报成 end_turn。
 //
-// 补的是 [DONE] 而不是手搓终止帧：open content block、stop_reason、usage 都在
-// 转换器的内部状态里，只有它自己收得干净。同协议直通不补，避免改动透传字节。
-func needsSynthesizedStreamTerminator(upstream, client protocol.Protocol, upstreamComplete, translatedComplete, committed bool) bool {
-	if !committed || !upstreamComplete || translatedComplete {
-		return false
+// Anthropic 的语义终态是 message_delta.stop_reason，claude→Responses 转换器却只在
+// message_stop 上发 response.completed；上游在两者之间断流时补喂 message_stop。
+//
+// 补的是协议自身的终止事件而不是手搓客户端终止帧：open content block、stop_reason、
+// usage 都在转换器的内部状态里，只有它自己收得干净。同协议直通不补，避免改动透传字节。
+func synthesizedStreamTerminator(upstream, client protocol.Protocol, upstreamComplete, translatedComplete, committed bool) []byte {
+	if !committed || !upstreamComplete || translatedComplete || client == upstream {
+		return nil
 	}
-	return (upstream == protocol.OpenAI || upstream == protocol.Gemini) && client != upstream
+	switch upstream {
+	case protocol.OpenAI, protocol.Gemini:
+		return sseSynthesizedDoneEvent
+	case protocol.Anthropic:
+		return sseSynthesizedMessageStopEvent
+	default:
+		return nil
+	}
 }
 
 // translatedStreamTruncationDiagnostics 拦截转换流的干净 EOF 截断。
-// Claude 客户端靠 message_stop、Responses 客户端靠 response.completed 判完成；
-// 上游与转换输出都没有终态就 EOF，客户端拿到的是半截回复（Claude Code 会当成完成）。
-// 其他客户端协议能容忍缺省的终止标记，与同协议直通一样只按传输错误判定。
+// Claude 客户端靠 message_stop、Responses 客户端靠 response.completed、OpenAI Chat 客户端靠
+// finish_reason 或 [DONE] 判完成；上游与转换输出都没有终态就 EOF，客户端拿到的是半截回复
+// （Claude Code 与 OpenAI SDK 会当成完成）。转换器拿到上游终态就会输出客户端终态，
+// 两边都缺才判截断。Gemini 客户端与同协议直通一样只按传输错误判定。
 func translatedStreamTruncationDiagnostics(client protocol.Protocol, readStats *streamReadStats, upstreamProtocol, contentType string) string {
-	if readStats == nil || readStats.totalBytes == 0 || (client != protocol.Anthropic && client != protocol.Codex) {
+	if readStats == nil || readStats.totalBytes == 0 || (client != protocol.Anthropic && client != protocol.Codex && client != protocol.OpenAI) {
 		return ""
 	}
 	return fmt.Sprintf("[WARN] 转换流不完整: 正常EOF但上游与转换输出均无终态 | 客户端=%s | 已读取=%d字节(分%d次) | 渠道=%s | Content-Type=%s | %s",
@@ -1419,6 +1436,7 @@ func (s *Server) handleSuccessResponse(
 	result.ResponseModel = parser.GetResponseModel()
 	result.ReasoningTokens = parser.GetReasoningTokens()
 	result.Cache5mInputTokens, result.Cache1hInputTokens, result.ServiceTier = parser.GetCacheBreakdown()
+	result.Cache30mInputTokens, result.Cache12hInputTokens = parser.GetOpenAICacheBreakdown()
 	result.ToolCostUSD = parser.GetToolCostUSD()
 	if jsonParser, ok := parser.(*jsonUsageParser); ok && reqCtx.transformPlan.RequestFamily == protocol.RequestFamilyCountTokens {
 		result.InputTokens = jsonParser.countTokensResult()
@@ -1454,7 +1472,7 @@ func (s *Server) handleSuccessResponse(
 			result.StreamDiagMsg = diagMsg
 			log.Print(diagMsg)
 		} else if streamComplete && streamErr != nil {
-			// [FIX] 流式请求：检测到流结束标志（[DONE]/message_stop）说明数据完整
+			// [FIX] 流式请求：上游已给出语义终态（见 sseUsageParser.streamComplete）说明数据完整
 			// 所有收尾阶段的错误都应忽略，包括：
 			// - http2 流关闭（正常结束信号）
 			// - context.Canceled（客户端在传输完成后取消，不应标记为499）
@@ -1533,10 +1551,17 @@ func (s *Server) handleTranslatedNonStreamSuccessResponse(
 	result.ReasoningTokens = parser.GetReasoningTokens()
 	result.Cache5mInputTokens = parser.Cache5mInputTokens
 	result.Cache1hInputTokens = parser.Cache1hInputTokens
+	result.Cache30mInputTokens = parser.Cache30mInputTokens
+	result.Cache12hInputTokens = parser.Cache12hInputTokens
 	result.ServiceTier = parser.ServiceTier
 	result.ToolCostUSD = parser.GetToolCostUSD()
 	result.ThinkingEffort = parser.GetThinkingEffort()
 	result.CodexHasCredits = parser.GetCodexHasCredits()
+
+	if blockErr := translatedGeminiPromptBlockError(reqCtx, responseBody); blockErr != nil {
+		result.Body = []byte(blockErr.Error())
+		return result, reqCtx.Duration().Seconds(), blockErr
+	}
 
 	if reqCtx.responsesCompaction != nil && !responsesCompactionSummaryComplete(protocol.Protocol(upstreamProtocol), responseBody) {
 		result.Body = []byte("compaction summary did not finish successfully")
@@ -1636,19 +1661,23 @@ func (s *Server) handleTranslatedStreamSuccessResponse(
 	// Responses events actually sent to the client after translation.
 	var translatedTurn responsesWebsocketTurnResult
 	var hasTranslatedTurn bool
+	var responsesCursor responsesStreamCursor
 	var translatedComplete bool
 	var codeBuddyDone bool
 	var state any
 	var translatedError []byte
 	var translationErr error
+	var promptBlockErr error
 	recordTranslatedOutput := func(chunks [][]byte) {
 		for _, chunk := range chunks {
 			eventType, data := parseSSEEventChunk(chunk)
-			if reqCtx.transformPlan.ClientProtocol == protocol.Codex &&
-				(isSuccessfulResponsesTerminal(eventType) || isSuccessfulResponsesTerminal(ssePayloadType(data))) {
-				if response := gjson.GetBytes(data, "response"); response.IsObject() {
-					translatedTurn = responsesWebsocketTurnFromResponse(response)
-					hasTranslatedTurn = true
+			if reqCtx.transformPlan.ClientProtocol == protocol.Codex {
+				responsesCursor.observe(data)
+				if isSuccessfulResponsesTerminal(eventType) || isSuccessfulResponsesTerminal(ssePayloadType(data)) {
+					if response := gjson.GetBytes(data, "response"); response.IsObject() {
+						translatedTurn = responsesWebsocketTurnFromResponse(response)
+						hasTranslatedTurn = true
+					}
 				}
 			}
 			if eventType == "response.failed" || eventType == "error" || isErrorPayload(string(data)) {
@@ -1776,6 +1805,11 @@ func (s *Server) handleTranslatedStreamSuccessResponse(
 			if !deferredWriter.Committed() && parser.GetLastError() != nil {
 				return errAbortStreamBeforeWrite
 			}
+			if !deferredWriter.Committed() {
+				if promptBlockErr = translatedGeminiPromptBlockError(reqCtx, sseEventData(parserEvent)); promptBlockErr != nil {
+					return errAbortStreamBeforeWrite
+				}
+			}
 			return nil
 		},
 		translateEvent,
@@ -1785,21 +1819,22 @@ func (s *Server) handleTranslatedStreamSuccessResponse(
 			}
 			terminalProtocol := reqCtx.transformPlan.UpstreamProtocol == protocol.Codex ||
 				reqCtx.transformPlan.UpstreamProtocol == protocol.Anthropic
-			return terminalProtocol && parser.IsStreamComplete() && translatedComplete
+			return terminalProtocol && parser.IsStreamEnded() && translatedComplete
 		},
 	)
 
-	// 上游已给出语义终态（如 finish_reason）时先补发终止事件，转换器据此完成收尾；
+	// 上游已给出语义终态（如 finish_reason、stop_reason）时先补发终止事件，转换器据此完成收尾；
 	// 之后的 Finalize 只拦截真正缺少终态的截断流。
 	// 上游已报错时不替转换器伪造正常终态。
-	if protocol.ResponseToolInputError(state) == nil && parser.GetLastError() == nil && needsSynthesizedStreamTerminator(
+	terminator := synthesizedStreamTerminator(
 		reqCtx.transformPlan.UpstreamProtocol,
 		reqCtx.transformPlan.ClientProtocol,
 		parser.IsStreamComplete(),
 		translatedComplete,
 		deferredWriter.Committed(),
-	) {
-		chunks, doneErr := translateEvent(sseSynthesizedDoneEvent)
+	)
+	if terminator != nil && protocol.ResponseToolInputError(state) == nil && parser.GetLastError() == nil {
+		chunks, doneErr := translateEvent(terminator)
 		if writeErr := writeSSEChunks(deferredWriter, chunks); writeErr != nil && streamErr == nil {
 			streamErr = writeErr
 		} else if doneErr != nil {
@@ -1845,6 +1880,8 @@ func (s *Server) handleTranslatedStreamSuccessResponse(
 	result.ReasoningTokens = parser.GetReasoningTokens()
 	result.Cache5mInputTokens = parser.Cache5mInputTokens
 	result.Cache1hInputTokens = parser.Cache1hInputTokens
+	result.Cache30mInputTokens = parser.Cache30mInputTokens
+	result.Cache12hInputTokens = parser.Cache12hInputTokens
 	result.ServiceTier = parser.ServiceTier
 	result.ToolCostUSD = parser.GetToolCostUSD()
 	result.ThinkingEffort = parser.GetThinkingEffort()
@@ -1856,6 +1893,10 @@ func (s *Server) handleTranslatedStreamSuccessResponse(
 	result.ResponsesTurnResult, result.HasResponsesTurnResult = parser.GetResponsesTurnResult()
 	if reqCtx.transformPlan.ClientProtocol == protocol.Codex {
 		result.ResponsesTurnResult, result.HasResponsesTurnResult = translatedTurn, hasTranslatedTurn
+	}
+	if (reqCtx.transformPlan.ClientProtocol == protocol.Codex || reqCtx.transformPlan.ClientProtocol == protocol.OpenAI) &&
+		result.ResponseCommitted && !translatedComplete && translatedError == nil {
+		result.UnterminatedTranslatedStream = &responsesCursor
 	}
 	streamComplete := translationErr == nil && toolInputErr == nil && (parser.IsStreamComplete() || translatedComplete)
 
@@ -1870,8 +1911,32 @@ func (s *Server) handleTranslatedStreamSuccessResponse(
 	} else if streamComplete && streamErr != nil {
 		streamErr = nil
 	}
+	if promptBlockErr != nil {
+		return result, reqCtx.Duration().Seconds(), promptBlockErr
+	}
 
 	return result, reqCtx.Duration().Seconds(), streamErr
+}
+
+// translatedGeminiPromptBlockError 把 Gemini 拦截提示词的响应（没有 candidates，只有
+// promptFeedback.blockReason）转成客户端错误。原生 Gemini 客户端能读 promptFeedback，照常透传；
+// 跨协议转换后它只剩一条空的正常完成，客户端会把拦截当成模型无话可说（对齐 CLIProxyAPI
+// 3f5d3a16）。拦截由提示词决定，按客户端错误返回，不冷却、不换渠道。
+func translatedGeminiPromptBlockError(reqCtx *requestContext, payload []byte) error {
+	if reqCtx.transformPlan.UpstreamProtocol != protocol.Gemini || reqCtx.transformPlan.ClientProtocol == protocol.Gemini {
+		return nil
+	}
+	if candidates := gjson.GetBytes(payload, "candidates"); candidates.IsArray() && len(candidates.Array()) > 0 {
+		return nil
+	}
+	reason := strings.TrimSpace(gjson.GetBytes(payload, "promptFeedback.blockReason").String())
+	if reason == "" {
+		return nil
+	}
+	if detail := strings.TrimSpace(gjson.GetBytes(payload, "promptFeedback.blockReasonMessage").String()); detail != "" {
+		return fmt.Errorf("%w: %s - %s", util.ErrUpstreamPromptBlocked, reason, detail)
+	}
+	return fmt.Errorf("%w: %s", util.ErrUpstreamPromptBlocked, reason)
 }
 
 // isHTTP2StreamCloseError 判断是否是 HTTP/2 流关闭相关的错误
@@ -2264,11 +2329,19 @@ func invalidHTMLSuccessResponseResult(
 	}, reqCtx.Duration().Seconds(), err
 }
 
-// handleResponse 处理 HTTP 响应（错误或成功）
-// 从proxy.go提取，遵循SRP原则
-// upstreamProtocol 用于精确识别上游 usage 格式。
-// cfg: 渠道配置,用于提取渠道ID
-// apiKey: 使用的API Key,用于日志记录
+/**
+ * @brief 处理上游响应，在下游提交前检测内置错误和显式成功响应冷却规则
+ * @param reqCtx 请求上下文及超时控制
+ * @param resp 上游响应，处理期间会包装 Body
+ * @param w 下游响应写入端
+ * @param upstreamProtocol 实际上游协议
+ * @param cfg 当前渠道配置
+ * @param _ 保留的 API Key 参数
+ * @param observer 读取与首字节观测回调
+ * @return 转发结果及未提交的错误结果
+ * @return 请求耗时，单位秒
+ * @return 读取、转换或写入错误；规则命中本身不返回 error
+ */
 func (s *Server) handleResponse(
 	reqCtx *requestContext,
 	resp *http.Response,
@@ -2280,6 +2353,23 @@ func (s *Server) handleResponse(
 ) (*fwResult, float64, error) {
 	hdrClone := resp.Header.Clone()
 	readStats := &streamReadStats{}
+	rules, _ := s.effectiveChannelCooldownDetectionRules(cfg.CooldownDetectionRules)
+	rules = cooldown.SuccessResponseDetectionRules(rules, resp.StatusCode)
+	if rules != nil && cfg.UsesOAuth() {
+		rules.Rules = slices.DeleteFunc(rules.Rules, func(rule model.CooldownDetectionRule) bool {
+			return rule.Scope == model.CooldownScopeKey
+		})
+		if rules.IsEmpty() {
+			rules = nil
+		}
+	}
+	var probeBody *successProbeBody
+	if rules != nil {
+		probeBody = &successProbeBody{ReadCloser: resp.Body}
+		// Cancellation closes only the upstream; probe state belongs to this goroutine.
+		resp.Body = readerWithCloser{Reader: probeBody, Closer: resp.Body}
+		defer func() { _ = probeBody.Close() }()
+	}
 
 	attachFirstByteDetector(reqCtx, resp, readStats, observer)
 
@@ -2301,6 +2391,11 @@ func (s *Server) handleResponse(
 
 	if handled, res, duration, err := s.probeSoftErrorResponse(reqCtx, resp, hdrClone, cfg, upstreamProtocol, readStats); handled {
 		return res, duration, err
+	}
+	if rules != nil {
+		if res := probeConfiguredSuccessResponse(reqCtx, resp, probeBody, rules, readStats, upstreamProtocol); res != nil {
+			return res, reqCtx.Duration().Seconds(), nil
+		}
 	}
 
 	if !hideOAuthQuota(cfg) {
@@ -2999,18 +3094,25 @@ func (s *Server) handleCommittedAwareProxyError(
 			deferChannelCooldown, false, false,
 		)
 	}
-	// 上游断流时 Anthropic 客户端只看到半截流：没有 message_stop 也没有 error，
-	// Claude Code 会把残缺回复当成完成。补一条 error 事件让客户端报错并自行重试；
-	// 上游已经发过 error 事件的不重复补。Antigravity 转换器不转发后端错误帧，按未发过处理。
-	if reqCtx.isStreaming && reqCtx.clientProtocol == protocol.Anthropic && ctx.Err() == nil && w != nil {
-		if len(res.SSEErrorEvent) == 0 {
-			writeAnthropicStreamErrorEvent(w, "upstream stream interrupted before completion")
-		} else if cfg.UsesAntigravityOAuth() {
-			message := gjson.GetBytes(res.SSEErrorEvent, "error.message").String()
-			if message == "" {
-				message = "upstream stream failed before completion"
+	// 上游断流时客户端只看到半截流：没有终态也没有错误，Claude Code 与 OpenAI SDK
+	// 会把残缺回复当成完成。补一条协议内的错误终态让客户端报错并自行重试。
+	// Anthropic：上游已经发过 error 事件的不重复补；Antigravity 转换器不转发后端错误帧，按未发过处理。
+	// Responses/OpenAI Chat：只补转换输出里没有终态与错误的流；Responses WebSocket 回合改由
+	// close 1011 通知客户端重放，补终态会让客户端把回合当作失败结束。
+	if reqCtx.isStreaming && ctx.Err() == nil && w != nil {
+		message := committedStreamFailureMessage(res.SSEErrorEvent)
+		switch {
+		case reqCtx.clientProtocol == protocol.Anthropic:
+			if len(res.SSEErrorEvent) == 0 || cfg.UsesAntigravityOAuth() {
+				writeAnthropicStreamErrorEvent(w, message)
 			}
-			writeAnthropicStreamErrorEvent(w, message)
+		case res.UnterminatedTranslatedStream == nil:
+		case reqCtx.clientProtocol == protocol.OpenAI:
+			writeOpenAIStreamErrorEvent(w, message)
+		case reqCtx.clientProtocol == protocol.Codex:
+			if _, isWebsocket := w.(*responsesWebsocketBridgeWriter); !isWebsocket {
+				writeResponsesStreamFailedEvent(w, *res.UnterminatedTranslatedStream, message)
+			}
 		}
 	}
 	return s.handleStreamingErrorNoRetry(ctx, cfg, keyIndex, actualModel, selectedKey, res, duration, reqCtx)
@@ -4667,6 +4769,20 @@ func (s *Server) tryChannelWithKeys(ctx context.Context, cfg *model.Config, reqC
 
 const rejectedOAuthCredentialCooldown = 24 * time.Hour
 
+/**
+ * @brief 使用 OAuth 凭证转发请求，认证拒绝后刷新一次并按失败性质冷却或禁用渠道
+ * @param ctx 请求上下文；取消后停止转发且不施加凭证冷却
+ * @param cfg 当前渠道配置
+ * @param reqCtx 当前代理请求状态
+ * @param w 客户端响应写入器
+ * @param provider 用于诊断的提供商名称
+ * @param disableRejectedCredential 是否允许禁用被永久拒绝的凭证快照
+ * @param loadCredential 加载或刷新凭证；失败时可同时返回仍有效的旧令牌
+ * @param credentialRejected 判断转发结果是否表示访问令牌被拒绝
+ * @return 转发结果；没有可用凭证时返回可切换渠道的失败结果
+ * @return 渠道没有有效 URL 或尝试转发失败时返回错误
+ * @note 可刷新凭证、写入冷却或禁用渠道，并向客户端写响应。
+ */
 func (s *Server) tryOAuthChannel(
 	ctx context.Context,
 	cfg *model.Config,
@@ -4719,7 +4835,7 @@ func (s *Server) tryOAuthChannel(
 					}
 					return oauthCredentialUnavailableResult(cfg, provider), nil
 				}
-				s.cooldownRejectedOAuthCredential(ctx, cfg, provider)
+				s.cooldownOAuthCredentialFailure(ctx, cfg, provider, credentialErr)
 				if rejectedResult != nil {
 					rejectedResult.nextAction = cooldown.ActionRetryChannel
 					return rejectedResult, nil
@@ -4746,7 +4862,7 @@ func (s *Server) tryOAuthChannel(
 					result.nextAction = cooldown.ActionRetryChannel
 					return result, nil
 				}
-				s.cooldownRejectedOAuthCredential(ctx, cfg, provider)
+				s.cooldownOAuthCredentialFailure(ctx, cfg, provider, credentialErr)
 				result.nextAction = cooldown.ActionRetryChannel
 				return result, nil
 			}
@@ -4820,6 +4936,44 @@ func (s *Server) disableTerminalOAuthCredential(
 func sameOAuthTokens(a, b string) bool {
 	return gjson.Get(a, "access_token").String() == gjson.Get(b, "access_token").String() &&
 		gjson.Get(a, "refresh_token").String() == gjson.Get(b, "refresh_token").String()
+}
+
+/**
+ * @brief 凭证获取的传输故障、限流和服务端错误使用配置的指数退避，其他失败保留长期冷却
+ * @param ctx 已检查取消状态的请求上下文；写库使用独立的有界上下文
+ * @param cfg 当前渠道配置
+ * @param provider 用于诊断的提供商名称
+ * @param credentialErr 凭证加载错误；nil 表示刷新后的访问令牌仍被上游拒绝
+ * @note 写入渠道冷却并失效缓存，不影响其他渠道，也不按业务模型记录冷却。
+ */
+func (s *Server) cooldownOAuthCredentialFailure(ctx context.Context, cfg *model.Config, provider string, credentialErr error) {
+	if !s.autoCooldownEnabled() {
+		return
+	}
+	statusCode, _, _ := util.ClassifyError(credentialErr)
+	_, isTransportFailure := errors.AsType[net.Error](credentialErr)
+	retryable := isTransportFailure ||
+		errors.Is(credentialErr, io.EOF) || errors.Is(credentialErr, io.ErrUnexpectedEOF)
+	if endpointFailure, ok := errors.AsType[oauthTokenEndpointFailure](credentialErr); ok {
+		statusCode = endpointFailure.StatusCode()
+		retryable = statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
+	}
+	if !retryable {
+		s.cooldownRejectedOAuthCredential(ctx, cfg, provider)
+		return
+	}
+	cooldownCtx, cancel := cooldownWriteContext(ctx)
+	defer cancel()
+
+	now := time.Now()
+	duration, err := s.store.BumpChannelCooldown(cooldownCtx, cfg.ID, now, statusCode)
+	if err != nil {
+		log.Printf("[WARN] 设置 OAuth 凭证不可用渠道冷却失败: provider=%s channel_id=%d err=%v", provider, cfg.ID, err)
+	} else {
+		log.Printf("[COOLDOWN] OAuth 凭证不可用渠道冷却: provider=%s channel_id=%d 冷却至 %s (%s)",
+			provider, cfg.ID, now.Add(duration).Format("2006-01-02 15:04:05"), duration)
+	}
+	s.invalidateChannelRelatedCache(cfg.ID)
 }
 
 func (s *Server) cooldownRejectedOAuthCredential(ctx context.Context, cfg *model.Config, provider string) {
