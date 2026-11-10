@@ -677,6 +677,7 @@ func (s *Server) handleProxySuccess(
 		reqCtx.routingSession.rememberPreferredChannel(cfg.ID)
 	}
 	s.sessionAffinity.bind(reqCtx.sessionAffinityKey, sessionAffinityTarget{channelID: cfg.ID, keyIndex: keyIndex}, time.Now())
+	s.bindChannelPoolAffinity(reqCtx.channelPoolRoute, cfg.ChannelPool)
 
 	s.AddLogAsync(buildProxyLogEntry(reqCtx, cfg, actualModel, selectedKey, res.Status, duration, res, ""))
 	if !reqCtx.countTokens() {

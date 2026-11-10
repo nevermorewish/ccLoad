@@ -1,13 +1,16 @@
 import { Link, useLocation } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { BarChart3, Gauge, Home, KeyRound, List, LogOut, Settings, Activity, Sun, Moon, Languages } from 'lucide-react'
+import { BarChart3, Gauge, Home, KeyRound, List, LogOut, Settings, Activity, Sun, Moon, Languages, Split } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { canAccessPath, logout } from '../lib/auth'
 
 const links = [
   { to: '/', label: '概览', icon: Home },
   { to: '/monitor', label: '渠道监控', icon: Activity },
-  { to: '/channels', label: '渠道', icon: List },
+  { to: '/channels', label: '主渠道', icon: List },
+  { to: '/channels-1', label: '渠道1', icon: List },
+  { to: '/channels-2', label: '渠道2', icon: List },
+  { to: '/channel-routes', label: '渠道路由', icon: Split },
   { to: '/stats', label: '统计', icon: BarChart3 },
   { to: '/trend', label: '趋势', icon: BarChart3 },
   { to: '/model-test', label: '模型测试', icon: Gauge },

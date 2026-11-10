@@ -604,6 +604,16 @@ func (s *Server) executeResponsesWebsocketTurn(
 	}
 	ctx = withChannelRestrictionToken(ctx, tokenHashString)
 
+	// 渠道路由按完整 transcript 估算输入 Token；会话身份与 HTTP Codex 入口相同（Session-Id）。
+	sessionKey := memoizeSessionKey(func() string { return codexSessionAffinityKey(tokenHashString, c.Request.Header) })
+	reqChannelFilter := extractRequestedChannelFilter(c.Request)
+	var poolRoute *channelPoolRoute
+	if channelPoolRoutingApplies(http.MethodPost, protocol.RequestFamilyResponses, protocol.Codex, modelName, reqChannelFilter, false) {
+		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: modelName, body: requestBody, session: sessionKey, now: time.Now()})
+		defer poolRoute.releaseReservation()
+		ctx = withChannelPoolRoute(ctx, poolRoute)
+	}
+
 	candidates, err := s.selectCandidatesByModelAndClientProtocol(ctx, modelName, string(protocol.Codex))
 	if err == nil {
 		candidates = s.appendAntigravityCreditsCandidates(ctx, candidates, modelName, string(protocol.Codex), requestBody)
@@ -616,7 +626,6 @@ func (s *Server) executeResponsesWebsocketTurn(
 			candidates = filtered
 		}
 	}
-	reqChannelFilter := extractRequestedChannelFilter(c.Request)
 	if reqChannelFilter.hasFilter {
 		candidates, _ = filterByRequestedChannel(candidates, reqChannelFilter)
 		if len(candidates) == 0 {
@@ -628,13 +637,13 @@ func (s *Server) executeResponsesWebsocketTurn(
 	}
 	sessionAffinityKey := ""
 	if s.sessionAffinityEnabled() {
-		sessionAffinityKey = codexSessionAffinityKey(tokenHashString, c.Request.Header)
+		sessionAffinityKey = sessionKey()
 	}
 	sessionAffinity, hasSessionAffinity := s.sessionAffinity.lookup(sessionAffinityKey, time.Now())
 	if hasSessionAffinity {
-		candidates = s.preferSessionAffinityChannel(candidates, sessionAffinity.channelID)
+		candidates = s.preferSessionAffinityChannel(candidates, sessionAffinity.channelID, poolRoute)
 	}
-	if channelID, ok := executionSession.routeChannelSnapshot(); ok {
+	if channelID, ok := executionSession.routeChannelSnapshot(); ok && poolRoute.inLeadingPool(candidates, channelID) {
 		candidates = prioritizePinnedChannel(candidates, channelID)
 	}
 	if allowLocalPrewarm && responsesWebsocketGenerateDisabled(requestBody) &&
@@ -670,6 +679,7 @@ func (s *Server) executeResponsesWebsocketTurn(
 		nativeCodexBody:    bytes.Clone(nativeRequestBody),
 		sessionAffinityKey: sessionAffinityKey,
 		sessionAffinity:    sessionAffinity,
+		channelPoolRoute:   poolRoute,
 	}
 	if s.reasoningTarget(reqCtx) {
 		s.prepareReasoningTurn(ctx, reqCtx, requestBody, clientPayload, hasExplicitThinkingSuffix(reasoningModel))

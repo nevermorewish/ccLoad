@@ -160,7 +160,7 @@ func (cs *ConfigScanner) ScanConfig(scanner interface {
 	// 注意：不再包含 models 和 model_redirects 字段
 	if err := scanner.Scan(&c.ID, &c.Name, &c.URLs, &c.Priority, &c.SortOverride,
 		&c.RPMLimit, &c.MaxConcurrency, &c.AuthType, &c.OAuthCredential, &websocketsInt, &oauthQuotaPassthroughInt, &c.ProtocolTransformMode, &enabledInt, &scheduledCheckEnabledInt, &c.ScheduledCheckIntervalMinutes, &c.ScheduledCheckStartTime, &scheduledCheckModel,
-		&c.CooldownUntil, &c.CooldownDurationMs, &c.DailyCostLimit, &c.CostMultiplier, &customRequestRules, &cooldownDetectionRules, &c.ProxyURL, &availableTimeStart, &availableTimeEnd, &retryOtherKeysOnFailureInt, &c.SameChannelRetries, &c.KeyCount,
+		&c.CooldownUntil, &c.CooldownDurationMs, &c.DailyCostLimit, &c.CostMultiplier, &customRequestRules, &cooldownDetectionRules, &c.ProxyURL, &availableTimeStart, &availableTimeEnd, &retryOtherKeysOnFailureInt, &c.SameChannelRetries, &c.ChannelPool, &c.KeyCount,
 		&createdAtRaw, &updatedAtRaw); err != nil {
 		return nil, err
 	}

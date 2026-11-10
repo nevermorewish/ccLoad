@@ -234,6 +234,7 @@ func (s *Server) handleListChannels(c *gin.Context) {
 }
 
 // applyChannelListFilters 串联应用所有列表过滤条件：
+//   - channel_pool: 渠道组（0=主渠道，1=渠道1，2=渠道2）
 //   - protocol: URL 显式声明的协议，或 auto（存在未声明协议的 URL）
 //   - auth_type: api_key / codex_oauth（认证机制，不复用历史 channel_type）
 //   - channel_name | search: 名称精确/模糊（互斥，channel_name 优先）
@@ -242,6 +243,7 @@ func (s *Server) handleListChannels(c *gin.Context) {
 //
 // 空字符串或 "all" 视为不过滤。
 func applyChannelListFilters(cfgs []*model.Config, c *gin.Context, cooldowns channelCooldownSnapshot, now time.Time) []*model.Config {
+	cfgs = filterChannelPoolQuery(cfgs, c)
 	if configuredProtocol := strings.TrimSpace(c.Query("protocol")); configuredProtocol != "" && configuredProtocol != "all" {
 		cfgs = filterConfigs(cfgs, func(cfg *model.Config) bool {
 			return configHasURLProtocol(cfg, configuredProtocol)
@@ -305,6 +307,21 @@ func applyChannelListFilters(cfgs []*model.Config, c *gin.Context, cooldowns cha
 	}
 
 	return cfgs
+}
+
+// filterChannelPoolQuery 按 channel_pool 查询参数筛选渠道组；空或 all 不过滤，非法值视为不存在的组。
+func filterChannelPoolQuery(cfgs []*model.Config, c *gin.Context) []*model.Config {
+	raw := strings.TrimSpace(c.Query("channel_pool"))
+	if raw == "" || raw == "all" {
+		return cfgs
+	}
+	pool, err := strconv.Atoi(raw)
+	if err != nil {
+		pool = -1
+	}
+	return filterConfigs(cfgs, func(cfg *model.Config) bool {
+		return cfg.ChannelPool == pool
+	})
 }
 
 // computeChannelPriorities 计算健康度模式下的 effectivePriority、successRate 与首字统计。
@@ -736,6 +753,7 @@ func (s *Server) HandleChannelsFilterOptions(c *gin.Context) {
 	if status == "cooldown" {
 		cooldowns = s.loadChannelCooldownSnapshot(c.Request.Context())
 	}
+	cfgs = filterChannelPoolQuery(cfgs, c)
 	cfgs = filterChannelOptionConfigs(
 		cfgs,
 		strings.TrimSpace(c.Query("protocol")),
@@ -1317,6 +1335,10 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 	// Older editors do not submit this setting; omission must not disable retries.
 	if _, submitted := rawReq["same_channel_retries"]; !submitted {
 		req.SameChannelRetries = existing.SameChannelRetries
+	}
+	// 渠道组由编辑器或列表批量移动维护；未提交时保留现值，不能把渠道静默移回主渠道。
+	if _, submitted := rawReq["channel_pool"]; !submitted {
+		req.ChannelPool = existing.ChannelPool
 	}
 	rawAuthType := strings.TrimSpace(req.AuthType)
 	if rawAuthType == "" {
@@ -2264,6 +2286,7 @@ func (s *Server) HandleBatchPatchChannels(c *gin.Context) {
 		RPMLimit              *int               `json:"rpm_limit"`
 		MaxConcurrency        *int               `json:"max_concurrency"`
 		ProtocolTransformMode *string            `json:"protocol_transform_mode"`
+		ChannelPool           *int               `json:"channel_pool"`
 		Models                []model.ModelEntry `json:"models"`
 		ModelImportMode       string             `json:"model_import_mode"`
 	}
@@ -2286,6 +2309,7 @@ func (s *Server) HandleBatchPatchChannels(c *gin.Context) {
 		RPMLimit:              req.RPMLimit,
 		MaxConcurrency:        req.MaxConcurrency,
 		ProtocolTransformMode: req.ProtocolTransformMode,
+		ChannelPool:           req.ChannelPool,
 		ModelEntries:          req.Models,
 		ModelImportMode:       req.ModelImportMode,
 	}).Normalize()

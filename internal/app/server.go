@@ -65,6 +65,8 @@ type Server struct {
 	costCache                     *CostCache                 // 渠道每日成本缓存
 	channelRPMLimiter             *rpmLimiter                // 渠道RPM限制器（内存滑动窗口）
 	sessionAffinity               *sessionAffinityStore      // Anthropic/Codex 会话 → 渠道/Key 绑定
+	channelPoolAffinity           *channelPoolAffinityStore  // 渠道路由会话粘性：（规则，会话）→ 渠道组
+	channelPoolQueues             *channelPoolQueues         // 渠道路由队列：各规则在各渠道组的进行中请求数
 	sameChannelFailures           sameChannelFailureCounter  // same_channel_retries 跨请求连续失败计数(零值可用)
 	channelConcurrencyLimiter     *channelConcurrencyLimiter // 渠道并发限制器（内存计数）
 	statsCache                    *StatsCache                // 统计结果缓存层
@@ -169,6 +171,10 @@ type Server struct {
 	reasoningAuto              model.ReasoningAutoConfig
 	reasoningStates            reasoningStateStore
 	reasoningDecisionSlots     chan struct{}
+
+	// 渠道路由规则同样以不可变快照热更新，保存即生效。
+	channelRoutes        atomic.Pointer[channelRouteSnapshot]
+	channelRouteUpdateMu sync.Mutex
 
 	// 登录速率限制器（用于传递给AuthService）
 	loginRateLimiter *util.LoginRateLimiter
@@ -337,8 +343,11 @@ func newServer(store storage.Store, logBatchTimeout time.Duration) *Server {
 		channelRPMLimiter:         newRPMLimiter(time.Now),
 		channelConcurrencyLimiter: newChannelConcurrencyLimiter(),
 		sessionAffinity:           newSessionAffinityStore(),
+		channelPoolAffinity:       newChannelPoolAffinityStore(),
+		channelPoolQueues:         newChannelPoolQueues(),
 	}
 	s.setMultimodalFallbackModels(runtimeCfg.MultimodalFallbackModels)
+	s.setChannelRouteConfig(loadChannelRouteConfig(configService))
 
 	reg := protocol.NewRegistry()
 	protocolbuiltin.Register(reg)
@@ -1925,6 +1934,10 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		admin.GET("/auth-tokens", s.HandleListAuthTokens)
 		admin.POST("/auth-tokens", s.HandleCreateAuthToken)
 		admin.POST("/route-preview", s.HandleRoutePreview)
+		admin.GET("/channel-routes", s.HandleGetChannelRoutes)
+		admin.GET("/channel-routes/inflight", s.HandleGetChannelRouteInflight)
+		admin.PUT("/channel-routes", s.HandleUpdateChannelRoutes)
+		admin.POST("/channel-routes/simulate", s.HandleSimulateChannelRoute)
 		admin.PUT("/auth-tokens/:id", s.HandleUpdateAuthToken)
 		admin.DELETE("/auth-tokens/:id", s.HandleDeleteAuthToken)
 
@@ -2028,6 +2041,7 @@ func (s *Server) stateCleanupLoop() {
 				s.authService.tokenRPMLimiter.CleanupExpired()
 			}
 			s.sessionAffinity.cleanupExpired(time.Now())
+			s.channelPoolAffinity.cleanupExpired(time.Now())
 		}
 	}
 }

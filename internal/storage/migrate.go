@@ -228,6 +228,9 @@ func migrate(ctx context.Context, db *sql.DB, dialect Dialect) error {
 			if err := ensureChannelsSameChannelRetries(ctx, db, dialect); err != nil {
 				return fmt.Errorf("migrate channels same_channel_retries: %w", err)
 			}
+			if err := ensureChannelsChannelPool(ctx, db, dialect); err != nil {
+				return fmt.Errorf("migrate channels channel_pool: %w", err)
+			}
 			if err := ensureChannelsOAuthQuotaPassthrough(ctx, db, dialect); err != nil {
 				return fmt.Errorf("migrate channels oauth_quota_passthrough: %w", err)
 			}
@@ -572,6 +575,7 @@ func initDefaultSettings(ctx context.Context, db *sql.DB, dialect Dialect) error
 		{config.CodexMap429To503SettingKey, "false", "bool", "所有上游候选均失败时，将返回给官方 Codex 客户端的最终 429 映射为 503，使其按 5xx 重试", "false"},
 		{"global_cooldown_detection_rules", "{}", "json", "未配置渠道专属规则时继承的全局冷却探测规则", "{}"},
 		{"model_multimodal_fallback", "{}", "json", "多模态请求(含图片/文件等非文本内容)自动改用回退模型，JSON对象格式 {\"文本模型\":\"回退模型\"}", "{}"},
+		{"channel_route_rules", "{}", "json", "渠道路由规则：按模型、输入Token与队列把请求分流到主渠道/渠道1/渠道2（在渠道路由页面管理，保存后立即生效）", "{}"},
 		{"reasoning_auto", `{ "enabled": false, "decision_channel_id": 0, "decision_model": "", "business_models": [], "timeout_ms": 2000 }`, "json", "动态思考等级配置（保存后重启生效）", `{ "enabled": false, "decision_channel_id": 0, "decision_model": "", "business_models": [], "timeout_ms": 2000 }`},
 		{"model_custom_pricing", "{}", "json", "模型自定义价格覆盖（价格单位为美元/百万Token）", "{}"},
 		{"antigravity_sensitive_words", config.DefaultAntigravitySensitiveWordsJSON, "json", "Antigravity systemInstruction 和 CodeBuddy system/developer 消息文本中使用零宽字符替换的敏感词 JSON 字符串数组", config.DefaultAntigravitySensitiveWordsJSON},

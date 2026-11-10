@@ -52,8 +52,14 @@ var retiredSettingKeys = map[string]bool{
 	"TypeSafe_api_key": true,
 }
 
+// 有独立管理页与接口的设置：通用设置接口不展示、不写入，避免绕过专用校验与热更新。
+var dedicatedSettingEndpoints = map[string]string{
+	channelRouteRulesSettingKey: "/admin/channel-routes",
+}
+
 func isHiddenSetting(key string) bool {
-	return retiredSettingKeys[key] || isContainerManagedUpdateSetting(key)
+	_, dedicated := dedicatedSettingEndpoints[key]
+	return retiredSettingKeys[key] || dedicated || isContainerManagedUpdateSetting(key)
 }
 
 func rejectContainerManagedUpdateSetting(c *gin.Context, key string) bool {
@@ -241,6 +247,10 @@ func (s *Server) AdminBatchUpdateSettings(c *gin.Context) {
 	// 验证所有配置
 	for key, value := range req {
 		if rejectContainerManagedUpdateSetting(c, key) {
+			return
+		}
+		if endpoint, dedicated := dedicatedSettingEndpoints[key]; dedicated {
+			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("setting %s is managed by %s", key, endpoint))
 			return
 		}
 		setting := s.configService.GetSetting(key)

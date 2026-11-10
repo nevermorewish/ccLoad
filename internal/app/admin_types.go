@@ -46,6 +46,7 @@ type ChannelRequest struct {
 	AvailableTimeEnd              string                        `json:"available_time_end,omitempty"`
 	RetryOtherKeysOnFailure       bool                          `json:"retry_other_keys_on_failure"`
 	SameChannelRetries            int                           `json:"same_channel_retries"`
+	ChannelPool                   int                           `json:"channel_pool"` // 渠道组：0=主渠道，1=渠道1，2=渠道2
 	ManagementAccount             *channelManagementInput       `json:"management_account,omitempty"`
 
 	oauthQuotaPassthroughSet  bool
@@ -451,6 +452,9 @@ func (cr *ChannelRequest) Validate() error {
 	if cr.SameChannelRetries < 0 || cr.SameChannelRetries > model.MaxSameChannelRetries {
 		return fmt.Errorf("same_channel_retries must be between 0 and %d (got %d)", model.MaxSameChannelRetries, cr.SameChannelRetries)
 	}
+	if !model.ValidChannelPool(cr.ChannelPool) {
+		return fmt.Errorf("channel_pool must be between %d and %d (got %d)", model.ChannelPoolMain, model.ChannelPoolCount-1, cr.ChannelPool)
+	}
 
 	return nil
 }
@@ -561,6 +565,7 @@ func (cr *ChannelRequest) ToConfig() *model.Config {
 		AvailableTimeEnd:              cr.AvailableTimeEnd,
 		RetryOtherKeysOnFailure:       cr.RetryOtherKeysOnFailure,
 		SameChannelRetries:            cr.SameChannelRetries,
+		ChannelPool:                   cr.ChannelPool,
 	}
 }
 

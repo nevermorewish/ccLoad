@@ -406,6 +406,7 @@ type BatchConfigPatch struct {
 	RPMLimit              *int
 	MaxConcurrency        *int
 	ProtocolTransformMode *string
+	ChannelPool           *int
 	ModelEntries          []ModelEntry
 	ModelImportMode       string
 }
@@ -433,7 +434,7 @@ type BatchModelDeleteResult struct {
 // Normalize validates a batch patch and returns an independent normalized copy.
 func (p BatchConfigPatch) Normalize() (BatchConfigPatch, error) {
 	if p.Priority == nil && p.CostMultiplier == nil && p.DailyCostLimit == nil && p.RPMLimit == nil && p.MaxConcurrency == nil &&
-		p.ProtocolTransformMode == nil && p.ModelImportMode == "" && p.ModelEntries == nil {
+		p.ProtocolTransformMode == nil && p.ChannelPool == nil && p.ModelImportMode == "" && p.ModelEntries == nil {
 		return BatchConfigPatch{}, errors.New("batch config patch cannot be empty")
 	}
 	if p.Priority != nil {
@@ -475,6 +476,13 @@ func (p BatchConfigPatch) Normalize() (BatchConfigPatch, error) {
 			return BatchConfigPatch{}, fmt.Errorf("invalid protocol_transform_mode %q", *p.ProtocolTransformMode)
 		}
 		p.ProtocolTransformMode = &mode
+	}
+	if p.ChannelPool != nil {
+		value := *p.ChannelPool
+		if !ValidChannelPool(value) {
+			return BatchConfigPatch{}, fmt.Errorf("channel_pool must be between %d and %d (got %d)", ChannelPoolMain, ChannelPoolCount-1, value)
+		}
+		p.ChannelPool = &value
 	}
 
 	p.ModelImportMode = strings.ToLower(strings.TrimSpace(p.ModelImportMode))
@@ -671,6 +679,17 @@ type ChannelInfo struct {
 // MaxSameChannelRetries 是渠道级同渠道原地重试次数上限。
 const MaxSameChannelRetries = 10
 
+// 渠道组：渠道路由规则按组分流。0 是主渠道，1、2 是附加渠道组。
+const (
+	ChannelPoolMain  = 0
+	ChannelPoolCount = 3
+)
+
+// ValidChannelPool reports whether pool names one of the configured channel pools.
+func ValidChannelPool(pool int) bool {
+	return pool >= ChannelPoolMain && pool < ChannelPoolCount
+}
+
 // Config 渠道配置
 type Config struct {
 	// AntigravityCredits is request-local; never accepted or persisted by admin APIs.
@@ -728,6 +747,9 @@ type Config struct {
 	// 同渠道原地重试次数：上游网络错误或 5xx 时在同一渠道再试 N 次后才切换，
 	// 中间失败不累计冷却。0 表示不重试（默认）。
 	SameChannelRetries int `json:"same_channel_retries"`
+
+	// 渠道组（0=主渠道，1=渠道1，2=渠道2），由渠道路由规则决定请求优先使用哪一组。
+	ChannelPool int `json:"channel_pool"`
 
 	// OAuthCredential is the private CLIProxy-compatible OAuth JSON stored in
 	// the channels table. It must never be serialized by an API response.
@@ -792,6 +814,7 @@ func (c *Config) Clone() *Config {
 		AvailableTimeEnd:              c.AvailableTimeEnd,
 		RetryOtherKeysOnFailure:       c.RetryOtherKeysOnFailure,
 		SameChannelRetries:            c.SameChannelRetries,
+		ChannelPool:                   c.ChannelPool,
 		OAuthCredential:               c.OAuthCredential,
 		CodexAccessToken:              c.CodexAccessToken,
 		CodexAccountID:                c.CodexAccountID,

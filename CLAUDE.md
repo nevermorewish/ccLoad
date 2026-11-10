@@ -43,6 +43,7 @@ golangci-lint run ./...        # Go 改动提交前零警告
 | 代理、SSE、重试、冷却、取消 | `proxy_handler.go:HandleProxyRequest` → `runProxyAttemptLoop` → `proxy_forward.go` / `proxy_stream.go`；[代理契约](.claude/agent-guide/proxy.md) |
 | Responses WebSocket | `proxy_responses_websocket.go`、`responses_execution_session.go`；[代理契约](.claude/agent-guide/proxy.md)及 [Codex 契约](.claude/agent-guide/upstream.md#codex) |
 | 渠道/Key/URL、模型后缀、多模态回退 | `selector*.go`、`key_selector.go`、`url_selector.go`；[路由契约](.claude/agent-guide/routing.md) |
+| 渠道组（主渠道/渠道1/渠道2）与渠道路由 | `channel_pool_routing.go`、`admin_channel_routes.go`；[渠道组与渠道路由](.claude/agent-guide/routing.md#渠道组与渠道路由) |
 | 上游认证、请求指纹、provider wire | 各提供商 `*_wire.go` / `*_credentials.go` / `internal/*auth/`；[上游契约](.claude/agent-guide/upstream.md) |
 | Registry 与协议转换 | `internal/protocol/registry.go` → `builtin/register.go` → `builtin/cliproxy_adapter.go`；[转换边界](.claude/agent-guide/protocol.md)，快照来源见 `internal/protocol/cliproxy/UPSTREAM.md` |
 | 计费、访问控制、OAuth 额度 | `internal/util/cost_calculator.go`、`internal/oauthcost/`、`oauth_quota_cost.go`；[计费契约](.claude/agent-guide/billing.md) |

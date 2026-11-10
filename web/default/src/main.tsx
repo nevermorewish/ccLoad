@@ -13,6 +13,10 @@ import './styles/kimi-test.css'
 // 在用户尚未访问时阻塞首屏。Rsbuild 生产构建会为这些入口生成独立缓存块。
 const DashboardPage = lazy(() => import('./pages/dashboard-page').then((module) => ({ default: module.DashboardPage })))
 const ChannelsPage = lazy(() => import('./pages/channels-page').then((module) => ({ default: module.ChannelsPage })))
+const ChannelRoutesPage = lazy(() => import('./pages/channel-routes-page').then((module) => ({ default: module.ChannelRoutesPage })))
+// 每个渠道组是独立的路由组件，切换菜单时页面状态（筛选、选中、分页）随之重建。
+const PoolOneChannelsPage = () => <ChannelsPage pool={1} />
+const PoolTwoChannelsPage = () => <ChannelsPage pool={2} />
 const MonitorPage = lazy(() => import('./pages/monitor-page').then((module) => ({ default: module.MonitorPage })))
 const StatsPage = lazy(() => import('./pages/stats-page').then((module) => ({ default: module.StatsPage })))
 const TrendPage = lazy(() => import('./pages/trend-page').then((module) => ({ default: module.TrendPage })))
@@ -67,6 +71,9 @@ function Login() {
 const rootRoute = createRootRoute({ component: () => <App /> })
 const dashboardRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: DashboardPage })
 const channelsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/channels', component: ChannelsPage })
+const channelsPoolOneRoute = createRoute({ getParentRoute: () => rootRoute, path: '/channels-1', component: PoolOneChannelsPage })
+const channelsPoolTwoRoute = createRoute({ getParentRoute: () => rootRoute, path: '/channels-2', component: PoolTwoChannelsPage })
+const channelRoutesRoute = createRoute({ getParentRoute: () => rootRoute, path: '/channel-routes', component: ChannelRoutesPage })
 const monitorRoute = createRoute({ getParentRoute: () => rootRoute, path: '/monitor', component: MonitorPage })
 const statsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/stats', component: StatsPage })
 const trendRoute = createRoute({ getParentRoute: () => rootRoute, path: '/trend', component: TrendPage })
@@ -78,7 +85,7 @@ const oauthRoute = createRoute({ getParentRoute: () => rootRoute, path: '/oauth'
 const modelCatalogRoute = createRoute({ getParentRoute: () => rootRoute, path: '/model-catalog', component: ModelCatalogPage })
 const oauthJobsRoute = createRoute({ getParentRoute: () => rootRoute, path: '/oauth-jobs', component: OAuthJobsPage })
 const loginRoute = createRoute({ getParentRoute: () => rootRoute, path: '/login', component: Login })
-const routeTree = rootRoute.addChildren([dashboardRoute, channelsRoute, monitorRoute, statsRoute, trendRoute, modelTestRoute, logsRoute, tokensRoute, settingsRoute, oauthRoute, modelCatalogRoute, oauthJobsRoute, loginRoute])
+const routeTree = rootRoute.addChildren([dashboardRoute, channelsRoute, channelsPoolOneRoute, channelsPoolTwoRoute, channelRoutesRoute, monitorRoute, statsRoute, trendRoute, modelTestRoute, logsRoute, tokensRoute, settingsRoute, oauthRoute, modelCatalogRoute, oauthJobsRoute, loginRoute])
 const router = createRouter({ routeTree, basepath: '/web', defaultPreload: 'intent' })
 
 function App() {

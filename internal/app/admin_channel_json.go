@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,8 @@ import (
 type channelJSONConfig struct {
 	*model.Config
 	OAuthCredential string `json:"oauth_credential,omitempty"`
+	// channelPoolSet 记录导入文件是否声明了 channel_pool；旧备份没有该字段时保留现有归属。
+	channelPoolSet bool
 }
 
 func (c channelJSONConfig) MarshalJSON() ([]byte, error) {
@@ -44,6 +47,11 @@ func (c *channelJSONConfig) UnmarshalJSON(data []byte) error {
 	c.Config = (*model.Config)(value.configAlias)
 	c.OAuthCredential = value.OAuthCredential
 	c.Config.OAuthCredential = value.OAuthCredential
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, c.channelPoolSet = fields["channel_pool"]
 	return nil
 }
 
@@ -70,6 +78,7 @@ func (s *Server) HandleExportChannelsJSON(c *gin.Context) {
 		RespondError(c, http.StatusInternalServerError, err)
 		return
 	}
+	configs = filterChannelPoolQuery(configs, c)
 	allKeys, err := s.store.GetAllAPIKeys(c.Request.Context())
 	if err != nil {
 		RespondError(c, http.StatusInternalServerError, err)
@@ -137,6 +146,16 @@ func (s *Server) HandleImportChannelsJSON(c *gin.Context) {
 		RespondErrorMsg(c, http.StatusBadRequest, "JSON 中没有渠道")
 		return
 	}
+	defaultPool, err := parseImportChannelPool(c)
+	if err != nil {
+		RespondErrorMsg(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	existingPools, err := s.existingChannelPools(c.Request.Context())
+	if err != nil {
+		RespondError(c, http.StatusInternalServerError, err)
+		return
+	}
 	channels := make([]*model.ChannelWithKeys, 0, len(doc.Channels))
 	seenNames := make(map[string]struct{}, len(doc.Channels))
 	for i := range doc.Channels {
@@ -157,6 +176,16 @@ func (s *Server) HandleImportChannelsJSON(c *gin.Context) {
 			return
 		}
 		seenNames[cfg.Name] = struct{}{}
+		poolRaw := ""
+		if record.Config.channelPoolSet {
+			poolRaw = strconv.Itoa(cfg.ChannelPool)
+		}
+		pool, err := importedChannelPool(poolRaw, record.Config.channelPoolSet, existingPools, cfg.Name, defaultPool)
+		if err != nil {
+			RespondErrorMsg(c, http.StatusBadRequest, fmt.Sprintf("渠道 %q 的 %v", cfg.Name, err))
+			return
+		}
+		cfg.ChannelPool = pool
 		cfg.OAuthCredential = record.Config.OAuthCredential
 		cfg.AuthType = model.NormalizeAuthType(cfg.AuthType)
 		if cfg.AuthType == "" {

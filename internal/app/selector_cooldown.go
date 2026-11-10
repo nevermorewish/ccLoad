@@ -92,6 +92,16 @@ func (s *Server) filterCooldownChannelsInternal(ctx context.Context, channels []
 		}
 	}
 
+	// 渠道路由决策排除的渠道组不参与本次选路（含全冷却兜底）；保留组的先后顺序在排序时生效。
+	poolRoute := channelPoolRouteFromContext(ctx)
+	if poolRoute != nil {
+		channels = poolRoute.filterChannels(channels)
+		if len(channels) == 0 {
+			return nil, nil
+		}
+	}
+	poolRank := poolRoute.rankFunc()
+
 	now := time.Now()
 	if sink != nil {
 		now = sink.now
@@ -254,7 +264,7 @@ func (s *Server) filterCooldownChannelsInternal(ctx context.Context, channels []
 			return nil, nil
 		}
 
-		best, readyIn := s.pickBestChannelWhenAllCooled(channels, channelCooldowns, keyCooldowns, rowReadiness, now)
+		best, readyIn := s.pickBestChannelWhenAllCooled(channels, channelCooldowns, keyCooldowns, rowReadiness, now, poolRank)
 		if best != nil {
 			log.Printf("[INFO] 所有渠道冷却中，兜底使用渠道 %d（%.1fs 后就绪）", best.ID, readyIn.Seconds())
 			return []*modelpkg.Config{cooldownFallbackCandidate(best)}, nil
@@ -264,16 +274,29 @@ func (s *Server) filterCooldownChannelsInternal(ctx context.Context, channels []
 
 	// 启用健康度排序：对"已通过冷却过滤"的渠道按健康度排序
 	if s.healthCache != nil && s.healthCache.Config().Enabled {
-		return s.sortChannelsByHealthInternal(filtered, keyCooldowns, now, sink != nil), nil
+		return s.sortChannelsByHealthInternal(filtered, keyCooldowns, now, sink != nil, poolRank), nil
 	}
 
 	if sink != nil {
-		slices.SortStableFunc(filtered, func(a, b *modelpkg.Config) int { return cmp.Compare(b.Priority, a.Priority) })
+		slices.SortStableFunc(filtered, func(a, b *modelpkg.Config) int {
+			if c := comparePoolRank(poolRank, a, b); c != 0 {
+				return c
+			}
+			return cmp.Compare(b.Priority, a.Priority)
+		})
 		return filtered, nil
 	}
 
-	// healthCache 关闭时：按优先级分组，使用平滑加权轮询
-	return s.balanceSamePriorityChannels(filtered, keyCooldowns, now), nil
+	// healthCache 关闭时：按渠道组顺位与优先级分组，使用平滑加权轮询
+	return s.balanceSamePriorityChannels(filtered, keyCooldowns, now, poolRank), nil
+}
+
+// comparePoolRank 按渠道路由决策的渠道组顺位比较；rank 为 nil（无决策）时视为同组。
+func comparePoolRank(rank func(*modelpkg.Config) int, a, b *modelpkg.Config) int {
+	if rank == nil {
+		return 0
+	}
+	return cmp.Compare(rank(a), rank(b))
 }
 
 func filterAvailableTimeChannels(channels []*modelpkg.Config, now time.Time) []*modelpkg.Config {
@@ -297,13 +320,14 @@ func cooldownFallbackCandidate(cfg *modelpkg.Config) *modelpkg.Config {
 
 // pickBestChannelWhenAllCooled 全冷却时选择最佳渠道。
 // 返回最佳渠道和距离恢复的剩余时间。
-// 选择规则：最早恢复 > 有效优先级高 > 基础优先级高
+// 选择规则：最早恢复 > 渠道组顺位靠前 > 有效优先级高 > 基础优先级高
 func (s *Server) pickBestChannelWhenAllCooled(
 	channels []*modelpkg.Config,
 	channelCooldowns map[int64]time.Time,
 	keyCooldowns map[int64]map[int]time.Time,
 	rowReadiness map[int64]time.Time,
 	now time.Time,
+	poolRank func(*modelpkg.Config) int,
 ) (*modelpkg.Config, time.Duration) {
 	if len(channels) == 0 {
 		return nil, 0
@@ -374,11 +398,15 @@ func (s *Server) pickBestChannelWhenAllCooled(
 			}
 			return 1
 		}
-		// 2. 有效优先级高优先（值大的排前面，所以反过来比较）
+		// 2. 渠道路由决策中顺位靠前的渠道组优先
+		if c := comparePoolRank(poolRank, a, b); c != 0 {
+			return c
+		}
+		// 3. 有效优先级高优先（值大的排前面，所以反过来比较）
 		if c := cmp.Compare(getEffPriority(b), getEffPriority(a)); c != 0 {
 			return c
 		}
-		// 3. 基础优先级高优先
+		// 4. 基础优先级高优先
 		return cmp.Compare(b.Priority, a.Priority)
 	})
 

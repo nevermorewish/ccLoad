@@ -1,0 +1,25 @@
+.route-pools { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+.route-pool-card { display: grid; gap: 4px; align-content: start; }
+.route-pool-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.route-pool-value { margin-top: 8px; font-size: 28px; font-weight: 700; }
+.route-empty { margin-bottom: 16px; }
+.route-rule { display: grid; gap: 12px; margin-bottom: 14px; }
+.route-rule-disabled { opacity: .62; }
+.route-rule-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.route-rule-head .input { flex: 1 1 220px; min-width: 0; }
+.route-rule-actions { display: flex; gap: 6px; margin-left: auto; }
+.route-rule-summary { margin: 0; font-size: 13px; }
+.route-field { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 10px; align-items: start; }
+.route-label { padding-top: 8px; color: #9ca3af; font-size: 13px; }
+.route-models { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.route-chip .link-button { padding: 0 2px; line-height: 1; }
+.route-row { margin-bottom: 0; align-items: center; }
+.route-order { display: flex; flex-wrap: wrap; gap: 8px; }
+.route-simulate { margin-top: 4px; }
+.route-simulate h2 { margin: 0 0 6px; font-size: 18px; }
+:root[data-resolved-theme="light"] .route-label { color: #4b5563; }
+@media (max-width: 900px) {
+  .route-pools { grid-template-columns: 1fr; }
+  .route-field { grid-template-columns: 1fr; }
+  .route-label { padding-top: 0; }
+}

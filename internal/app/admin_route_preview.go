@@ -17,6 +17,7 @@ import (
 type routePreviewCandidate struct {
 	ID                int64   `json:"id"`
 	Name              string  `json:"name"`
+	ChannelPool       int     `json:"channel_pool"`
 	Priority          int     `json:"priority"`
 	EffectivePriority float64 `json:"effective_priority"`
 	PriorityGroup     float64 `json:"priority_group"`
@@ -125,7 +126,7 @@ func (s *Server) HandleRoutePreview(c *gin.Context) {
 	result := routePreviewResult{
 		Model: model.RoutingModelName(s.generationRoutingModel(input)), ClientProtocol: req.ClientProtocol,
 		Candidates: make([]routePreviewCandidate, 0), Excluded: make([]routePreviewExcluded, 0),
-		Limitations: []string{"session_affinity", "execution_session_pinning", "channel_header", "antigravity_credits", "key_rotation", "model_row_rotation", "live_rpm_concurrency", "protocol_capabilities", "token_budget"},
+		Limitations: []string{"session_affinity", "execution_session_pinning", "channel_header", "antigravity_credits", "key_rotation", "model_row_rotation", "live_rpm_concurrency", "protocol_capabilities", "token_budget", "channel_pool_routing"},
 	}
 	sink := &routeRejectSink{now: time.Now(), rejected: make(map[int64]routePreviewExcluded), keys: make(map[int64][]*model.APIKey), rowReasons: make(map[int64]string)}
 	ctx = context.WithValue(ctx, routeRejectContextKey{}, sink)
@@ -160,7 +161,7 @@ func (s *Server) HandleRoutePreview(c *gin.Context) {
 			priorityGroup /= float64(effPriorityPrecision)
 		}
 		result.Candidates = append(result.Candidates, routePreviewCandidate{
-			ID: cfg.ID, Name: cfg.Name, Priority: cfg.Priority, EffectivePriority: item.effPriority, PriorityGroup: priorityGroup,
+			ID: cfg.ID, Name: cfg.Name, ChannelPool: cfg.ChannelPool, Priority: cfg.Priority, EffectivePriority: item.effPriority, PriorityGroup: priorityGroup,
 			AvailableKeyCount: s.routePreviewAvailableKeys(cfg, sink.keys[cfg.ID], result.Model, req.ClientProtocol, sink.now),
 			CooldownFallback:  cfg.CooldownFallback, SameTierRotation: groups[bucket] > 1,
 		})

@@ -8,6 +8,7 @@ import (
 
 	"ccLoad/internal/config"
 	"ccLoad/internal/model"
+	"ccLoad/internal/protocol"
 )
 
 // sessionAffinityTTL 与 Anthropic 最长的 1h prompt cache 对齐：超过它缓存已失效，绑定没有价值。
@@ -149,10 +150,28 @@ func openAICompatSessionAffinityKey(protocolSegment, tokenHash string, headers h
 	return tokenHash + "\x00" + protocolSegment + "\x00" + sessionID
 }
 
+// requestSessionAffinityKey 返回请求的会话粘性键（令牌+客户端显式会话 ID，按协议段隔离），
+// 无会话身份时为空。渠道级会话粘性与渠道路由的渠道组粘性共用这份身份推导。
+func requestSessionAffinityKey(clientProtocol protocol.Protocol, requestFamily protocol.RequestFamily, tokenHash string, headers http.Header, body []byte) string {
+	switch {
+	case clientProtocol == protocol.Anthropic && requestFamily == protocol.RequestFamilyMessages:
+		return anthropicSessionAffinityKey(tokenHash, headers, body)
+	case clientProtocol == protocol.Codex && requestFamily == protocol.RequestFamilyResponses:
+		return codexSessionAffinityKey(tokenHash, headers)
+	case clientProtocol == protocol.OpenAI && requestFamily == protocol.RequestFamilyChatCompletions:
+		return openAICompatSessionAffinityKey("openai", tokenHash, headers)
+	case clientProtocol == protocol.Gemini && requestFamily == protocol.RequestFamilyGenerateContent:
+		return openAICompatSessionAffinityKey("gemini", tokenHash, headers)
+	default:
+		return ""
+	}
+}
+
 // preferSessionAffinityChannel 仅在绑定渠道仍属候选中最高优先级档时置顶：
 // 健康评分开启时按有效分的 0.1 档比较，否则按配置优先级比较。
 // 粘性只替代同层轮询，更高优先级渠道恢复后会话随之迁移，主备意图优先于缓存命中。
-func (s *Server) preferSessionAffinityChannel(cands []*model.Config, channelID int64) []*model.Config {
+// 渠道路由决策存在时，绑定渠道还必须位于顺位最靠前的渠道组。
+func (s *Server) preferSessionAffinityChannel(cands []*model.Config, channelID int64, poolRoute *channelPoolRoute) []*model.Config {
 	var bound *model.Config
 	for _, cfg := range cands {
 		if cfg != nil && cfg.ID == channelID {
@@ -178,8 +197,12 @@ func (s *Server) preferSessionAffinityChannel(cands []*model.Config, channelID i
 		return int64(cfg.SortPriority())
 	}
 	boundGroup := priorityGroup(bound)
+	boundRank := poolRoute.rank(bound.ChannelPool)
 	for _, cfg := range cands {
-		if cfg != nil && priorityGroup(cfg) > boundGroup {
+		if cfg == nil {
+			continue
+		}
+		if rank := poolRoute.rank(cfg.ChannelPool); rank < boundRank || (rank == boundRank && priorityGroup(cfg) > boundGroup) {
 			return cands
 		}
 	}

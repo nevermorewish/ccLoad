@@ -39,14 +39,17 @@ func (s *Server) sortChannelsByHealth(
 	keyCooldowns map[int64]map[int]time.Time,
 	now time.Time,
 ) []*modelpkg.Config {
-	return s.sortChannelsByHealthInternal(channels, keyCooldowns, now, false)
+	return s.sortChannelsByHealthInternal(channels, keyCooldowns, now, false, nil)
 }
 
+// poolRank 非 nil 时（渠道路由决策）先按渠道组顺位排序，组内再按有效优先级；
+// 同档轮询只在同一渠道组内进行，保证轮询状态与实际首选一致。
 func (s *Server) sortChannelsByHealthInternal(
 	channels []*modelpkg.Config,
 	keyCooldowns map[int64]map[int]time.Time,
 	now time.Time,
 	dryRun bool,
+	poolRank func(*modelpkg.Config) int,
 ) []*modelpkg.Config {
 	if len(channels) == 0 {
 		return channels
@@ -56,6 +59,9 @@ func (s *Server) sortChannelsByHealthInternal(
 
 	// 按有效优先级排序（越大越优先，与原有逻辑一致）
 	sort.SliceStable(scored, func(i, j int) bool {
+		if c := comparePoolRank(poolRank, scored[i].config, scored[j].config); c != 0 {
+			return c < 0
+		}
 		return scored[i].effPriority > scored[j].effPriority
 	})
 
@@ -65,7 +71,8 @@ func (s *Server) sortChannelsByHealthInternal(
 	result := make([]*modelpkg.Config, len(scored))
 	groupStart := 0
 	for i := 1; i <= len(scored); i++ {
-		if i == len(scored) || effPriorityBucket(scored[i].effPriority) != effPriorityBucket(scored[groupStart].effPriority) {
+		if i == len(scored) || comparePoolRank(poolRank, scored[i].config, scored[groupStart].config) != 0 ||
+			effPriorityBucket(scored[i].effPriority) != effPriorityBucket(scored[groupStart].effPriority) {
 			if !dryRun && i-groupStart > 1 {
 				s.balanceScoredChannelsInPlace(scored[groupStart:i], keyCooldowns, now)
 			}
@@ -172,11 +179,12 @@ func medianFloat64(values []float64) float64 {
 }
 
 // balanceSamePriorityChannels 按优先级分组，组内使用平滑加权轮询
-// 用于 healthCache 关闭时的场景，确保确定性分流
+// 用于 healthCache 关闭时的场景，确保确定性分流。poolRank 非 nil 时先按渠道组顺位分组。
 func (s *Server) balanceSamePriorityChannels(
 	channels []*modelpkg.Config,
 	keyCooldowns map[int64]map[int]time.Time,
 	now time.Time,
+	poolRank func(*modelpkg.Config) int,
 ) []*modelpkg.Config {
 	n := len(channels)
 	if n <= 1 {
@@ -192,13 +200,17 @@ func (s *Server) balanceSamePriorityChannels(
 	// 基准用 SortPriority()：手动覆盖（SortOverride）在此路径同样生效。
 	result := channels
 	sort.SliceStable(result, func(i, j int) bool {
+		if c := comparePoolRank(poolRank, result[i], result[j]); c != 0 {
+			return c < 0
+		}
 		return result[i].SortPriority() > result[j].SortPriority()
 	})
 
 	// 按优先级分组，组内使用平滑加权轮询
 	groupStart := 0
 	for i := 1; i <= n; i++ {
-		if i == n || result[i].SortPriority() != result[groupStart].SortPriority() {
+		if i == n || comparePoolRank(poolRank, result[i], result[groupStart]) != 0 ||
+			result[i].SortPriority() != result[groupStart].SortPriority() {
 			if i-groupStart > 1 {
 				group := result[groupStart:i]
 				s.channelBalancer.selectWithCooldownInPlace(group, keyCooldowns, now)

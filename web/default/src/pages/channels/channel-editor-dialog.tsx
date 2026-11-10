@@ -4,7 +4,7 @@ import { SearchableSelect } from '../../components/searchable-select'
 import { SearchableMultiSelect } from '../../components/searchable-multi-select'
 import type { Channel, ChannelURLStat } from '../../types'
 import {
-  AUTH_TYPES, URL_PROTOCOLS, checkDuplicate, createChannel, fetchChannelModels, fetchKeyRate, fetchModelsPreview,
+  AUTH_TYPES, CHANNEL_POOLS, URL_PROTOCOLS, checkDuplicate, createChannel, fetchChannelModels, fetchKeyRate, fetchModelsPreview,
   formFromEditor, formToPayload, loadEditor, loadKeys, mergeModelEntries, normalizeModelEntries,
   runtimeURL, testChannelURL, toggleKey, toggleURL, updateChannel, websocketProbe, usesAPIKeyCredentials,
   type ChannelEditorData, type ChannelForm, type ChannelKeyRow, type ModelEntry,
@@ -18,6 +18,8 @@ type Props = {
   /** 复制：载入源渠道内容，以新建方式保存，不复制管理账户凭据 */
   duplicateOf?: Channel | null
   createAuthType?: 'api_key' | 'system_one'
+  /** 新建渠道默认归入的渠道组（从哪个渠道组页面打开） */
+  createPool?: number
   onClose: () => void
   onSaved: () => void
   onNotice: (value: unknown) => void
@@ -29,11 +31,12 @@ const VIRTUAL_THRESHOLD = 50
 const VIRTUAL_ROW_HEIGHT = 52
 const VIRTUAL_BUFFER = 5
 
-const blankForm = (authType = 'api_key'): ChannelForm => ({ name: '', auth_type: authType, urls: [{ url: '' }], priority: 0, enabled: true, models: [], api_keys: [{ api_key: '', cost_multiplier: 1, priority: 0 }], protocol_transform_mode: 'auto', key_strategy: 'sequential', same_channel_retries: 0 })
+const blankForm = (authType = 'api_key', pool = 0): ChannelForm => ({ name: '', auth_type: authType, urls: [{ url: '' }], priority: 0, enabled: true, models: [], api_keys: [{ api_key: '', cost_multiplier: 1, priority: 0 }], protocol_transform_mode: 'auto', key_strategy: 'sequential', same_channel_retries: 0, channel_pool: pool })
+const poolOptions = CHANNEL_POOLS.map((pool) => ({ value: String(pool.value), label: `渠道组：${pool.label}` }))
 const keyCooling = (row: ChannelKeyRow) => Number(row.cooldown_until ?? 0) * 1000 > Date.now()
 
-export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType = 'api_key', onClose, onSaved, onNotice, onTestModel }: Props) {
-  const [form, setForm] = useState<ChannelForm>(() => blankForm(createAuthType))
+export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType = 'api_key', createPool = 0, onClose, onSaved, onNotice, onTestModel }: Props) {
+  const [form, setForm] = useState<ChannelForm>(() => blankForm(createAuthType, createPool))
   const [advanced, setAdvanced] = useState<AdvancedDraft>(emptyAdvanced)
   const [editorData, setEditorData] = useState<ChannelEditorData>({})
   const [urlStats, setUrlStats] = useState<ChannelURLStat[]>([])
@@ -73,7 +76,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
     if (!open) return
     setError(''); setDirty(false); setSelectedKeys([]); setSelectedModels([]); setSelectedURLs([]); setModelKeyword(''); setKeyFilter('all'); setDuplicateHint([]); setDialog(null)
     if (!source) {
-      setForm(blankForm(createAuthType)); setAdvanced(emptyAdvanced()); setEditorData({}); setUrlStats([])
+      setForm(blankForm(createAuthType, createPool)); setAdvanced(emptyAdvanced()); setEditorData({}); setUrlStats([])
       return
     }
     let cancelled = false
@@ -93,7 +96,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
     }).catch((cause: unknown) => { if (!cancelled) setError(cause instanceof Error ? cause.message : '编辑器加载失败') })
       .finally(() => { if (!cancelled) setBusy(false) })
     return () => { cancelled = true }
-  }, [open, source, duplicateOf, createAuthType])
+  }, [open, source, duplicateOf, createAuthType, createPool])
 
   // 新建时 URL 输入 350ms 防抖预览重复渠道。
   useEffect(() => {
@@ -136,7 +139,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
   const applyOpenCodePreset = async (preset: string) => {
     const url = preset === 'anonymous' ? 'https://opencode.ai/inference' : preset === 'go' ? 'https://opencode.ai/zen/go' : 'https://opencode.ai/zen'
     const name = preset === 'anonymous' ? 'OpenCode-Anonymous' : preset === 'go' ? 'OpenCode-Zen-Go' : 'OpenCode-Zen'
-    setForm({ ...blankForm(), name, urls: [{ url }], api_keys: [{ api_key: preset === 'anonymous' ? 'public' : '', cost_multiplier: 1, priority: 0 }] })
+    setForm({ ...blankForm('api_key', form.channel_pool ?? createPool), name, urls: [{ url }], api_keys: [{ api_key: preset === 'anonymous' ? 'public' : '', cost_multiplier: 1, priority: 0 }] })
     setDirty(true); setError(''); setBusy(true)
     try {
       const result = await fetchModelsPreview({ auth_type: 'api_key', urls: [{ url }], api_keys: ['public'], per_key: true })
@@ -291,6 +294,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
         {isCreate && <button className="btn" title="从 JSON、环境变量或 URL/Key 文本一键填充" onClick={() => setDialog('quickAdd')}>✨ 一键填充</button>}
         {/* 类型由创建入口决定；保存后保持认证类型不变。 */}
         <SearchableSelect ariaLabel="认证类型" className="combobox-inline" value={form.auth_type} disabled options={AUTH_TYPES} onChange={() => undefined} />
+        <SearchableSelect ariaLabel="渠道组" className="combobox-inline" value={String(form.channel_pool ?? 0)} options={poolOptions} onChange={(value) => update('channel_pool', Number(value))} />
         {!isSystemOne && <SearchableSelect ariaLabel="协议处理" className="combobox-inline" value={String(form.protocol_transform_mode ?? 'auto')} options={[{ value: 'auto', label: '协议处理：自动（原生优先）' }, { value: 'upstream', label: '协议处理：上游直通' }, { value: 'local', label: '协议处理：ccLoad 转换' }]} onChange={(value) => update('protocol_transform_mode', value)} />}
         <label className="muted">同渠道重试<input className="input compact" type="number" min={0} max={10} step={1} value={Number(form.same_channel_retries ?? 0)} onChange={(event) => update('same_channel_retries', Number(event.target.value))} /></label>
       </div>

@@ -7,9 +7,9 @@ import { streamSSE } from '../../lib/sse'
 import type { Channel } from '../../types'
 import { OAuthCleanupPanel, OAuthImportPanel, OAuthLoginPanel } from '../oauth/oauth-panels'
 import {
-  AUTH_TYPES, PROTOCOL_MODES, batchClearCooldowns, batchDelete, batchEnabled, batchPatch, batchPriority, batchSortOverride,
+  AUTH_TYPES, CHANNEL_POOLS, PROTOCOL_MODES, batchClearCooldowns, batchDelete, batchEnabled, batchPatch, batchPriority, batchSortOverride,
   codebuddyCheckin, codexQuotaReset, download, managementBalance, managementCheckin, oauthUsage,
-  refreshModelsBatch, removeChannel, uploadJSON, usesAPIKeyCredentials, type ModelEntry,
+  channelPoolLabel, refreshModelsBatch, removeChannel, uploadJSON, usesAPIKeyCredentials, type ModelEntry,
 } from './api'
 import { ChannelEditorDialog } from './channel-editor-dialog'
 import { ChannelSortDialog, ConfirmDialog, ModelImportDialog, SortOverrideDialog } from './dialogs'
@@ -60,10 +60,14 @@ const healthFromRow = (row: Row) => {
   }
 }
 
-export function ChannelsPage() {
+/** 渠道页按渠道组复用：主渠道 /channels，渠道1 /channels-1，渠道2 /channels-2。 */
+export function ChannelsPage({ pool = 0 }: { pool?: number } = {}) {
   const readOnly = useMemo(() => isAPITokenRole(), [])
-  const [filters, setFilters] = useState<Filters>(() => readJSON<Filters>(FILTERS_KEY, { status: 'all', authType: 'all', model: '', search: '' }))
-  const [page, setPage] = useState(() => Math.max(1, Number(readJSON<{ page?: number }>(FILTERS_KEY, {}).page ?? 1)))
+  // 主渠道沿用旧键，其余渠道组各自记住筛选与页码。
+  const filtersKey = pool ? `${FILTERS_KEY}.pool${pool}` : FILTERS_KEY
+  const poolLabel = channelPoolLabel(pool)
+  const [filters, setFilters] = useState<Filters>(() => readJSON<Filters>(filtersKey, { status: 'all', authType: 'all', model: '', search: '' }))
+  const [page, setPage] = useState(() => Math.max(1, Number(readJSON<{ page?: number }>(filtersKey, {}).page ?? 1)))
   const [pageSize, setPageSize] = useState(() => clampPageSize(localStorage.getItem(PAGE_SIZE_KEY) ?? 20))
   const [jumpPage, setJumpPage] = useState('')
   const [rows, setRows] = useState<Row[]>([])
@@ -90,6 +94,7 @@ export function ChannelsPage() {
   const [batchValues, setBatchValues] = useState({ priority: '0', cost_multiplier: '1', rpm_limit: '0', max_concurrency: '0', daily_cost_limit: '0', protocol_transform_mode: 'auto' })
   const [batchOptions, setBatchOptions] = useState(() => readJSON(BATCH_OPTIONS_KEY, { lowercase_models: false, strip_model_source_prefix: false }))
   const [batchRefresh, setBatchRefresh] = useState<BatchRefreshState | null>(null)
+  const [moveTarget, setMoveTarget] = useState(() => String(CHANNEL_POOLS.find((item) => item.value !== pool)?.value ?? 0))
   const [usageProgress, setUsageProgress] = useState<{ processed: number; total: number; succeeded: number; failed: number; done: boolean } | null>(null)
   const [csvProgress, setCsvProgress] = useState<{ state: 'pending' | 'success' | 'error'; text: string } | null>(null)
   const usageAbort = useRef<AbortController | null>(null)
@@ -102,7 +107,7 @@ export function ChannelsPage() {
   const totalPages = Math.max(1, Math.ceil(count / pageSize))
 
   // ---- 持久化 ----
-  useEffect(() => { localStorage.setItem(FILTERS_KEY, JSON.stringify({ ...filters, page })) }, [filters, page])
+  useEffect(() => { localStorage.setItem(filtersKey, JSON.stringify({ ...filters, page })) }, [filtersKey, filters, page])
   useEffect(() => { localStorage.setItem(PAGE_SIZE_KEY, String(pageSize)) }, [pageSize])
   useEffect(() => { localStorage.setItem(BATCH_OPTIONS_KEY, JSON.stringify(batchOptions)) }, [batchOptions])
 
@@ -111,7 +116,7 @@ export function ChannelsPage() {
     const seq = ++loadSeq.current
     setLoading(true)
     try {
-      const params: Record<string, unknown> = { limit: pageSize, offset: (page - 1) * pageSize, status: filters.status, auth_type: filters.authType, range: statsRange, sort: 'name', order: 'asc' }
+      const params: Record<string, unknown> = { limit: pageSize, offset: (page - 1) * pageSize, channel_pool: pool, status: filters.status, auth_type: filters.authType, range: statsRange, sort: 'name', order: 'asc' }
       // 命中筛选全集时用精确参数（channel_name / model），否则模糊（search / model_like）。
       if (filters.search.trim()) params[options.channel_names.includes(filters.search.trim()) ? 'channel_name' : 'search'] = filters.search.trim()
       if (filters.model.trim()) params[options.models.includes(filters.model.trim()) ? 'model' : 'model_like'] = filters.model.trim()
@@ -123,7 +128,7 @@ export function ChannelsPage() {
     } catch (cause) {
       if (seq === loadSeq.current) setNotice({ kind: 'error', text: errorMessage(cause, '渠道加载失败') })
     } finally { if (seq === loadSeq.current) setLoading(false) }
-  }, [pageSize, page, filters, statsRange, options, readBase])
+  }, [pageSize, page, filters, statsRange, options, readBase, pool])
 
   const loadStats = useCallback(async () => {
     try {
@@ -136,16 +141,20 @@ export function ChannelsPage() {
 
   useEffect(() => {
     if (!readOnly) void getJSON<{ value?: string }>('/admin/settings/channel_stats_range').then((setting) => { if (setting?.value) setStatsRange(setting.value) }).catch(() => undefined)
-    void getJSON<{ channel_names?: string[]; models?: string[] }>(`${readBase}/channels/filter-options`).then((data) => setOptions({ channel_names: data.channel_names ?? [], models: data.models ?? [] })).catch(() => undefined)
-  }, [readOnly, readBase])
+    void getJSON<{ channel_names?: string[]; models?: string[] }>(`${readBase}/channels/filter-options`, { channel_pool: pool }).then((data) => setOptions({ channel_names: data.channel_names ?? [], models: data.models ?? [] })).catch(() => undefined)
+  }, [readOnly, readBase, pool])
 
   // 深链：旧页链接 channels.html?id=N 被服务端 302 到 /web/channels?id=N（internal/app/static.go），
-  // 与旧页一致，按该渠道名预填精确筛选。
+  // 与旧页一致，按该渠道名预填精确筛选；渠道属于其他渠道组时跳到对应页面。
   useEffect(() => {
     const id = Number(new URLSearchParams(window.location.search).get('id'))
     if (readOnly || !Number.isInteger(id) || id <= 0) return
-    void getJSON<Channel>(`/admin/channels/${id}`).then((channel) => { if (channel?.name) setFilter({ search: channel.name }) }).catch(() => undefined)
-  }, [readOnly])
+    void getJSON<Channel>(`/admin/channels/${id}`).then((channel) => {
+      const target = CHANNEL_POOLS.find((item) => item.value === Number(channel?.channel_pool ?? 0))
+      if (target && target.value !== pool) { window.location.replace(`/web${target.path}?id=${id}`); return }
+      if (channel?.name) setFilter({ search: channel.name })
+    }).catch(() => undefined)
+  }, [readOnly, pool])
 
   useEffect(() => { void load() }, [load])
   useEffect(() => { void loadStats() }, [loadStats])
@@ -316,11 +325,12 @@ export function ChannelsPage() {
 
   // ---- 导入导出 ----
   const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-')
+  // 导入文件未声明渠道组的新渠道归入当前页面的渠道组；已有渠道保留原组。
   const importCSV = async (file: File | undefined) => {
     if (!file) return
     setCsvProgress({ state: 'pending', text: `正在导入 ${file.name}…` })
     try {
-      const result = await uploadJSON('/admin/channels/import', file) as { data?: Record<string, unknown> } & Record<string, unknown>
+      const result = await uploadJSON(`/admin/channels/import?channel_pool=${pool}`, file) as { data?: Record<string, unknown> } & Record<string, unknown>
       const summary = (result.data ?? result) as { created?: number; updated?: number; skipped?: number; errors?: string[] }
       const errors = summary.errors ?? []
       setCsvProgress({ state: errors.length ? 'error' : 'success', text: `导入完成：新增 ${Number(summary.created ?? 0)}，更新 ${Number(summary.updated ?? 0)}，跳过 ${Number(summary.skipped ?? 0)}${errors.length ? `；错误：${errors.slice(0, 3).join('；')}${errors.length > 3 ? ` 等 ${errors.length} 条` : ''}` : ''}` })
@@ -330,15 +340,21 @@ export function ChannelsPage() {
   const importJSONFile = async (file: File | undefined) => {
     if (!file) return
     try {
-      const result = await uploadJSON('/admin/channels/import.json', file) as { data?: Record<string, unknown> } & Record<string, unknown>
+      const result = await uploadJSON(`/admin/channels/import.json?channel_pool=${pool}`, file) as { data?: Record<string, unknown> } & Record<string, unknown>
       const summary = (result.data ?? result) as { created?: number; updated?: number }
       notify('success', `JSON 导入完成：新增 ${Number(summary.created ?? 0)}，更新 ${Number(summary.updated ?? 0)}`)
       await refresh()
     } catch (cause) { notify('error', errorMessage(cause, 'JSON 导入失败')) }
   }
+  // 未勾选时导出当前渠道组的全部渠道。
   const exportFile = async (kind: 'csv' | 'json', ids?: number[]) => {
-    try { await download(kind === 'csv' ? '/admin/channels/export' : '/admin/channels/export.json', `channels-${stamp()}.${kind}`, ids?.length ? { ids: ids.join(',') } : undefined) }
+    try { await download(kind === 'csv' ? '/admin/channels/export' : '/admin/channels/export.json', `channels-${pool ? `pool${pool}-` : ''}${stamp()}.${kind}`, ids?.length ? { ids: ids.join(',') } : { channel_pool: pool }) }
     catch (cause) { notify('error', errorMessage(cause, '导出失败')) }
+  }
+  const moveSelected = () => {
+    const target = Number(moveTarget)
+    if (!selected.length || target === pool) return
+    void runBatch(`移动到${channelPoolLabel(target)}`, () => batchPatch(selected, { channel_pool: target }))
   }
 
   // ---- 渲染辅助 ----
@@ -368,13 +384,18 @@ export function ChannelsPage() {
 
   return <>
     <header className="page-header">
-      <div><h1>渠道管理</h1><p className="muted">配置 API 渠道、优先级和模型支持（优先请求高优先级渠道，相同优先级按 Key 数量加权随机）</p></div>
+      <div><h1>{poolLabel}管理</h1><p className="muted">{pool === 0
+        ? '默认渠道组：未命中渠道路由规则的请求优先使用主渠道，无可用渠道时依次回退渠道1、渠道2。组内优先请求高优先级渠道，相同优先级按 Key 数量加权随机。'
+        : `附加渠道组：按「渠道路由」规则（模型、输入 Token、队列与会话粘性）分流到${poolLabel}。组内优先请求高优先级渠道，相同优先级按 Key 数量加权随机。`}</p></div>
       <div className="toolbar" style={{ marginBottom: 0 }}>
         <button className="btn" disabled={loading} onClick={() => void refresh()}>刷新</button>
         {!readOnly && <>
-          <button className="btn" onClick={() => setOAuthDialog('login')}>OAuth 登录</button>
-          <button className="btn" onClick={() => setOAuthDialog('import')}>导入凭证</button>
-          <button className="btn" onClick={() => setOAuthDialog('cleanup')}>清理凭证</button>
+          {/* OAuth 登录/导入创建的渠道归入主渠道，可在列表中勾选后移动到其他渠道组。 */}
+          {pool === 0 && <>
+            <button className="btn" onClick={() => setOAuthDialog('login')}>OAuth 登录</button>
+            <button className="btn" onClick={() => setOAuthDialog('import')}>导入凭证</button>
+            <button className="btn" onClick={() => setOAuthDialog('cleanup')}>清理凭证</button>
+          </>}
           <label className="btn">导入 CSV<input hidden type="file" accept=".csv,text/csv" onChange={(event) => { void importCSV(event.target.files?.[0]); event.target.value = '' }} /></label>
           <label className="btn">导入 JSON<input hidden type="file" accept=".json,application/json" onChange={(event) => { void importJSONFile(event.target.files?.[0]); event.target.value = '' }} /></label>
           <button className="btn" onClick={() => void exportFile('json')}>导出 JSON</button>
@@ -416,6 +437,8 @@ export function ChannelsPage() {
         <button className="btn" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen(!advancedOpen)}>高级 ▾</button>
         <button className="btn" onClick={() => void exportFile('csv', selected)}>导出 CSV</button>
         <button className="btn" onClick={() => void exportFile('json', selected)}>导出 JSON</button>
+        <SearchableSelect ariaLabel="移动到渠道组" className="combobox-inline" value={moveTarget} options={CHANNEL_POOLS.filter((item) => item.value !== pool).map((item) => ({ value: String(item.value), label: `移动到${item.label}` }))} onChange={setMoveTarget} />
+        <button className="btn" onClick={moveSelected}>移动</button>
         <button className="btn btn-danger" onClick={() => setDeleteTarget('batch')}>删除</button>
         <button className="btn" onClick={() => setSelected([])}>清空选择</button>
       </div>
@@ -549,7 +572,7 @@ export function ChannelsPage() {
     </div>
 
     {/* ---------------- 弹窗 ---------------- */}
-    <ChannelEditorDialog open={editor.open} editing={editor.duplicate ? null : editor.channel} duplicateOf={editor.duplicate ? editor.channel : null} createAuthType={editor.authType}
+    <ChannelEditorDialog open={editor.open} editing={editor.duplicate ? null : editor.channel} duplicateOf={editor.duplicate ? editor.channel : null} createAuthType={editor.authType} createPool={pool}
       onClose={() => setEditor({ open: false, channel: null, duplicate: false })}
       onSaved={() => { notify('success', '渠道已保存'); void refresh() }}
       onNotice={(value) => notify('info', '操作结果', value)}

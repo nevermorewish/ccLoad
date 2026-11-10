@@ -46,6 +46,8 @@ export type ChannelForm = {
   protocol_transform_mode?: string
   retry_other_keys_on_failure?: boolean
   same_channel_retries?: number
+  /** 渠道组：0=主渠道，1=渠道1，2=渠道2（internal/model/config.go:ChannelPoolCount） */
+  channel_pool?: number
   daily_cost_limit?: number
   scheduled_check_enabled?: boolean
   scheduled_check_model?: string
@@ -57,6 +59,15 @@ export type ChannelForm = {
   cooldown_detection_rules?: unknown
   management_account?: unknown
 }
+
+/** 渠道组与左侧菜单一一对应；渠道路由规则按组分流（internal/app/channel_pool_routing.go）。 */
+export const CHANNEL_POOLS = [
+  { value: 0, label: '主渠道', path: '/channels' },
+  { value: 1, label: '渠道1', path: '/channels-1' },
+  { value: 2, label: '渠道2', path: '/channels-2' },
+] as const
+
+export const channelPoolLabel = (pool: unknown) => CHANNEL_POOLS.find((item) => item.value === Number(pool ?? 0))?.label ?? `渠道组${String(pool)}`
 
 export const AUTH_TYPES = [
   { value: 'api_key', label: 'API Key' },
@@ -117,7 +128,7 @@ export const CREDENTIAL_RESOURCE: Record<string, string> = {
 export function emptyForm(): ChannelForm {
   return {
     name: '', auth_type: 'api_key', urls: [{ url: '' }], priority: 0, enabled: true,
-    models: [], api_keys: [], key_strategy: 'sequential', protocol_transform_mode: 'auto',
+    models: [], api_keys: [], key_strategy: 'sequential', protocol_transform_mode: 'auto', channel_pool: 0,
   }
 }
 
@@ -145,6 +156,7 @@ export function formFromEditor(data: ChannelEditorData, fallback: Channel): Chan
     protocol_transform_mode: String(raw.protocol_transform_mode ?? 'auto'),
     retry_other_keys_on_failure: Boolean(raw.retry_other_keys_on_failure),
     same_channel_retries: Number(raw.same_channel_retries ?? 0),
+    channel_pool: Number(raw.channel_pool ?? 0),
     daily_cost_limit: Number(raw.daily_cost_limit ?? 0),
     scheduled_check_enabled: Boolean(raw.scheduled_check_enabled),
     scheduled_check_model: String(raw.scheduled_check_model ?? ''),

@@ -26,7 +26,7 @@ func (s *SQLStore) ListConfigs(ctx context.Context) ([]*model.Config, error) {
 	query := `
 SELECT c.id, c.name, c.url, c.priority, c.sort_override, c.rpm_limit, c.max_concurrency, c.auth_type, COALESCE(c.oauth_credential, ''), c.websockets, c.oauth_quota_passthrough, c.protocol_transform_mode, c.enabled, 
 			       c.scheduled_check_enabled, c.scheduled_check_interval_minutes, c.scheduled_check_start_time, c.scheduled_check_model,
-			       c.cooldown_until, c.cooldown_duration_ms, c.daily_cost_limit, c.cost_multiplier, c.custom_request_rules, c.cooldown_detection_rules, c.proxy_url, c.available_time_start, c.available_time_end, c.retry_other_keys_on_failure, c.same_channel_retries,
+			       c.cooldown_until, c.cooldown_duration_ms, c.daily_cost_limit, c.cost_multiplier, c.custom_request_rules, c.cooldown_detection_rules, c.proxy_url, c.available_time_start, c.available_time_end, c.retry_other_keys_on_failure, c.same_channel_retries, c.channel_pool,
 			       SUM(CASE WHEN k.id IS NOT NULL AND k.disabled = 0 THEN 1 ELSE 0 END) as key_count,
 			       c.created_at, c.updated_at
 			FROM channels c
@@ -61,7 +61,7 @@ func (s *SQLStore) GetConfig(ctx context.Context, id int64) (*model.Config, erro
 	query := `
 SELECT c.id, c.name, c.url, c.priority, c.sort_override, c.rpm_limit, c.max_concurrency, c.auth_type, COALESCE(c.oauth_credential, ''), c.websockets, c.oauth_quota_passthrough, c.protocol_transform_mode, c.enabled, 
 			       c.scheduled_check_enabled, c.scheduled_check_interval_minutes, c.scheduled_check_start_time, c.scheduled_check_model,
-			       c.cooldown_until, c.cooldown_duration_ms, c.daily_cost_limit, c.cost_multiplier, c.custom_request_rules, c.cooldown_detection_rules, c.proxy_url, c.available_time_start, c.available_time_end, c.retry_other_keys_on_failure, c.same_channel_retries,
+			       c.cooldown_until, c.cooldown_duration_ms, c.daily_cost_limit, c.cost_multiplier, c.custom_request_rules, c.cooldown_detection_rules, c.proxy_url, c.available_time_start, c.available_time_end, c.retry_other_keys_on_failure, c.same_channel_retries, c.channel_pool,
 			       SUM(CASE WHEN k.id IS NOT NULL AND k.disabled = 0 THEN 1 ELSE 0 END) as key_count,
 			       c.created_at, c.updated_at
 			FROM channels c
@@ -110,7 +110,7 @@ func (s *SQLStore) enabledChannelsByModel(ctx context.Context, modelName string,
 		query = `
 SELECT c.id, c.name, c.url, c.priority, c.sort_override, c.rpm_limit, c.max_concurrency,
 		                   c.auth_type, COALESCE(c.oauth_credential, ''), c.websockets, c.oauth_quota_passthrough, c.protocol_transform_mode, c.enabled, c.scheduled_check_enabled, c.scheduled_check_interval_minutes, c.scheduled_check_start_time, c.scheduled_check_model,
-	                   c.cooldown_until, c.cooldown_duration_ms, c.daily_cost_limit, c.cost_multiplier, c.custom_request_rules, c.cooldown_detection_rules, c.proxy_url, c.available_time_start, c.available_time_end, c.retry_other_keys_on_failure, c.same_channel_retries,
+	                   c.cooldown_until, c.cooldown_duration_ms, c.daily_cost_limit, c.cost_multiplier, c.custom_request_rules, c.cooldown_detection_rules, c.proxy_url, c.available_time_start, c.available_time_end, c.retry_other_keys_on_failure, c.same_channel_retries, c.channel_pool,
 	                   SUM(CASE WHEN k.id IS NOT NULL AND k.disabled = 0 THEN 1 ELSE 0 END) as key_count,
 	                   c.created_at, c.updated_at
 	            FROM channels c
@@ -125,7 +125,7 @@ SELECT c.id, c.name, c.url, c.priority, c.sort_override, c.rpm_limit, c.max_conc
 		query = `
 SELECT c.id, c.name, c.url, c.priority, c.sort_override, c.rpm_limit, c.max_concurrency,
 		                   c.auth_type, COALESCE(c.oauth_credential, ''), c.websockets, c.oauth_quota_passthrough, c.protocol_transform_mode, c.enabled, c.scheduled_check_enabled, c.scheduled_check_interval_minutes, c.scheduled_check_start_time, c.scheduled_check_model,
-	                   c.cooldown_until, c.cooldown_duration_ms, c.daily_cost_limit, c.cost_multiplier, c.custom_request_rules, c.cooldown_detection_rules, c.proxy_url, c.available_time_start, c.available_time_end, c.retry_other_keys_on_failure, c.same_channel_retries,
+	                   c.cooldown_until, c.cooldown_duration_ms, c.daily_cost_limit, c.cost_multiplier, c.custom_request_rules, c.cooldown_detection_rules, c.proxy_url, c.available_time_start, c.available_time_end, c.retry_other_keys_on_failure, c.same_channel_retries, c.channel_pool,
 	                   SUM(CASE WHEN k.id IS NOT NULL AND k.disabled = 0 THEN 1 ELSE 0 END) as key_count,
 	                   c.created_at, c.updated_at
 	            FROM channels c
@@ -236,18 +236,18 @@ func (s *SQLStore) createConfig(ctx context.Context, c *model.Config, keys []*mo
 			// 插入渠道记录（数据库生成自增 id）
 			if s.IsPostgres() {
 				err := s.queryRowTx(ctx, tx, `
-INSERT INTO channels(name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, created_at, updated_at)
-					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO channels(name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, channel_pool, created_at, updated_at)
+					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 					RETURNING id
-					`, c.Name, c.URLs, c.Priority, c.SortOverride, c.RPMLimit, c.MaxConcurrency, authType, c.OAuthCredential, c.Websockets, c.OAuthQuotaPassthrough, protocolTransformMode, c.Enabled, c.ScheduledCheckEnabled, c.ScheduledCheckIntervalMinutes, c.ScheduledCheckStartTime, c.ScheduledCheckModel, c.DailyCostLimit, normalizeCostMultiplier(c.CostMultiplier), customRules, cooldownDetectionRules, c.ProxyURL, c.AvailableTimeStart, c.AvailableTimeEnd, c.RetryOtherKeysOnFailure, c.SameChannelRetries, nowUnix, nowUnix).Scan(&id)
+					`, c.Name, c.URLs, c.Priority, c.SortOverride, c.RPMLimit, c.MaxConcurrency, authType, c.OAuthCredential, c.Websockets, c.OAuthQuotaPassthrough, protocolTransformMode, c.Enabled, c.ScheduledCheckEnabled, c.ScheduledCheckIntervalMinutes, c.ScheduledCheckStartTime, c.ScheduledCheckModel, c.DailyCostLimit, normalizeCostMultiplier(c.CostMultiplier), customRules, cooldownDetectionRules, c.ProxyURL, c.AvailableTimeStart, c.AvailableTimeEnd, c.RetryOtherKeysOnFailure, c.SameChannelRetries, c.ChannelPool, nowUnix, nowUnix).Scan(&id)
 				if err != nil {
 					return err
 				}
 			} else {
 				res, err := s.execTx(ctx, tx, `
-INSERT INTO channels(name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, created_at, updated_at)
-					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-					`, c.Name, c.URLs, c.Priority, c.SortOverride, c.RPMLimit, c.MaxConcurrency, authType, c.OAuthCredential, c.Websockets, c.OAuthQuotaPassthrough, protocolTransformMode, c.Enabled, c.ScheduledCheckEnabled, c.ScheduledCheckIntervalMinutes, c.ScheduledCheckStartTime, c.ScheduledCheckModel, c.DailyCostLimit, normalizeCostMultiplier(c.CostMultiplier), customRules, cooldownDetectionRules, c.ProxyURL, c.AvailableTimeStart, c.AvailableTimeEnd, c.RetryOtherKeysOnFailure, c.SameChannelRetries, nowUnix, nowUnix)
+INSERT INTO channels(name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, channel_pool, created_at, updated_at)
+					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					`, c.Name, c.URLs, c.Priority, c.SortOverride, c.RPMLimit, c.MaxConcurrency, authType, c.OAuthCredential, c.Websockets, c.OAuthQuotaPassthrough, protocolTransformMode, c.Enabled, c.ScheduledCheckEnabled, c.ScheduledCheckIntervalMinutes, c.ScheduledCheckStartTime, c.ScheduledCheckModel, c.DailyCostLimit, normalizeCostMultiplier(c.CostMultiplier), customRules, cooldownDetectionRules, c.ProxyURL, c.AvailableTimeStart, c.AvailableTimeEnd, c.RetryOtherKeysOnFailure, c.SameChannelRetries, c.ChannelPool, nowUnix, nowUnix)
 				if err != nil {
 					return err
 				}
@@ -260,16 +260,16 @@ INSERT INTO channels(name, url, priority, sort_override, rpm_limit, max_concurre
 			// 显式主键：用于混合存储同步/恢复，保证两端主键一致
 			if s.supportsONConflict() {
 				_, err := s.execTx(ctx, tx, `
-INSERT INTO channels(id, name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, created_at, updated_at)
-					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-					`, id, c.Name, c.URLs, c.Priority, c.SortOverride, c.RPMLimit, c.MaxConcurrency, authType, c.OAuthCredential, c.Websockets, c.OAuthQuotaPassthrough, protocolTransformMode, c.Enabled, c.ScheduledCheckEnabled, c.ScheduledCheckIntervalMinutes, c.ScheduledCheckStartTime, c.ScheduledCheckModel, c.DailyCostLimit, normalizeCostMultiplier(c.CostMultiplier), customRules, cooldownDetectionRules, c.ProxyURL, c.AvailableTimeStart, c.AvailableTimeEnd, c.RetryOtherKeysOnFailure, c.SameChannelRetries, nowUnix, nowUnix)
+INSERT INTO channels(id, name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, channel_pool, created_at, updated_at)
+					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					`, id, c.Name, c.URLs, c.Priority, c.SortOverride, c.RPMLimit, c.MaxConcurrency, authType, c.OAuthCredential, c.Websockets, c.OAuthQuotaPassthrough, protocolTransformMode, c.Enabled, c.ScheduledCheckEnabled, c.ScheduledCheckIntervalMinutes, c.ScheduledCheckStartTime, c.ScheduledCheckModel, c.DailyCostLimit, normalizeCostMultiplier(c.CostMultiplier), customRules, cooldownDetectionRules, c.ProxyURL, c.AvailableTimeStart, c.AvailableTimeEnd, c.RetryOtherKeysOnFailure, c.SameChannelRetries, c.ChannelPool, nowUnix, nowUnix)
 				if err != nil {
 					return err
 				}
 			} else {
 				_, err := s.execTx(ctx, tx, `
-INSERT INTO channels(id, name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, created_at, updated_at)
-					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO channels(id, name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, channel_pool, created_at, updated_at)
+					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 					ON DUPLICATE KEY UPDATE
 						name = VALUES(name),
 						url = VALUES(url),
@@ -294,8 +294,9 @@ INSERT INTO channels(id, name, url, priority, sort_override, rpm_limit, max_conc
 						proxy_url = VALUES(proxy_url),
 						retry_other_keys_on_failure = VALUES(retry_other_keys_on_failure),
 						same_channel_retries = VALUES(same_channel_retries),
+						channel_pool = VALUES(channel_pool),
 						updated_at = VALUES(updated_at)
-`, id, c.Name, c.URLs, c.Priority, c.SortOverride, c.RPMLimit, c.MaxConcurrency, authType, c.OAuthCredential, c.Websockets, c.OAuthQuotaPassthrough, protocolTransformMode, c.Enabled, c.ScheduledCheckEnabled, c.ScheduledCheckIntervalMinutes, c.ScheduledCheckStartTime, c.ScheduledCheckModel, c.DailyCostLimit, normalizeCostMultiplier(c.CostMultiplier), customRules, cooldownDetectionRules, c.ProxyURL, c.AvailableTimeStart, c.AvailableTimeEnd, c.RetryOtherKeysOnFailure, c.SameChannelRetries, nowUnix, nowUnix)
+`, id, c.Name, c.URLs, c.Priority, c.SortOverride, c.RPMLimit, c.MaxConcurrency, authType, c.OAuthCredential, c.Websockets, c.OAuthQuotaPassthrough, protocolTransformMode, c.Enabled, c.ScheduledCheckEnabled, c.ScheduledCheckIntervalMinutes, c.ScheduledCheckStartTime, c.ScheduledCheckModel, c.DailyCostLimit, normalizeCostMultiplier(c.CostMultiplier), customRules, cooldownDetectionRules, c.ProxyURL, c.AvailableTimeStart, c.AvailableTimeEnd, c.RetryOtherKeysOnFailure, c.SameChannelRetries, c.ChannelPool, nowUnix, nowUnix)
 				if err != nil {
 					return err
 				}
@@ -409,9 +410,9 @@ func (s *SQLStore) updateConfig(ctx context.Context, id int64, upd *model.Config
 		// 更新渠道记录
 		_, err := s.execTx(ctx, tx, `
 			UPDATE channels
-SET name=?, url=?, priority=?, sort_override=?, rpm_limit=?, max_concurrency=?, websockets=?, oauth_quota_passthrough=?, protocol_transform_mode=?, enabled=?, scheduled_check_enabled = ?, scheduled_check_interval_minutes = ?, scheduled_check_start_time = ?, scheduled_check_model=?, daily_cost_limit=?, cost_multiplier=?, custom_request_rules=?, cooldown_detection_rules=?, proxy_url=?, available_time_start=?, available_time_end=?, retry_other_keys_on_failure=?, same_channel_retries=?, updated_at=?
+SET name=?, url=?, priority=?, sort_override=?, rpm_limit=?, max_concurrency=?, websockets=?, oauth_quota_passthrough=?, protocol_transform_mode=?, enabled=?, scheduled_check_enabled = ?, scheduled_check_interval_minutes = ?, scheduled_check_start_time = ?, scheduled_check_model=?, daily_cost_limit=?, cost_multiplier=?, custom_request_rules=?, cooldown_detection_rules=?, proxy_url=?, available_time_start=?, available_time_end=?, retry_other_keys_on_failure=?, same_channel_retries=?, channel_pool=?, updated_at=?
 			WHERE id=?
-			`, name, urls, upd.Priority, upd.SortOverride, upd.RPMLimit, upd.MaxConcurrency, upd.Websockets, upd.OAuthQuotaPassthrough, protocolTransformMode, upd.Enabled, upd.ScheduledCheckEnabled, upd.ScheduledCheckIntervalMinutes, upd.ScheduledCheckStartTime, upd.ScheduledCheckModel, upd.DailyCostLimit, normalizeCostMultiplier(upd.CostMultiplier), customRules, cooldownDetectionRules, upd.ProxyURL, upd.AvailableTimeStart, upd.AvailableTimeEnd, upd.RetryOtherKeysOnFailure, upd.SameChannelRetries, updatedAtUnix, id)
+			`, name, urls, upd.Priority, upd.SortOverride, upd.RPMLimit, upd.MaxConcurrency, upd.Websockets, upd.OAuthQuotaPassthrough, protocolTransformMode, upd.Enabled, upd.ScheduledCheckEnabled, upd.ScheduledCheckIntervalMinutes, upd.ScheduledCheckStartTime, upd.ScheduledCheckModel, upd.DailyCostLimit, normalizeCostMultiplier(upd.CostMultiplier), customRules, cooldownDetectionRules, upd.ProxyURL, upd.AvailableTimeStart, upd.AvailableTimeEnd, upd.RetryOtherKeysOnFailure, upd.SameChannelRetries, upd.ChannelPool, updatedAtUnix, id)
 		if err != nil {
 			return err
 		}
@@ -644,11 +645,11 @@ func (s *SQLStore) syncConfigReplicaTx(ctx context.Context, tx *sql.Tx, cfg *mod
 	switch {
 	case errors.Is(loadErr, sql.ErrNoRows):
 		if _, insertErr := s.execTx(ctx, tx, `
-INSERT INTO channels(id, name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, cooldown_until, cooldown_duration_ms, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, created_at, updated_at)
-					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO channels(id, name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, cooldown_until, cooldown_duration_ms, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, channel_pool, created_at, updated_at)
+					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				`, cfg.ID, name, urls, cfg.Priority, cfg.SortOverride, cfg.RPMLimit, cfg.MaxConcurrency, authType, cfg.OAuthCredential, cfg.Websockets, cfg.OAuthQuotaPassthrough, protocolTransformMode, cfg.Enabled, cfg.ScheduledCheckEnabled, cfg.ScheduledCheckIntervalMinutes, cfg.ScheduledCheckStartTime, cfg.ScheduledCheckModel,
 			cfg.CooldownUntil, cfg.CooldownDurationMs, cfg.DailyCostLimit, normalizeCostMultiplier(cfg.CostMultiplier),
-			customRules, cooldownDetectionRules, cfg.ProxyURL, cfg.AvailableTimeStart, cfg.AvailableTimeEnd, cfg.RetryOtherKeysOnFailure, cfg.SameChannelRetries, nowUnix, nowUnix); insertErr != nil {
+			customRules, cooldownDetectionRules, cfg.ProxyURL, cfg.AvailableTimeStart, cfg.AvailableTimeEnd, cfg.RetryOtherKeysOnFailure, cfg.SameChannelRetries, cfg.ChannelPool, nowUnix, nowUnix); insertErr != nil {
 			return insertErr
 		}
 	case loadErr != nil:
@@ -658,11 +659,11 @@ INSERT INTO channels(id, name, url, priority, sort_override, rpm_limit, max_conc
 			return err
 		}
 		if _, insertErr := s.execTx(ctx, tx, `
-INSERT INTO channels(id, name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, cooldown_until, cooldown_duration_ms, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, created_at, updated_at)
-					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO channels(id, name, url, priority, sort_override, rpm_limit, max_concurrency, auth_type, oauth_credential, websockets, oauth_quota_passthrough, protocol_transform_mode, enabled, scheduled_check_enabled, scheduled_check_interval_minutes, scheduled_check_start_time, scheduled_check_model, cooldown_until, cooldown_duration_ms, daily_cost_limit, cost_multiplier, custom_request_rules, cooldown_detection_rules, proxy_url, available_time_start, available_time_end, retry_other_keys_on_failure, same_channel_retries, channel_pool, created_at, updated_at)
+					VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				`, cfg.ID, name, urls, cfg.Priority, cfg.SortOverride, cfg.RPMLimit, cfg.MaxConcurrency, authType, cfg.OAuthCredential, cfg.Websockets, cfg.OAuthQuotaPassthrough, protocolTransformMode, cfg.Enabled, cfg.ScheduledCheckEnabled, cfg.ScheduledCheckIntervalMinutes, cfg.ScheduledCheckStartTime, cfg.ScheduledCheckModel,
 			cfg.CooldownUntil, cfg.CooldownDurationMs, cfg.DailyCostLimit, normalizeCostMultiplier(cfg.CostMultiplier),
-			customRules, cooldownDetectionRules, cfg.ProxyURL, cfg.AvailableTimeStart, cfg.AvailableTimeEnd, cfg.RetryOtherKeysOnFailure, cfg.SameChannelRetries, nowUnix, nowUnix); insertErr != nil {
+			customRules, cooldownDetectionRules, cfg.ProxyURL, cfg.AvailableTimeStart, cfg.AvailableTimeEnd, cfg.RetryOtherKeysOnFailure, cfg.SameChannelRetries, cfg.ChannelPool, nowUnix, nowUnix); insertErr != nil {
 			return insertErr
 		}
 	default:
@@ -671,12 +672,12 @@ INSERT INTO channels(id, name, url, priority, sort_override, rpm_limit, max_conc
 name = ?, url = ?, priority = ?, sort_override = ?, rpm_limit = ?, max_concurrency = ?, oauth_credential = ?, websockets = ?, oauth_quota_passthrough = ?, protocol_transform_mode = ?, enabled = ?, scheduled_check_enabled = ?, scheduled_check_interval_minutes = ?, scheduled_check_start_time = ?, 
 					scheduled_check_model = ?, cooldown_until = ?, cooldown_duration_ms = ?, daily_cost_limit = ?,
 					cost_multiplier = ?, custom_request_rules = ?, cooldown_detection_rules = ?, proxy_url = ?, available_time_start = ?, available_time_end = ?,
-					retry_other_keys_on_failure = ?, same_channel_retries = ?, updated_at = ?
+					retry_other_keys_on_failure = ?, same_channel_retries = ?, channel_pool = ?, updated_at = ?
 				WHERE id = ?
 `, name, urls, cfg.Priority, cfg.SortOverride, cfg.RPMLimit, cfg.MaxConcurrency, cfg.OAuthCredential, cfg.Websockets, cfg.OAuthQuotaPassthrough, protocolTransformMode, cfg.Enabled, cfg.ScheduledCheckEnabled, cfg.ScheduledCheckIntervalMinutes, cfg.ScheduledCheckStartTime,
 			cfg.ScheduledCheckModel, cfg.CooldownUntil, cfg.CooldownDurationMs, cfg.DailyCostLimit,
 			normalizeCostMultiplier(cfg.CostMultiplier), customRules, cooldownDetectionRules, cfg.ProxyURL, cfg.AvailableTimeStart, cfg.AvailableTimeEnd,
-			cfg.RetryOtherKeysOnFailure, cfg.SameChannelRetries, nowUnix, cfg.ID); updateErr != nil {
+			cfg.RetryOtherKeysOnFailure, cfg.SameChannelRetries, cfg.ChannelPool, nowUnix, cfg.ID); updateErr != nil {
 			return updateErr
 		}
 	}
@@ -915,6 +916,10 @@ func (s *SQLStore) BatchPatchConfigs(ctx context.Context, channelIDs []int64, pa
 			if patch.ProtocolTransformMode != nil {
 				nextProtocolMode = *patch.ProtocolTransformMode
 			}
+			nextChannelPool := state.channelPool
+			if patch.ChannelPool != nil {
+				nextChannelPool = *patch.ChannelPool
+			}
 			nextScheduledCheckModel := state.scheduledCheckModel
 			nextModels := state.modelEntries
 			modelsChanged := false
@@ -935,6 +940,7 @@ func (s *SQLStore) BatchPatchConfigs(ctx context.Context, channelIDs []int64, pa
 				state.rpmLimit != nextRPMLimit ||
 				state.maxConcurrency != nextMaxConcurrency ||
 				state.protocolTransformMode != nextProtocolMode ||
+				state.channelPool != nextChannelPool ||
 				state.scheduledCheckModel != nextScheduledCheckModel
 			changed := channelChanged || keyMultiplierChanged || modelsChanged
 			if !changed {
@@ -947,10 +953,10 @@ func (s *SQLStore) BatchPatchConfigs(ctx context.Context, channelIDs []int64, pa
 				if _, err := s.execTx(ctx, tx, `
 					UPDATE channels
 					SET priority = ?, cost_multiplier = ?, daily_cost_limit = ?, rpm_limit = ?, max_concurrency = ?,
-						protocol_transform_mode = ?, scheduled_check_model = ?, updated_at = ?
+						protocol_transform_mode = ?, channel_pool = ?, scheduled_check_model = ?, updated_at = ?
 					WHERE id = ?
 				`, nextPriority, nextCostMultiplier, nextDailyCostLimit, nextRPMLimit, nextMaxConcurrency,
-					nextProtocolMode, nextScheduledCheckModel, updatedAtUnix, channelID); err != nil {
+					nextProtocolMode, nextChannelPool, nextScheduledCheckModel, updatedAtUnix, channelID); err != nil {
 					return fmt.Errorf("patch channel %d: %w", channelID, err)
 				}
 			}
@@ -1054,6 +1060,7 @@ type batchConfigPatchState struct {
 	protocolTransformMode string
 	scheduledCheckModel   string
 	authType              string
+	channelPool           int
 	modelEntries          []model.ModelEntry
 	keyCostMultipliers    []float64
 }
@@ -1104,7 +1111,7 @@ func (s *SQLStore) loadBatchConfigPatchStates(ctx context.Context, tx *sql.Tx, c
 
 	//nolint:gosec // placeholders are generated internally and contain only "?".
 	query := `SELECT id, priority, cost_multiplier, daily_cost_limit, rpm_limit, max_concurrency,
-		protocol_transform_mode, scheduled_check_model, auth_type
+		protocol_transform_mode, scheduled_check_model, auth_type, channel_pool
 		FROM channels WHERE id IN (` + strings.Join(placeholders, ",") + `) ORDER BY id`
 	if s.supportsRowLock() {
 		query += ` FOR UPDATE`
@@ -1119,7 +1126,7 @@ func (s *SQLStore) loadBatchConfigPatchStates(ctx context.Context, tx *sql.Tx, c
 		state := &batchConfigPatchState{}
 		if err := rows.Scan(
 			&channelID, &state.priority, &state.costMultiplier, &state.dailyCostLimit, &state.rpmLimit, &state.maxConcurrency,
-			&state.protocolTransformMode, &state.scheduledCheckModel, &state.authType,
+			&state.protocolTransformMode, &state.scheduledCheckModel, &state.authType, &state.channelPool,
 		); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("scan channel for batch patch: %w", err)
@@ -1624,7 +1631,7 @@ SELECT c.id, c.name, c.url, c.priority, c.sort_override, c.rpm_limit, c.max_conc
 		       c.protocol_transform_mode, c.enabled, c.scheduled_check_enabled, c.scheduled_check_interval_minutes, c.scheduled_check_start_time,
 		       c.scheduled_check_model, c.cooldown_until, c.cooldown_duration_ms,
 		       c.daily_cost_limit, c.cost_multiplier, c.custom_request_rules,
-		       c.cooldown_detection_rules, c.proxy_url, c.available_time_start, c.available_time_end, c.retry_other_keys_on_failure, c.same_channel_retries,
+		       c.cooldown_detection_rules, c.proxy_url, c.available_time_start, c.available_time_end, c.retry_other_keys_on_failure, c.same_channel_retries, c.channel_pool,
 		       0 AS key_count, c.created_at, c.updated_at
 		FROM channels c WHERE c.id = ?`
 	if s.supportsRowLock() {

@@ -774,6 +774,13 @@ func ensureChannelsSameChannelRetries(ctx context.Context, db *sql.DB, dialect D
 		"INTEGER NOT NULL DEFAULT 0")
 }
 
+// ensureChannelsChannelPool 确保channels表有channel_pool字段（0=主渠道；存量渠道全部归入主渠道）。
+func ensureChannelsChannelPool(ctx context.Context, db *sql.DB, dialect Dialect) error {
+	return ensureColumn(ctx, db, dialect, "channels", "channel_pool",
+		"INT NOT NULL DEFAULT 0",
+		"INTEGER NOT NULL DEFAULT 0")
+}
+
 func ensureChannelsWebsockets(ctx context.Context, db *sql.DB, dialect Dialect) error {
 	return ensureColumn(ctx, db, dialect, "channels", "websockets",
 		"TINYINT NOT NULL DEFAULT 0",

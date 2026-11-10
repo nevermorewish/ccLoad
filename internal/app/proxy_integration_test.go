@@ -61,6 +61,7 @@ type testChannel struct {
 	authType                string
 	oauthCredential         string
 	priority                int
+	channelPool             int
 }
 
 // proxyTestEnv 集成测试环境
@@ -907,6 +908,7 @@ func setupProxyTestEnvWithSettings(
 			RetryOtherKeysOnFailure: ch.retryOtherKeysOnFailure,
 			SameChannelRetries:      ch.sameChannelRetries,
 			Priority:                priority,
+			ChannelPool:             ch.channelPool,
 			Enabled:                 true,
 			ModelEntries:            modelEntries,
 		}

@@ -228,25 +228,22 @@ func estimateTextTokens(text string) int {
 		return 0
 	}
 
-	// 转换为rune数组以正确计算Unicode字符数
-	runes := []rune(text)
-	runeCount := len(runes)
+	// 按 rune 计数（与 []rune 转换结果一致），不复制字符串：渠道路由会对整段请求体逐字段估算。
+	// 检测中文字符比例（优化：只采样前500字符）
+	runeCount := 0
+	chineseChars := 0
+	for _, r := range text {
+		if runeCount < 500 && r >= 0x4E00 && r <= 0x9FFF {
+			// 中文字符范围（CJK统一汉字）
+			chineseChars++
+		}
+		runeCount++
+	}
 
 	if runeCount == 0 {
 		return 0
 	}
-
-	// 检测中文字符比例（优化：只采样前500字符）
 	sampleSize := min(runeCount, 500)
-
-	chineseChars := 0
-	for i := range sampleSize {
-		r := runes[i]
-		// 中文字符范围（CJK统一汉字）
-		if r >= 0x4E00 && r <= 0x9FFF {
-			chineseChars++
-		}
-	}
 
 	// 计算中文比例
 	chineseRatio := float64(chineseChars) / float64(sampleSize)

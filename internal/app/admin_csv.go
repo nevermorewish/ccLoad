@@ -102,7 +102,7 @@ func (s *Server) HandleExportChannelsCSV(c *gin.Context) {
 	writer := csv.NewWriter(buf)
 	defer writer.Flush()
 
-	header := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "api_key_model_scope_auto", "urls", "priority", "sort_override", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "oauth_quota_passthrough", "scheduled_check_interval_minutes", "scheduled_check_start_time", "same_channel_retries"}
+	header := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "api_key_model_scope_auto", "urls", "priority", "sort_override", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "oauth_quota_passthrough", "scheduled_check_interval_minutes", "scheduled_check_start_time", "same_channel_retries", "channel_pool"}
 	if err := writer.Write(header); err != nil {
 		RespondError(c, http.StatusInternalServerError, err)
 		return
@@ -236,6 +236,7 @@ func (s *Server) HandleExportChannelsCSV(c *gin.Context) {
 			strconv.Itoa(cfg.ScheduledCheckIntervalMinutes),
 			cfg.ScheduledCheckStartTime,
 			strconv.Itoa(cfg.SameChannelRetries),
+			strconv.Itoa(cfg.ChannelPool),
 		}
 		if err := writer.Write(record); err != nil {
 			RespondError(c, http.StatusInternalServerError, err)
@@ -258,10 +259,21 @@ func (s *Server) HandleExportChannelsCSV(c *gin.Context) {
 
 // HandleImportChannelsCSV 导入渠道CSV
 // POST /admin/channels/import
+// channel_pool 查询参数指定新渠道在未声明渠道组时归入的组（默认主渠道）。
 func (s *Server) HandleImportChannelsCSV(c *gin.Context) {
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		RespondErrorMsg(c, http.StatusBadRequest, "缺少上传文件")
+		return
+	}
+	defaultPool, err := parseImportChannelPool(c)
+	if err != nil {
+		RespondErrorMsg(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	existingPools, err := s.existingChannelPools(c.Request.Context())
+	if err != nil {
+		RespondError(c, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -410,6 +422,13 @@ func (s *Server) HandleImportChannelsCSV(c *gin.Context) {
 			summary.Skipped++
 			continue
 		}
+		pool, poolErr := importedCSVChannelPool(record, columnIndex, existingPools, channel.Config.Name, defaultPool)
+		if poolErr != nil {
+			summary.Errors = append(summary.Errors, fmt.Sprintf("第%d行 %v", lineNo, poolErr))
+			summary.Skipped++
+			continue
+		}
+		channel.Config.ChannelPool = pool
 
 		// 收集有效记录
 		validChannels = append(validChannels, channel)
@@ -1434,6 +1453,57 @@ func oauthUsageCredentialRejected(err error) bool {
 // ==================== CSV辅助函数 ====================
 
 // buildCSVColumnIndex 构建CSV列索引映射
+// parseImportChannelPool 读取导入接口的 channel_pool 查询参数：导入文件未声明渠道组的新渠道归入该组。
+func parseImportChannelPool(c *gin.Context) (int, error) {
+	raw := strings.TrimSpace(c.Query("channel_pool"))
+	if raw == "" {
+		return model.ChannelPoolMain, nil
+	}
+	pool, err := strconv.Atoi(raw)
+	if err != nil || !model.ValidChannelPool(pool) {
+		return 0, fmt.Errorf("invalid channel_pool %q", raw)
+	}
+	return pool, nil
+}
+
+// existingChannelPools 按名称返回现有渠道的渠道组；导入文件未声明渠道组时保留现有归属。
+func (s *Server) existingChannelPools(ctx context.Context) (map[string]int, error) {
+	cfgs, err := s.store.ListConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pools := make(map[string]int, len(cfgs))
+	for _, cfg := range cfgs {
+		pools[cfg.Name] = cfg.ChannelPool
+	}
+	return pools, nil
+}
+
+// importedChannelPool 解析导入记录的渠道组；未声明（缺列或空值）时现有渠道保留原组，新渠道归入默认组。
+func importedChannelPool(raw string, declared bool, existing map[string]int, name string, defaultPool int) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if !declared || raw == "" {
+		if pool, ok := existing[name]; ok {
+			return pool, nil
+		}
+		return defaultPool, nil
+	}
+	pool, err := strconv.Atoi(raw)
+	if err != nil || !model.ValidChannelPool(pool) {
+		return 0, fmt.Errorf("channel_pool 必须为 %d–%d 的整数: %s", model.ChannelPoolMain, model.ChannelPoolCount-1, raw)
+	}
+	return pool, nil
+}
+
+func importedCSVChannelPool(record []string, columnIndex map[string]int, existing map[string]int, name string, defaultPool int) (int, error) {
+	index, declared := columnIndex["channel_pool"]
+	raw := ""
+	if declared && index < len(record) {
+		raw = record[index]
+	}
+	return importedChannelPool(raw, declared, existing, name, defaultPool)
+}
+
 func buildCSVColumnIndex(header []string) map[string]int {
 	index := make(map[string]int, len(header))
 	for i, col := range header {

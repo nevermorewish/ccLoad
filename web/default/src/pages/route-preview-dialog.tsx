@@ -3,11 +3,12 @@ import { Dialog } from '../components/dialog'
 import { SearchableSelect } from '../components/searchable-select'
 import { getJSON, postJSON } from '../lib/api'
 import type { Channel } from '../types'
+import { channelPoolLabel } from './channels/api'
 import { channelModelNames } from './reasoning-settings-dialog'
 
 const protocols = [{ value: 'anthropic', label: 'Anthropic Messages' }, { value: 'codex', label: 'Codex Responses' }, { value: 'openai', label: 'OpenAI Chat' }, { value: 'gemini', label: 'Gemini' }]
 type Token = { id: number; description?: string; is_active: boolean; expires_at?: number }
-type Candidate = { id: number; name: string; priority: number; effective_priority: number; available_key_count: number; priority_group: number; cooldown_fallback: boolean; same_tier_rotation: boolean }
+type Candidate = { id: number; name: string; channel_pool?: number; priority: number; effective_priority: number; available_key_count: number; priority_group: number; cooldown_fallback: boolean; same_tier_rotation: boolean }
 type Excluded = { id: number; name: string; priority: number; reason: string; until?: string }
 type Preview = { model: string; client_protocol: string; model_denied: boolean; candidates: Candidate[]; excluded: Excluded[]; limitations: string[] }
 const reasons: Record<string, string> = {
@@ -15,6 +16,7 @@ const reasons: Record<string, string> = {
 }
 const limitations: Record<string, string> = {
   session_affinity: '会话粘性', execution_session_pinning: '执行会话绑定', channel_header: '请求头指定渠道', antigravity_credits: 'Credits 追加候选', key_rotation: 'Key 轮换', model_row_rotation: '模型行轮换', live_rpm_concurrency: '实时 RPM 与并发占用', protocol_capabilities: '协议能力与请求转换', token_budget: '令牌费用限额',
+  channel_pool_routing: '渠道路由分流（渠道组顺序、Token 档位、队列与会话粘性，可在「渠道路由」页模拟）',
 }
 
 export function buildRoutePreviewPayload(model: string, protocol: string, token: string, multimodal: boolean) {
@@ -69,7 +71,7 @@ export function RoutePreviewDialog({ open, channels, onClose, onEditChannel }: {
     {result && <>
       <p>实际路由模型：<strong>{result.model}</strong>{result.model_denied && <span className="error-text"> · 该令牌不允许使用此模型</span>}</p>
       <div className="table-wrap"><table><thead><tr><th>渠道</th><th>优先级（有效 / 配置）</th><th>可用 Key</th><th>状态 / 原因</th><th>冷却截止</th></tr></thead><tbody>
-        {result.candidates.map((entry) => <tr key={entry.id}><td><button className="link-button" onClick={() => onEditChannel(entry)}>{entry.name}</button></td><td>{entry.effective_priority} / {entry.priority}<span className="table-note">同档分组 {entry.priority_group}</span></td><td>{entry.available_key_count}</td><td>{entry.cooldown_fallback ? '全冷却兜底候选' : '候选'}{entry.same_tier_rotation ? ' · 同档轮换' : ''}</td><td>—</td></tr>)}
+        {result.candidates.map((entry) => <tr key={entry.id}><td><button className="link-button" onClick={() => onEditChannel(entry)}>{entry.name}</button> <span className="badge badge-muted">{channelPoolLabel(entry.channel_pool)}</span></td><td>{entry.effective_priority} / {entry.priority}<span className="table-note">同档分组 {entry.priority_group}</span></td><td>{entry.available_key_count}</td><td>{entry.cooldown_fallback ? '全冷却兜底候选' : '候选'}{entry.same_tier_rotation ? ' · 同档轮换' : ''}</td><td>—</td></tr>)}
         {result.excluded.map((entry) => <tr key={entry.id}><td><button className="link-button" onClick={() => onEditChannel(entry)}>{entry.name}</button></td><td>— / {entry.priority}</td><td>—</td><td>已排除 · {reasons[entry.reason] ?? entry.reason}</td><td>{entry.until ? new Date(entry.until).toLocaleString() : '—'}</td></tr>)}
         {!result.candidates.length && !result.excluded.length && <tr><td colSpan={5} className="muted">{result.model_denied ? '模型授权拒绝，未选择渠道' : '没有匹配的渠道'}</td></tr>}
       </tbody></table></div>

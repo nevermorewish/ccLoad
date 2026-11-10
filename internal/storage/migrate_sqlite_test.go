@@ -2610,6 +2610,48 @@ func TestMigrateSQLiteOAuthQuotaPassthroughDefault(t *testing.T) {
 	}
 }
 
+// 存量库升级：channels 缺少 channel_pool 时补列，旧渠道全部归入主渠道；渠道路由设置以空规则播种。
+func TestMigrateSQLiteChannelPoolDefault(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "pool.db")
+	store, err := createSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := store.CreateConfig(ctx, &model.Config{Name: "legacy", URLs: model.ChannelURLs{{URL: "https://example.com"}}, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ExecContext(ctx, "ALTER TABLE channels DROP COLUMN channel_pool"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ExecContext(ctx, "DELETE FROM system_settings WHERE key = 'channel_route_rules'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = createSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	got, err := store.GetConfig(ctx, cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ChannelPool != model.ChannelPoolMain {
+		t.Fatalf("legacy channel pool = %d, want main pool", got.ChannelPool)
+	}
+	setting, err := store.GetSetting(ctx, "channel_route_rules")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setting.Value != "{}" || setting.ValueType != "json" {
+		t.Fatalf("channel_route_rules seed = %q (%s)", setting.Value, setting.ValueType)
+	}
+}
+
 func TestReasoningDecisionMigrationAndRoundTripSQLite(t *testing.T) {
 	db := openTestDB(t)
 	if err := migrate(context.Background(), db, DialectSQLite); err != nil {

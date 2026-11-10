@@ -375,6 +375,7 @@ type proxyRequestContext struct {
 	routingSession          *responsesExecutionSession // 当前 Responses execution session 的首选渠道
 	sessionAffinityKey      string                     // Anthropic/Codex 会话绑定键（令牌+会话 ID），空表示不绑定
 	sessionAffinity         sessionAffinityTarget      // 请求开始时的会话绑定，channelID=0 表示无
+	channelPoolRoute        *channelPoolRoute          // 渠道路由决策（渠道组顺序、队列名额与组粘性）；nil 表示不分组
 	nativeCodexWS           *codexUpstreamWebsocketSession
 	nativeCodexBody         []byte
 	// nativeProtocolOnly protects continuation state and controls without a

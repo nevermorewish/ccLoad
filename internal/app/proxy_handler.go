@@ -360,6 +360,19 @@ func (s *Server) selectRouteCandidates(ctx context.Context, c *gin.Context, orig
 	return s.selectCandidatesByModelAndClientProtocol(ctx, originalModel, clientProtocol)
 }
 
+// channelPoolRoutingApplies 判断请求是否参与渠道路由分组。显式指定渠道（请求头）、
+// previous_response_id 续接（只能落在原渠道）、System One、alpha/search 与 count_tokens
+// 等辅助端点保持原有选路，不按渠道组过滤。
+func channelPoolRoutingApplies(method string, family protocol.RequestFamily, client protocol.Protocol, routingModel string, channelFilter requestedChannelFilter, continuesResponse bool) bool {
+	if method != http.MethodPost || channelFilter.hasFilter || continuesResponse {
+		return false
+	}
+	if routingModel == "" || routingModel == "*" || client == protocol.SystemOne {
+		return false
+	}
+	return family != protocol.RequestFamilyCountTokens && family != protocol.RequestFamilyAlphaSearch
+}
+
 // Only Anthropic's first-party origin has a measured native count_tokens wire.
 // A channel with mixed targets is left to the local estimator so URL fallback
 // cannot silently send this auxiliary request to a third-party gateway.
@@ -601,6 +614,25 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 		}
 	}
 
+	// 渠道路由：按规则、输入 Token、队列与会话粘性决定渠道组顺序，选路只在允许的组内进行。
+	sessionBody := all
+	sessionKey := memoizeSessionKey(func() string {
+		return requestSessionAffinityKey(clientProtocol, requestFamily, tokenHashStr, c.Request.Header, sessionBody)
+	})
+	reqChannelFilter := extractRequestedChannelFilter(c.Request)
+	continuesResponse := clientProtocol == protocol.Codex && requestFamily == protocol.RequestFamilyResponses &&
+		routingSession == nil && strings.TrimSpace(gjson.GetBytes(all, "previous_response_id").String()) != ""
+	var poolRoute *channelPoolRoute
+	if channelPoolRoutingApplies(requestMethod, requestFamily, clientProtocol, originalModel, reqChannelFilter, continuesResponse) {
+		routeBody := all
+		if len(executionSessionRequestBody) > 0 {
+			routeBody = executionSessionRequestBody // 本地续接时完整 transcript 才是真实输入
+		}
+		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: originalModel, body: routeBody, session: sessionKey, now: time.Now()})
+		defer poolRoute.releaseReservation()
+		ctx = withChannelPoolRoute(ctx, poolRoute)
+	}
+
 	cands, err := s.selectRouteCandidates(ctx, c, originalModel, string(clientProtocol))
 	if err == nil && requestMethod == http.MethodPost && requestFamily != protocol.RequestFamilyAlphaSearch {
 		cands = s.appendAntigravityCreditsCandidates(ctx, cands, originalModel, string(clientProtocol), all)
@@ -635,6 +667,9 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 			return
 		}
 		status, message := http.StatusServiceUnavailable, "no available upstream (all cooled or none)"
+		if poolRoute.restricted() {
+			message = fmt.Sprintf("%s; %s", message, poolRoute.describe())
+		}
 		// 模型根本没配置时返回 404：Claude Code 对 5xx 会退避重试多次才报错。
 		if clientProtocol == protocol.Anthropic && !s.modelConfigured(ctx, originalModel) {
 			status, message = http.StatusNotFound, fmt.Sprintf("model: %s", originalModel)
@@ -667,7 +702,6 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 	}
 
 	// 客户端通过 x-ccload-channel-id / x-ccload-channel Header 指定渠道
-	reqChannelFilter := extractRequestedChannelFilter(c.Request)
 	if reqChannelFilter.hasFilter {
 		cands, _ = filterByRequestedChannel(cands, reqChannelFilter)
 		if len(cands) == 0 {
@@ -677,24 +711,16 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 	}
 	var sessionAffinityKey string
 	if s.sessionAffinityEnabled() {
-		switch {
-		case clientProtocol == protocol.Anthropic && requestFamily == protocol.RequestFamilyMessages:
-			sessionAffinityKey = anthropicSessionAffinityKey(tokenHashStr, c.Request.Header, all)
-		case clientProtocol == protocol.Codex && requestFamily == protocol.RequestFamilyResponses:
-			sessionAffinityKey = codexSessionAffinityKey(tokenHashStr, c.Request.Header)
-		case clientProtocol == protocol.OpenAI && requestFamily == protocol.RequestFamilyChatCompletions:
-			sessionAffinityKey = openAICompatSessionAffinityKey("openai", tokenHashStr, c.Request.Header)
-		case clientProtocol == protocol.Gemini && requestFamily == protocol.RequestFamilyGenerateContent:
-			sessionAffinityKey = openAICompatSessionAffinityKey("gemini", tokenHashStr, c.Request.Header)
-		}
+		sessionAffinityKey = sessionKey()
 	}
 	sessionAffinity, hasSessionAffinity := s.sessionAffinity.lookup(sessionAffinityKey, time.Now())
 	if hasSessionAffinity {
-		cands = s.preferSessionAffinityChannel(cands, sessionAffinity.channelID)
+		cands = s.preferSessionAffinityChannel(cands, sessionAffinity.channelID, poolRoute)
 	}
-	// 执行会话已钉住的渠道（在用的上游 WS 或 RetryOtherKeys 首选渠道）优先于会话粘性。
+	// 执行会话已钉住的渠道（在用的上游 WS 或 RetryOtherKeys 首选渠道）优先于会话粘性，
+	// 但不越过渠道路由选出的首选渠道组。
 	if routingSession != nil {
-		if channelID, ok := routingSession.routeChannelSnapshot(); ok {
+		if channelID, ok := routingSession.routeChannelSnapshot(); ok && poolRoute.inLeadingPool(cands, channelID) {
 			cands = prioritizePinnedChannel(cands, channelID)
 		}
 	}
@@ -720,6 +746,7 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 
 		sessionAffinityKey: sessionAffinityKey,
 		sessionAffinity:    sessionAffinity,
+		channelPoolRoute:   poolRoute,
 	}
 	if routingSession != nil {
 		reqCtx.routingSession = routingSession
@@ -950,6 +977,8 @@ func (s *Server) runProxyAttemptLoopWithFailureBoundary(
 				continue
 			}
 		}
+		// 队列计数跟随实际尝试的渠道组：回退到其他组后，原组的进行中请求数随之减少。
+		reqCtx.channelPoolRoute.moveReservation(cfg.ChannelPool)
 		result, err := s.tryChannelWithSameChannelRetries(ctx, cfg, reqCtx, w)
 		if errors.Is(err, errChannelDisabled) {
 			continue
