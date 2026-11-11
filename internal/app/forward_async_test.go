@@ -1402,3 +1402,54 @@ func TestFirstByteTimeout_StreamingHeartbeatBeforeContent(t *testing.T) {
 		t.Fatalf("期望状态码 %d，实际: %d", util.StatusFirstByteTimeout, res.Status)
 	}
 }
+
+// TestFirstByteTimeout_ChannelRouteOverridesSystem 测试渠道路由规则的首字超时覆盖系统设置：
+// 系统未启用首字超时时规则仍放弃卡住的上游；系统阈值更短时规则放宽，等待内容到达。
+func TestFirstByteTimeout_ChannelRouteOverridesSystem(t *testing.T) {
+	t.Parallel()
+
+	const contentDelay = 60 * time.Millisecond
+	newUpstream := func(t *testing.T, delay time.Duration) *model.Config {
+		t.Helper()
+		upstream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(delay):
+			}
+			_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"+
+				"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		}))
+		t.Cleanup(upstream.Close)
+		return &model.Config{ID: 1, URLs: model.ChannelURLs{{URL: upstream.URL}}, Name: "route-first-byte"}
+	}
+	forward := func(t *testing.T, srv *Server, cfg *model.Config, routeTimeout time.Duration) (*fwResult, error) {
+		t.Helper()
+		ctx := withChannelPoolRoute(context.Background(), &channelPoolRoute{ruleID: "kimi", pools: []int{0}, firstByteTimeout: routeTimeout})
+		res, _, err := srv.forwardOnceAsync(ctx, cfg, "sk-test", http.MethodPost,
+			mustBuildTestTransformPlan(t, cfg, []byte(`{"stream":true}`)), http.Header{}, "", cfg.GetURLs()[0], newRecorder(), nil)
+		return res, err
+	}
+
+	t.Run("rule enables timeout", func(t *testing.T) {
+		t.Parallel()
+		srv := newInMemoryServer(t)
+		srv.firstByteTimeout = 0
+		res, err := forward(t, srv, newUpstream(t, time.Hour), 20*time.Millisecond)
+		if !errors.Is(err, util.ErrUpstreamFirstByteTimeout) || res == nil || res.Status != util.StatusFirstByteTimeout {
+			t.Fatalf("err=%v res=%+v, want rule first byte timeout", err, res)
+		}
+	})
+	t.Run("rule relaxes system timeout", func(t *testing.T) {
+		t.Parallel()
+		srv := newInMemoryServer(t)
+		srv.firstByteTimeout = contentDelay / 6
+		res, err := forward(t, srv, newUpstream(t, contentDelay), 5*time.Second)
+		if err != nil || res == nil || res.Status != http.StatusOK {
+			t.Fatalf("err=%v res=%+v, want stream after the system threshold", err, res)
+		}
+	})
+}

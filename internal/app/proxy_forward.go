@@ -2516,6 +2516,8 @@ func (s *Server) forwardOnceAsyncWithNativeCodexWebsocket(
 	forceUpstreamStream := compaction == nil && shouldForceUpstreamStream(cfg, plan.UpstreamProtocol, openCodePath)
 	upstreamStreaming := isStreamingRequest(plan.UpstreamPath, plan.TranslatedBody) || isCodeBuddyChatRequest(cfg, plan.UpstreamProtocol) || openCodeFree || forceUpstreamStream
 	timeouts := s.resolveProtocolTimeouts(plan)
+	// 渠道路由规则的首字超时优先：超时按 598 放弃本渠道，响应未提交即可切换下一个候选。
+	timeouts.FirstByteTimeout = channelRouteFirstByteTimeout(ctx, timeouts.FirstByteTimeout)
 	if forceUpstreamStream && !plan.Streaming && timeouts.NonStreamTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeouts.NonStreamTimeout)

@@ -52,6 +52,8 @@ type channelRouteSimulation struct {
 	InputTokens int                          `json:"input_tokens"`
 	Reason      string                       `json:"reason"`
 	Pools       []channelRouteSimulationPool `json:"pools"`
+	// FirstByteTimeoutSeconds 是命中规则的首字超时；0 表示沿用系统设置。
+	FirstByteTimeoutSeconds int `json:"first_byte_timeout_seconds"`
 }
 
 // HandleGetChannelRoutes 返回渠道路由规则、各渠道组概况与实时队列。
@@ -148,7 +150,8 @@ func (s *Server) HandleSimulateChannelRoute(c *gin.Context) {
 	result := channelRouteSimulation{
 		Model: routingModel, Matched: route.ruleID != "", RuleID: route.ruleID, RuleName: route.ruleName,
 		Tier: route.tier, InputTokens: inputTokens, Reason: route.reason,
-		Pools: make([]channelRouteSimulationPool, 0, len(route.pools)),
+		Pools:                   make([]channelRouteSimulationPool, 0, len(route.pools)),
+		FirstByteTimeoutSeconds: int(route.firstByteTimeout / time.Second),
 	}
 	for _, pool := range route.pools {
 		result.Pools = append(result.Pools, channelRouteSimulationPool{

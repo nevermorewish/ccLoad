@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,7 +45,7 @@ func decidePools(server *Server, modelName string, tokens int, session string) *
 
 func TestParseChannelRouteConfigNormalizes(t *testing.T) {
 	config, err := parseChannelRouteConfig(`{"rules":[{"name":" kimi ","enabled":true,"models":[" kimi-k3(max) ","KIMI-K3","kimi-*",""],"default_pool":0,
-		"token_tiers":[{"max_tokens":8000,"pool":1}],"overflow":[{"pool":1,"max_queue":100,"target_pool":2}]}]}`)
+		"token_tiers":[{"max_tokens":8000,"pool":1}],"overflow":[{"pool":1,"max_queue":100,"target_pool":2}],"first_byte_timeout_seconds":15}]}`)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -55,7 +56,8 @@ func TestParseChannelRouteConfigNormalizes(t *testing.T) {
 	if !validChannelRouteRuleID(rule.ID) {
 		t.Fatalf("generated id %q is invalid", rule.ID)
 	}
-	if rule.Name != "kimi" || !slices.Equal(rule.Models, []string{"kimi-k3", "kimi-*"}) || rule.Sticky != channelRouteStickyOff {
+	if rule.Name != "kimi" || !slices.Equal(rule.Models, []string{"kimi-k3", "kimi-*"}) || rule.Sticky != channelRouteStickyOff ||
+		rule.FirstByteTimeoutSeconds != 15 {
 		t.Fatalf("normalized rule=%+v", rule)
 	}
 
@@ -82,9 +84,13 @@ func TestParseChannelRouteConfigNormalizes(t *testing.T) {
 		"duplicate overflow": func(r *ChannelRouteRule) {
 			r.Overflow = []ChannelRouteOverflow{{Pool: 1, MaxQueue: 1, TargetPool: 2}, {Pool: 1, MaxQueue: 2, TargetPool: 0}}
 		},
-		"invalid sticky": func(r *ChannelRouteRule) { r.Sticky = "forever" },
-		"invalid id":     func(r *ChannelRouteRule) { r.ID = "bad id" },
-		"control name":   func(r *ChannelRouteRule) { r.Name = "a\nb" },
+		"invalid sticky":              func(r *ChannelRouteRule) { r.Sticky = "forever" },
+		"invalid id":                  func(r *ChannelRouteRule) { r.ID = "bad id" },
+		"control name":                func(r *ChannelRouteRule) { r.Name = "a\nb" },
+		"negative first byte timeout": func(r *ChannelRouteRule) { r.FirstByteTimeoutSeconds = -1 },
+		"first byte timeout too long": func(r *ChannelRouteRule) {
+			r.FirstByteTimeoutSeconds = maxChannelRouteFirstByteTimeoutSeconds + 1
+		},
 	}
 	for name, mutate := range cases {
 		rule := valid
@@ -252,6 +258,44 @@ func TestDecideChannelPoolRouteSessionStickiness(t *testing.T) {
 	server.channelPoolAffinity.cleanupExpired(time.Now().Add(sessionAffinityTTL + time.Second))
 	if _, ok := server.channelPoolAffinity.lookup(key, time.Now()); ok {
 		t.Fatal("expired binding survived cleanup")
+	}
+}
+
+func TestChannelRouteFirstByteTimeoutOverride(t *testing.T) {
+	server := newInMemoryServer(t)
+	rule := kimiRouteRule()
+	rule.Sticky = channelRouteStickySession
+	rule.FirstByteTimeoutSeconds = 15
+	useChannelRoutes(t, server, rule)
+
+	route := decidePools(server, "kimi-k3", 100, "session-a")
+	if route.firstByteTimeout != 15*time.Second {
+		t.Fatalf("route first byte timeout=%v, want 15s", route.firstByteTimeout)
+	}
+	if got := channelRouteFirstByteTimeout(withChannelPoolRoute(context.Background(), route), 3*time.Second); got != 15*time.Second {
+		t.Fatalf("matched rule timeout=%v, want 15s", got)
+	}
+	// 未命中规则、规则未配置首字超时或请求不经渠道路由时沿用系统值。
+	if got := channelRouteFirstByteTimeout(withChannelPoolRoute(context.Background(), decidePools(server, "glm-5", 100, "")), 3*time.Second); got != 3*time.Second {
+		t.Fatalf("unmatched model timeout=%v, want system 3s", got)
+	}
+	if got := channelRouteFirstByteTimeout(context.Background(), 3*time.Second); got != 3*time.Second {
+		t.Fatalf("unrouted request timeout=%v, want system 3s", got)
+	}
+
+	// 单独调整首字超时不改变渠道组决策，保留会话粘性；改动决策字段仍清除。
+	server.bindChannelPoolAffinity(route, 2)
+	rule.FirstByteTimeoutSeconds = 30
+	useChannelRoutes(t, server, rule)
+	if route := decidePools(server, "kimi-k3", 100, "session-a"); route.reason != channelRouteReasonSticky || route.pools[0] != 2 ||
+		route.firstByteTimeout != 30*time.Second {
+		t.Fatalf("timeout-only edit route=%+v, want sticky pool 2 with 30s timeout", route)
+	}
+	rule.FirstByteTimeoutSeconds = 0
+	rule.DefaultPool = 2
+	useChannelRoutes(t, server, rule)
+	if route := decidePools(server, "kimi-k3", 100, "session-a"); route.reason == channelRouteReasonSticky || route.firstByteTimeout != 0 {
+		t.Fatalf("pool edit route=%+v, want stale binding cleared and system timeout", route)
 	}
 }
 
@@ -613,6 +657,58 @@ func TestProxy_ChannelRouteRequestedChannelHeaderBypassesPools(t *testing.T) {
 	}
 	if got := <-p.served; got != "pool2" {
 		t.Fatalf("explicit channel served by %s", got)
+	}
+}
+
+// 规则首字超时放弃只回响应头、迟迟不出内容的渠道：响应尚未提交，直接切换下一个候选；
+// 超时渠道的该模型随之冷却，后续请求不再等待它。
+func TestProxy_ChannelRouteFirstByteTimeoutSwitchesChannel(t *testing.T) {
+	t.Parallel()
+	var stalledRequests atomic.Int32
+	stalled := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stalledRequests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(stalled.Close)
+	fallback := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"kimi-k3\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"+
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"fallback-ok\"}}\n\n"+
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"+
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	t.Cleanup(fallback.Close)
+	env := setupProxyTestEnv(t, []testChannel{
+		{name: "stalled", upstreamProtocol: "anthropic", models: "kimi-k3", priority: 100, channelPool: 1},
+		{name: "fallback", upstreamProtocol: "anthropic", models: "kimi-k3", priority: 100, channelPool: 0},
+	}, map[int]string{0: stalled.URL, 1: fallback.URL})
+	useChannelRoutes(t, env.server, ChannelRouteRule{
+		ID: "kimi", Enabled: true, Models: []string{"kimi-k3"}, DefaultPool: 1, Sticky: channelRouteStickyOff, FirstByteTimeoutSeconds: 1,
+	})
+	request := map[string]any{
+		"model": "kimi-k3", "max_tokens": 16, "stream": true,
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+
+	started := time.Now()
+	response := doProxyRequest(t, env.engine, "/v1/messages", request, nil)
+	elapsed := time.Since(started)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "fallback-ok") {
+		t.Fatalf("status=%d body=%s, want fallback stream", response.Code, response.Body.String())
+	}
+	if stalledRequests.Load() != 1 || elapsed < time.Second {
+		t.Fatalf("stalled requests=%d elapsed=%v, want one attempt abandoned after the 1s rule timeout", stalledRequests.Load(), elapsed)
+	}
+
+	response = doProxyRequest(t, env.engine, "/v1/messages", request, nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "fallback-ok") || stalledRequests.Load() != 1 {
+		t.Fatalf("status=%d stalled requests=%d, want cooled stalled channel skipped", response.Code, stalledRequests.Load())
+	}
+	if counts := env.server.channelPoolQueues.snapshot(); len(counts) != 0 {
+		t.Fatalf("queue reservations leaked: %v", counts)
 	}
 }
 

@@ -37,7 +37,7 @@ test('the kimi example serializes to the backend contract and round-trips', () =
   assert.deepEqual(config.rules[0], {
     id: '', name: 'kimi-k3 分流', enabled: true, models: ['kimi-k3'], default_pool: 0,
     token_tiers: [{ min_tokens: 0, max_tokens: 8000, pool: 1 }, { min_tokens: 50000, max_tokens: 0, pool: 2 }],
-    overflow: [{ pool: 1, max_queue: 100, target_pool: 2 }], sticky: 'tier', strict: false,
+    overflow: [{ pool: 1, max_queue: 100, target_pool: 2 }], sticky: 'tier', strict: false, first_byte_timeout_seconds: 0,
   });
   const saved = { ...config.rules[0], id: 'abc123' };
   const draft = routes.ruleToDraft(saved);
@@ -56,6 +56,9 @@ test('draft validation mirrors the backend rules', () => {
     [{ overflow: [{ pool: 1, maxQueue: '0', target: 2 }] }, /正整数/],
     [{ overflow: [{ pool: 1, maxQueue: '10', target: 1 }] }, /不能与来源相同/],
     [{ overflow: [{ pool: 1, maxQueue: '10', target: 2 }, { pool: 1, maxQueue: '20', target: 0 }] }, /多条队列溢出/],
+    [{ firstByteTimeout: '1.5' }, /首字超时/],
+    [{ firstByteTimeout: '-1' }, /首字超时/],
+    [{ firstByteTimeout: '3601' }, /首字超时/],
   ];
   for (const [patch, pattern] of cases) {
     const { config, error } = routes.draftsToConfig([{ ...base, ...patch }]);
@@ -67,6 +70,19 @@ test('draft validation mirrors the backend rules', () => {
   assert.equal(routes.inflightFor([], 'r', 1), 0);
   const pools = [{ pool: 0, inflight: 9 }, { pool: 1, inflight: 9 }];
   assert.deepEqual(routes.withPoolInflight(pools, [{ rule_id: '', pool: 0, inflight: 2 }, { rule_id: 'r', pool: 0, inflight: 3 }]).map((pool) => pool.inflight), [5, 0]);
+});
+
+test('first byte timeout round-trips and shows in the summary', () => {
+  assert.equal(routes.parseSecondsInput(''), 0);
+  assert.equal(routes.parseSecondsInput(' 20 '), 20);
+  assert.equal(routes.parseSecondsInput('20s'), null);
+  const draft = { ...routes.emptyRuleDraft(), models: ['kimi-k3.1-pro'], firstByteTimeout: '20' };
+  const rule = routes.draftsToConfig([draft]).config.rules[0];
+  assert.equal(rule.first_byte_timeout_seconds, 20);
+  assert.equal(routes.summarizeRule(rule), '全部 → 主渠道；首字超过 20 秒切换渠道');
+  assert.equal(routes.ruleToDraft(rule).firstByteTimeout, '20');
+  assert.equal(routes.ruleToDraft({ ...rule, first_byte_timeout_seconds: 0 }).firstByteTimeout, '');
+  assert.equal(routes.ruleToDraft({ ...rule, first_byte_timeout_seconds: undefined }).firstByteTimeout, '');
 });
 
 test('channel editor keeps the channel pool through load and save', () => {

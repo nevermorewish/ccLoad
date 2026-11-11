@@ -58,13 +58,15 @@ func TestAdminChannelRoutesSaveGetAndSimulate(t *testing.T) {
 
 	status, view, body := putChannelRoutes(t, server, map[string]any{"rules": []any{map[string]any{
 		"name": "kimi", "enabled": true, "models": []string{"kimi-k3"}, "default_pool": 0, "sticky": "tier",
-		"token_tiers": []any{map[string]any{"max_tokens": 8000, "pool": 1}, map[string]any{"min_tokens": 50000, "pool": 2}},
-		"overflow":    []any{map[string]any{"pool": 1, "max_queue": 100, "target_pool": 2}},
+		"token_tiers":                []any{map[string]any{"max_tokens": 8000, "pool": 1}, map[string]any{"min_tokens": 50000, "pool": 2}},
+		"overflow":                   []any{map[string]any{"pool": 1, "max_queue": 100, "target_pool": 2}},
+		"first_byte_timeout_seconds": 15,
 	}}})
 	if status != http.StatusOK {
 		t.Fatalf("PUT status=%d body=%s", status, body)
 	}
-	if len(view.Config.Rules) != 1 || !validChannelRouteRuleID(view.Config.Rules[0].ID) || view.Config.Rules[0].Sticky != channelRouteStickyTier {
+	if len(view.Config.Rules) != 1 || !validChannelRouteRuleID(view.Config.Rules[0].ID) || view.Config.Rules[0].Sticky != channelRouteStickyTier ||
+		view.Config.Rules[0].FirstByteTimeoutSeconds != 15 {
 		t.Fatalf("saved config=%+v", view.Config)
 	}
 	ruleID := view.Config.Rules[0].ID
@@ -97,7 +99,7 @@ func TestAdminChannelRoutesSaveGetAndSimulate(t *testing.T) {
 
 	status, result := simulateChannelRoute(t, server, map[string]any{"model": "kimi-k3(high)", "input_tokens": 100})
 	if status != http.StatusOK || !result.Matched || result.RuleID != ruleID || result.Reason != channelRouteReasonTokenTier ||
-		!slices.Equal(simulatedPools(result), []int{1, 0, 2}) || result.Pools[0].Name != "渠道1" {
+		!slices.Equal(simulatedPools(result), []int{1, 0, 2}) || result.Pools[0].Name != "渠道1" || result.FirstByteTimeoutSeconds != 15 {
 		t.Fatalf("simulate short=%d %+v", status, result)
 	}
 	server.channelPoolQueues.add(channelPoolQueueKey{ruleID: ruleID, pool: 1}, 100)
@@ -111,7 +113,8 @@ func TestAdminChannelRoutesSaveGetAndSimulate(t *testing.T) {
 		t.Fatalf("simulate body=%d %+v", status, result)
 	}
 	status, result = simulateChannelRoute(t, server, map[string]any{"model": "glm-5", "input_tokens": 9})
-	if status != http.StatusOK || result.Matched || result.InputTokens != 9 || !slices.Equal(simulatedPools(result), []int{0}) {
+	if status != http.StatusOK || result.Matched || result.InputTokens != 9 || !slices.Equal(simulatedPools(result), []int{0}) ||
+		result.FirstByteTimeoutSeconds != 0 {
 		t.Fatalf("simulate unmatched=%d %+v", status, result)
 	}
 	for _, invalid := range []map[string]any{{"model": ""}, {"model": "*"}, {"model": "kimi-k3", "input_tokens": -1}} {

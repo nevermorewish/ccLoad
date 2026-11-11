@@ -5,7 +5,7 @@ import { getJSON, invalidateGetCache, postJSON, putJSON } from '../lib/api'
 import { CHANNEL_POOLS } from './channels/api'
 import '../styles/channel-routes.css'
 import {
-  POOL_OPTIONS, ROUTE_REASONS, STICKY_MODES, addModels, draftsToConfig, emptyRuleDraft, exampleRuleDraft,
+  MAX_FIRST_BYTE_TIMEOUT_SECONDS, POOL_OPTIONS, ROUTE_REASONS, STICKY_MODES, addModels, draftsToConfig, emptyRuleDraft, exampleRuleDraft,
   inflightFor, parseTokenInput, ruleToDraft, summarizeRule, withPoolInflight,
   type InflightView, type OverflowDraft, type RoutesView, type RuleDraft, type Simulation, type StickyMode, type TierDraft,
 } from './channel-routes'
@@ -104,6 +104,16 @@ function RuleCard({ draft, index, total, inflight, knownModels, onChange, onMove
         <span className="table-note">进行中请求按本规则落在各渠道组的实际占用计数（流式响应持续到结束）；溢出可以接力，原渠道组保留为回退。</span>
       </div>
     </div>
+
+    <div className="route-field">
+      <span className="route-label">首字超时</span>
+      <div className="cell-stack">
+        <div className="toolbar route-row">
+          <label className="muted">超过<input className="input compact" value={draft.firstByteTimeout} placeholder="系统设置" inputMode="numeric" aria-label={`${label} 首字超时秒数`} onChange={(event) => onChange({ firstByteTimeout: event.target.value })} />秒仍未收到首个内容，切换下一个渠道</label>
+        </div>
+        <span className="table-note">命中本规则的流式请求（含强制上游流式）在某个渠道等待首个有效内容超过该秒数时放弃该渠道、切换到下一个候选渠道；响应尚未发给客户端，客户端无感知。超时渠道的该模型按首字节超时（598）进入冷却。留空或 0 沿用系统设置的首字超时，最长 {MAX_FIRST_BYTE_TIMEOUT_SECONDS} 秒；规则允许的渠道组里需要还有其他可用渠道，否则超时会直接返回错误。</span>
+      </div>
+    </div>
   </div>
 }
 
@@ -179,7 +189,7 @@ export function ChannelRoutesPage() {
 
   return <>
     <header className="page-header">
-      <div><h1>渠道路由</h1><p className="muted">按模型把请求分流到主渠道 / 渠道1 / 渠道2：命中规则后依次按会话粘性、输入 Token 档位与队列溢出选出首选渠道组，首选组无可用渠道或全部失败时按顺序回退其他渠道组（严格模式除外）。未命中规则的请求只使用主渠道，渠道1 / 渠道2 必须由启用且命中的规则选中。保存后立即生效，无需重启。</p></div>
+      <div><h1>渠道路由</h1><p className="muted">按模型把请求分流到主渠道 / 渠道1 / 渠道2：命中规则后依次按会话粘性、输入 Token 档位与队列溢出选出首选渠道组，首选组无可用渠道或全部失败时按顺序回退其他渠道组（严格模式除外）；可为规则设置首字超时，渠道迟迟不出首个内容时自动切换下一个渠道。未命中规则的请求只使用主渠道，渠道1 / 渠道2 必须由启用且命中的规则选中。保存后立即生效，无需重启。</p></div>
       <div className="toolbar" style={{ marginBottom: 0, flexWrap: 'nowrap', flexShrink: 0 }}>
         <button className="btn" disabled={busy} onClick={refresh}>刷新</button>
         <button className="btn" onClick={() => add(exampleRuleDraft())}>+ kimi-k3 示例</button>
@@ -218,7 +228,7 @@ export function ChannelRoutesPage() {
       </div>
       {simulateError && <p className="error-text" role="alert">{simulateError}</p>}
       {simulated && <div className="cell-stack">
-        <span>{simulated.matched ? `命中规则「${simulated.rule_name || simulated.rule_id}」` : '未命中规则（默认顺序）'} · 依据：{ROUTE_REASONS[simulated.reason] ?? simulated.reason}{simulated.tier >= 0 ? `（档位 ${simulated.tier + 1}）` : ''} · 输入 Token {simulated.input_tokens.toLocaleString()}</span>
+        <span>{simulated.matched ? `命中规则「${simulated.rule_name || simulated.rule_id}」` : '未命中规则（默认顺序）'} · 依据：{ROUTE_REASONS[simulated.reason] ?? simulated.reason}{simulated.tier >= 0 ? `（档位 ${simulated.tier + 1}）` : ''} · 输入 Token {simulated.input_tokens.toLocaleString()} · 首字超时：{simulated.first_byte_timeout_seconds > 0 ? `${simulated.first_byte_timeout_seconds} 秒后切换渠道` : '沿用系统设置'}</span>
         <span className="route-order">{simulated.pools.map((pool, order) => <span key={pool.pool} className={`badge ${order === 0 ? 'badge-good' : 'badge-muted'}`}>{order + 1}. {pool.name}（进行中 {pool.inflight}）</span>)}</span>
         {dirty && <span className="warn-text">有未保存的修改，模拟结果基于已保存的规则。</span>}
       </div>}

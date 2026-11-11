@@ -14,6 +14,8 @@ export type RouteRule = {
   overflow: QueueOverflow[]
   sticky: StickyMode
   strict: boolean
+  /** 首字超时秒数，0 表示沿用系统设置。 */
+  first_byte_timeout_seconds: number
 }
 export type RouteConfig = { rules: RouteRule[] }
 export type PoolView = { pool: number; name: string; channels: number; enabled: number; inflight: number; models: string[] }
@@ -28,6 +30,7 @@ export type Simulation = {
   input_tokens: number
   reason: string
   pools: Array<{ pool: number; name: string; inflight: number }>
+  first_byte_timeout_seconds: number
 }
 
 /** 编辑草稿：Token 与队列保持输入原文（支持 8k / 50k 写法），保存时统一换算校验。 */
@@ -44,7 +47,11 @@ export type RuleDraft = {
   overflow: OverflowDraft[]
   sticky: StickyMode
   strict: boolean
+  firstByteTimeout: string
 }
+
+/** 与后端 maxChannelRouteFirstByteTimeoutSeconds 一致。 */
+export const MAX_FIRST_BYTE_TIMEOUT_SECONDS = 3600
 
 export const STICKY_MODES: Array<{ value: StickyMode; label: string; hint: string }> = [
   { value: 'off', label: '会话粘性：关闭', hint: '每个请求独立按 Token 档位与队列分流' },
@@ -72,6 +79,15 @@ export function parseTokenInput(raw: string): number | null {
   return Number.isSafeInteger(value) ? value : null
 }
 
+/** 解析首字超时秒数：只接受整数，空串返回 0（沿用系统设置），非法返回 null。 */
+export function parseSecondsInput(raw: string): number | null {
+  const text = raw.trim()
+  if (!text) return 0
+  if (!/^\d+$/.test(text)) return null
+  const value = Number(text)
+  return Number.isSafeInteger(value) ? value : null
+}
+
 /** 8000 → 8k，50000 → 50k，1500000 → 1.5m；不能整除时原样显示。 */
 export function formatTokens(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return ''
@@ -89,7 +105,7 @@ export function describeTier(tier: TokenTier): string {
 }
 
 export function emptyRuleDraft(): RuleDraft {
-  return { key: nextKey(), id: '', name: '', enabled: true, models: [], defaultPool: 0, tiers: [], overflow: [], sticky: 'tier', strict: false }
+  return { key: nextKey(), id: '', name: '', enabled: true, models: [], defaultPool: 0, tiers: [], overflow: [], sticky: 'tier', strict: false, firstByteTimeout: '' }
 }
 
 /** 示例：kimi-k3 输入 < 8k 走渠道1、≥ 50k 走渠道2，渠道1 进行中达到 100 时溢出到渠道2，同档位会话粘性。 */
@@ -109,6 +125,7 @@ export function ruleToDraft(rule: RouteRule): RuleDraft {
     tiers: (rule.token_tiers ?? []).map((tier) => ({ min: formatTokens(tier.min_tokens), max: formatTokens(tier.max_tokens), pool: Number(tier.pool ?? 0) })),
     overflow: (rule.overflow ?? []).map((item) => ({ pool: Number(item.pool ?? 0), maxQueue: String(item.max_queue ?? ''), target: Number(item.target_pool ?? 0) })),
     sticky, strict: Boolean(rule.strict),
+    firstByteTimeout: Number(rule.first_byte_timeout_seconds) > 0 ? String(rule.first_byte_timeout_seconds) : '',
   }
 }
 
@@ -154,9 +171,13 @@ export function draftsToConfig(drafts: RuleDraft[]): { config?: RouteConfig; err
       sources.add(item.pool)
       overflow.push({ pool: item.pool, max_queue: maxQueue, target_pool: item.target })
     }
+    const firstByteTimeout = parseSecondsInput(draft.firstByteTimeout)
+    if (firstByteTimeout === null || firstByteTimeout > MAX_FIRST_BYTE_TIMEOUT_SECONDS) {
+      return { error: `${label}：首字超时必须是 0–${MAX_FIRST_BYTE_TIMEOUT_SECONDS} 之间的整数秒（留空沿用系统设置）` }
+    }
     rules.push({
       id: draft.id, name: draft.name.trim(), enabled: draft.enabled, models, default_pool: draft.defaultPool,
-      token_tiers: tiers, overflow, sticky: draft.sticky, strict: draft.strict,
+      token_tiers: tiers, overflow, sticky: draft.sticky, strict: draft.strict, first_byte_timeout_seconds: firstByteTimeout,
     })
   }
   return { config: { rules } }
@@ -167,6 +188,7 @@ export function summarizeRule(rule: RouteRule): string {
   const parts = rule.token_tiers.map((tier) => `${describeTier(tier)} → ${channelPoolLabel(tier.pool)}`)
   parts.push(`${rule.token_tiers.length ? '其余' : '全部'} → ${channelPoolLabel(rule.default_pool)}`)
   for (const item of rule.overflow) parts.push(`${channelPoolLabel(item.pool)} 进行中 ≥ ${item.max_queue} 时优先 ${channelPoolLabel(item.target_pool)}`)
+  if (rule.first_byte_timeout_seconds > 0) parts.push(`首字超过 ${rule.first_byte_timeout_seconds} 秒切换渠道`)
   return parts.join('；')
 }
 
