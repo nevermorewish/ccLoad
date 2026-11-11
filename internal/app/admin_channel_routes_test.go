@@ -111,7 +111,7 @@ func TestAdminChannelRoutesSaveGetAndSimulate(t *testing.T) {
 		t.Fatalf("simulate body=%d %+v", status, result)
 	}
 	status, result = simulateChannelRoute(t, server, map[string]any{"model": "glm-5", "input_tokens": 9})
-	if status != http.StatusOK || result.Matched || result.InputTokens != 9 || !slices.Equal(simulatedPools(result), []int{0, 1, 2}) {
+	if status != http.StatusOK || result.Matched || result.InputTokens != 9 || !slices.Equal(simulatedPools(result), []int{0}) {
 		t.Fatalf("simulate unmatched=%d %+v", status, result)
 	}
 	for _, invalid := range []map[string]any{{"model": ""}, {"model": "*"}, {"model": "kimi-k3", "input_tokens": -1}} {

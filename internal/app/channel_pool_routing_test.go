@@ -137,8 +137,9 @@ func TestChannelRouteSnapshotMatching(t *testing.T) {
 
 func TestDecideChannelPoolRouteTokenTiersAndStrict(t *testing.T) {
 	server := newInMemoryServer(t)
-	if route := decidePools(server, "kimi-k3", 100, ""); route.ruleID != "" || !slices.Equal(route.pools, []int{0, 1, 2}) {
-		t.Fatalf("without rules route=%+v, want default main-first order", route)
+	// 未命中规则时只允许主渠道：渠道1/2 必须由规则显式选中才参与选路。
+	if route := decidePools(server, "kimi-k3", 100, ""); route.ruleID != "" || !slices.Equal(route.pools, []int{0}) {
+		t.Fatalf("without rules route=%+v, want only the main pool", route)
 	}
 	useChannelRoutes(t, server, kimiRouteRule())
 
@@ -158,8 +159,8 @@ func TestDecideChannelPoolRouteTokenTiersAndStrict(t *testing.T) {
 			t.Errorf("tokens=%d route=%+v, want pools=%v tier=%d reason=%s", tc.tokens, route, tc.pools, tc.tier, tc.reason)
 		}
 	}
-	if route := decidePools(server, "glm-5", 100, ""); route.ruleID != "" || !slices.Equal(route.pools, []int{0, 1, 2}) {
-		t.Fatalf("unmatched model route=%+v", route)
+	if route := decidePools(server, "glm-5", 100, ""); route.ruleID != "" || !slices.Equal(route.pools, []int{0}) {
+		t.Fatalf("unmatched model route=%+v, want only the main pool", route)
 	}
 
 	strict := kimiRouteRule()

@@ -23,8 +23,9 @@ import (
 
 // 渠道路由：渠道按渠道组（主渠道/渠道1/渠道2）划分，路由规则按模型匹配后，
 // 依据估算输入 Token、规则在各组的进行中请求数与会话粘性，决定本次请求的渠道组尝试顺序。
-// 组顺序是选路的第一排序键，组内仍沿用优先级/健康度与同档轮询；未命中规则时主渠道优先，
-// 依次回退渠道1、渠道2。
+// 组顺序是选路的第一排序键，组内仍沿用优先级/健康度与同档轮询。
+// 未命中规则时只允许主渠道：渠道1、渠道2 仅在启用且命中的规则选中它们（或非严格规则追加、
+// 队列溢出、会话粘性指向它们）时参与选路。
 
 const (
 	channelRouteRulesSettingKey = "channel_route_rules"
@@ -543,6 +544,10 @@ func (r *channelPoolRoute) describe() string {
 	if label == "" {
 		label = r.ruleID
 	}
+	// 未命中规则时没有规则身份，不能拼出 `channel route "" allows ...`。
+	if label == "" {
+		return fmt.Sprintf("channel route not matched; allows %s", strings.Join(names, " > "))
+	}
 	return fmt.Sprintf("channel route %q allows %s", label, strings.Join(names, " > "))
 }
 
@@ -588,13 +593,11 @@ func (r *channelPoolRoute) releaseReservation() {
 	r.queues.add(channelPoolQueueKey{ruleID: r.ruleID, pool: r.reservedPool}, -1)
 }
 
-// defaultChannelPoolRoute 是未命中规则时的顺序：主渠道优先，依次回退渠道1、渠道2。
+// defaultChannelPoolRoute 是未命中规则时的顺序：只允许主渠道。
+// 渠道1、渠道2 是规则专用组，必须由启用且命中的规则显式选中才会承接请求，
+// 否则关闭渠道路由时它们仍会作为主渠道的兜底被选中。
 func defaultChannelPoolRoute() *channelPoolRoute {
-	pools := make([]int, model.ChannelPoolCount)
-	for i := range pools {
-		pools[i] = i
-	}
-	return &channelPoolRoute{pools: pools, tier: -1, inputTokens: -1, reason: channelRouteReasonDefault}
+	return &channelPoolRoute{pools: []int{model.ChannelPoolMain}, tier: -1, inputTokens: -1, reason: channelRouteReasonDefault}
 }
 
 // routeChannelPools 为代理请求做渠道组决策并占用首选组的队列名额；调用方必须 releaseReservation。

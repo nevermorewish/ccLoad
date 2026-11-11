@@ -179,7 +179,7 @@ export function ChannelRoutesPage() {
 
   return <>
     <header className="page-header">
-      <div><h1>渠道路由</h1><p className="muted">按模型把请求分流到主渠道 / 渠道1 / 渠道2：命中规则后依次按会话粘性、输入 Token 档位与队列溢出选出首选渠道组，首选组无可用渠道或全部失败时按顺序回退其他渠道组（严格模式除外）。未命中规则的请求优先使用主渠道。保存后立即生效，无需重启。</p></div>
+      <div><h1>渠道路由</h1><p className="muted">按模型把请求分流到主渠道 / 渠道1 / 渠道2：命中规则后依次按会话粘性、输入 Token 档位与队列溢出选出首选渠道组，首选组无可用渠道或全部失败时按顺序回退其他渠道组（严格模式除外）。未命中规则的请求只使用主渠道，渠道1 / 渠道2 必须由启用且命中的规则选中。保存后立即生效，无需重启。</p></div>
       <div className="toolbar" style={{ marginBottom: 0, flexWrap: 'nowrap', flexShrink: 0 }}>
         <button className="btn" disabled={busy} onClick={refresh}>刷新</button>
         <button className="btn" onClick={() => add(exampleRuleDraft())}>+ kimi-k3 示例</button>
