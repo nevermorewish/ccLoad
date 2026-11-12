@@ -27,7 +27,7 @@ type RuleCardProps = {
 }
 
 function RuleCard({ draft, index, total, inflight, knownModels, channels, onChange, onMove, onRemove }: RuleCardProps) {
-  const [timeoutExpanded, setTimeoutExpanded] = useState(() => Boolean(draft.firstByteTimeout || draft.firstByteTimeoutChannel))
+  const [timeoutExpanded, setTimeoutExpanded] = useState(() => Boolean(draft.firstByteTimeout || draft.firstByteTimeoutChannel || draft.firstByteTimeoutFailFast))
   const summary = useMemo(() => {
     const { config } = draftsToConfig([draft])
     return config ? summarizeRule(config.rules[0]) : ''
@@ -121,10 +121,11 @@ function RuleCard({ draft, index, total, inflight, knownModels, channels, onChan
         {timeoutExpanded ? <>
         <div className="toolbar route-row">
           <label className="muted">超过<input className="input compact" value={draft.firstByteTimeout} placeholder="系统设置" inputMode="numeric" aria-label={`${label} 首字超时秒数`} onChange={(event) => onChange({ firstByteTimeout: event.target.value })} />秒仍未收到首个内容，转到</label>
-          <SearchableSelect ariaLabel={`${label} 首字超时目标渠道`} className="combobox-inline" value={draft.firstByteTimeoutChannel} options={[{ value: '', label: '按原候选顺序（未指定）' }, ...channels.map((channel) => ({ value: String(channel.id), label: `#${channel.id} ${channel.name}${channel.enabled ? '' : '（已停用）'}` }))]} onChange={(value) => onChange({ firstByteTimeoutChannel: value })} />
-          <button type="button" className="btn btn-sm" aria-label={`${label} 移除超时`} onClick={() => { onChange({ firstByteTimeout: '', firstByteTimeoutChannel: '' }); setTimeoutExpanded(false) }}>移除超时</button>
+          <SearchableSelect ariaLabel={`${label} 首字超时目标渠道`} className="combobox-inline" disabled={draft.firstByteTimeoutFailFast} value={draft.firstByteTimeoutChannel} options={[{ value: '', label: '按原候选顺序（未指定）' }, ...channels.map((channel) => ({ value: String(channel.id), label: `#${channel.id} ${channel.name}${channel.enabled ? '' : '（已停用）'}` }))]} onChange={(value) => onChange({ firstByteTimeoutChannel: value })} />
+          <label className="muted"><input type="checkbox" aria-label={`${label} 超时直接返回 503`} checked={draft.firstByteTimeoutFailFast} onChange={(event) => onChange(event.target.checked ? { firstByteTimeoutFailFast: true, firstByteTimeoutChannel: '' } : { firstByteTimeoutFailFast: false })} />直接返回 503</label>
+          <button type="button" className="btn btn-sm" aria-label={`${label} 移除超时`} onClick={() => { onChange({ firstByteTimeout: '', firstByteTimeoutChannel: '', firstByteTimeoutFailFast: false }); setTimeoutExpanded(false) }}>移除超时</button>
         </div>
-        <span className="table-note">流式请求（含强制上游流式）超时后转到指定渠道，只尝试一次，成功或错误均直接返回。目标渠道不再套用本规则的首字超时，仍遵守系统超时、权限和限额；目标不可用时直接报错。未指定目标时保留原候选顺序重试。秒数留空或 0 沿用系统设置，最长 {MAX_FIRST_BYTE_TIMEOUT_SECONDS} 秒。</span>
+        <span className="table-note">流式请求（含强制上游流式）超时后转到指定渠道，只尝试一次，成功或错误均直接返回。目标渠道不再套用本规则的首字超时，仍遵守系统超时、权限和限额；目标不可用时直接报错。未指定目标时保留原候选顺序重试。勾选「直接返回 503」时不切换渠道、不再重试，本次请求直接以 503 结束（该渠道仍按首字超时冷却，后续请求会跳过）。秒数留空或 0 沿用系统设置，最长 {MAX_FIRST_BYTE_TIMEOUT_SECONDS} 秒。</span>
         </> : <>
           <div><button type="button" className="btn btn-sm" aria-label={`${label} 添加超时`} onClick={() => setTimeoutExpanded(true)}>+ 添加超时</button></div>
           <span className="table-note">可选。不添加时沿用系统超时设置；添加后可设置本规则的等待秒数和超时目标渠道。</span>
@@ -245,7 +246,7 @@ export function ChannelRoutesPage() {
       </div>
       {simulateError && <p className="error-text" role="alert">{simulateError}</p>}
       {simulated && <div className="cell-stack">
-        <span>{simulated.matched ? `命中规则「${simulated.rule_name || simulated.rule_id}」` : '未命中规则（默认顺序）'} · 依据：{ROUTE_REASONS[simulated.reason] ?? simulated.reason}{simulated.tier >= 0 ? `（档位 ${simulated.tier + 1}）` : ''} · 输入 Token {simulated.input_tokens.toLocaleString()} · 首字超时：{simulated.first_byte_timeout_seconds > 0 ? `${simulated.first_byte_timeout_seconds} 秒后${simulated.first_byte_timeout_channel_id ? `转到渠道 #${simulated.first_byte_timeout_channel_id}，返回最终结果` : '按候选顺序切换'}` : '沿用系统设置'}</span>
+        <span>{simulated.matched ? `命中规则「${simulated.rule_name || simulated.rule_id}」` : '未命中规则（默认顺序）'} · 依据：{ROUTE_REASONS[simulated.reason] ?? simulated.reason}{simulated.tier >= 0 ? `（档位 ${simulated.tier + 1}）` : ''} · 输入 Token {simulated.input_tokens.toLocaleString()} · 首字超时：{simulated.first_byte_timeout_seconds > 0 ? `${simulated.first_byte_timeout_seconds} 秒后${simulated.first_byte_timeout_fail_fast ? '直接返回 503' : simulated.first_byte_timeout_channel_id ? `转到渠道 #${simulated.first_byte_timeout_channel_id}，返回最终结果` : '按候选顺序切换'}` : '沿用系统设置'}</span>
         {simulated.non_stream_channel_id ? <span>非流式请求：直接使用渠道 #{simulated.non_stream_channel_id}，返回最终结果；下方渠道组顺序用于其他请求。</span> : null}
         <span className="route-order">{simulated.pools.map((pool, order) => <span key={pool.pool} className={`badge ${order === 0 ? 'badge-good' : 'badge-muted'}`}>{order + 1}. {pool.name}（进行中 {pool.inflight}）</span>)}</span>
         {dirty && <span className="warn-text">有未保存的修改，模拟结果基于已保存的规则。</span>}

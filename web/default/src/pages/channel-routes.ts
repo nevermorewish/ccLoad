@@ -17,6 +17,8 @@ export type RouteRule = {
   /** 首字超时秒数，0 表示沿用系统设置。 */
   first_byte_timeout_seconds: number
   first_byte_timeout_channel_id?: number
+  /** 首字超时后不切换渠道，直接返回 503；与 first_byte_timeout_channel_id 互斥。 */
+  first_byte_timeout_fail_fast?: boolean
   non_stream_channel_id?: number
 }
 export type RouteConfig = { rules: RouteRule[] }
@@ -35,6 +37,7 @@ export type Simulation = {
   pools: Array<{ pool: number; name: string; inflight: number }>
   first_byte_timeout_seconds: number
   first_byte_timeout_channel_id?: number
+  first_byte_timeout_fail_fast?: boolean
   non_stream_channel_id?: number
 }
 
@@ -54,6 +57,7 @@ export type RuleDraft = {
   strict: boolean
   firstByteTimeout: string
   firstByteTimeoutChannel: string
+  firstByteTimeoutFailFast: boolean
   nonStreamChannel: string
 }
 
@@ -112,7 +116,7 @@ export function describeTier(tier: TokenTier): string {
 }
 
 export function emptyRuleDraft(): RuleDraft {
-  return { key: nextKey(), id: '', name: '', enabled: true, models: [], defaultPool: 0, tiers: [], overflow: [], sticky: 'tier', strict: false, firstByteTimeout: '', firstByteTimeoutChannel: '', nonStreamChannel: '' }
+  return { key: nextKey(), id: '', name: '', enabled: true, models: [], defaultPool: 0, tiers: [], overflow: [], sticky: 'tier', strict: false, firstByteTimeout: '', firstByteTimeoutChannel: '', firstByteTimeoutFailFast: false, nonStreamChannel: '' }
 }
 
 /** 示例：kimi-k3 输入 < 8k 走渠道1、≥ 50k 走渠道2，渠道1 进行中达到 100 时溢出到渠道2，同档位会话粘性。 */
@@ -134,6 +138,7 @@ export function ruleToDraft(rule: RouteRule): RuleDraft {
     sticky, strict: Boolean(rule.strict),
     nonStreamChannel: rule.non_stream_channel_id ? String(rule.non_stream_channel_id) : '',
     firstByteTimeoutChannel: rule.first_byte_timeout_channel_id ? String(rule.first_byte_timeout_channel_id) : '',
+    firstByteTimeoutFailFast: Boolean(rule.first_byte_timeout_fail_fast),
     firstByteTimeout: Number(rule.first_byte_timeout_seconds) > 0 ? String(rule.first_byte_timeout_seconds) : '',
   }
 }
@@ -186,11 +191,14 @@ export function draftsToConfig(drafts: RuleDraft[]): { config?: RouteConfig; err
     }
     const target = parseSecondsInput(draft.firstByteTimeoutChannel ?? '')
     if (target === null || (target > 0 && firstByteTimeout === 0)) return { error: `${label}：指定超时渠道时必须填写正整数秒数和有效渠道` }
+    if (draft.firstByteTimeoutFailFast && firstByteTimeout === 0) return { error: `${label}：超时直接返回 503 时必须填写正整数秒数` }
+    if (draft.firstByteTimeoutFailFast && target > 0) return { error: `${label}：超时直接返回 503 与指定超时渠道不能同时设置` }
     const nonStreamTarget = parseSecondsInput(draft.nonStreamChannel ?? '')
     if (nonStreamTarget === null) return { error: `${label}：非流式请求必须指定有效渠道` }
     rules.push({
       ...(nonStreamTarget > 0 ? { non_stream_channel_id: nonStreamTarget } : {}),
       ...(target > 0 ? { first_byte_timeout_channel_id: target } : {}),
+      ...(draft.firstByteTimeoutFailFast ? { first_byte_timeout_fail_fast: true } : {}),
       id: draft.id, name: draft.name.trim(), enabled: draft.enabled, models, default_pool: draft.defaultPool,
       token_tiers: tiers, overflow, sticky: draft.sticky, strict: draft.strict, first_byte_timeout_seconds: firstByteTimeout,
     })
@@ -203,7 +211,11 @@ export function summarizeRule(rule: RouteRule): string {
   const parts = rule.token_tiers.map((tier) => `${describeTier(tier)} → ${channelPoolLabel(tier.pool)}`)
   parts.push(`${rule.token_tiers.length ? '其余' : '全部'} → ${channelPoolLabel(rule.default_pool)}`)
   for (const item of rule.overflow) parts.push(`${channelPoolLabel(item.pool)} 进行中 ≥ ${item.max_queue} 时优先 ${channelPoolLabel(item.target_pool)}`)
-  if (rule.first_byte_timeout_seconds > 0) parts.push(rule.first_byte_timeout_channel_id ? `首字超过 ${rule.first_byte_timeout_seconds} 秒转到渠道 #${rule.first_byte_timeout_channel_id}，返回最终结果` : `首字超过 ${rule.first_byte_timeout_seconds} 秒切换渠道`)
+  if (rule.first_byte_timeout_seconds > 0) {
+    parts.push(rule.first_byte_timeout_fail_fast
+      ? `首字超过 ${rule.first_byte_timeout_seconds} 秒直接返回 503`
+      : rule.first_byte_timeout_channel_id ? `首字超过 ${rule.first_byte_timeout_seconds} 秒转到渠道 #${rule.first_byte_timeout_channel_id}，返回最终结果` : `首字超过 ${rule.first_byte_timeout_seconds} 秒切换渠道`)
+  }
   if (rule.non_stream_channel_id) parts.push(`非流式请求直接使用渠道 #${rule.non_stream_channel_id}，返回最终结果`)
   return parts.join('；')
 }

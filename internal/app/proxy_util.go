@@ -430,6 +430,7 @@ type proxyResult struct {
 	isClientCanceled          bool // 客户端主动取消请求（context.Canceled）
 	isNetworkError            bool
 	operatorAborted           bool            // 管理员跳过当前渠道，不重试同渠道或施加冷却
+	firstByteFailFast         bool            // 渠道路由要求首字超时立即失败，503 结果不再重试同渠道
 	nextAction                cooldown.Action // 统一重试决策：RetryKey/RetryChannel/ReturnClient
 	deferredCooldown          *cooldown.ErrorInput
 	deferredLog               *model.LogEntry

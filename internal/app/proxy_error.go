@@ -426,19 +426,30 @@ func (s *Server) handleNetworkError(
 	}
 	failure.isNetworkError = true
 
+	// 规则要求首字超时立即失败：冷却照旧按 598 记模型级，但不换渠道、不重试，
+	// 本次请求直接以 503 结束。响应未提交才成立，已提交的部分流无法改写状态。
+	failFast := channelRouteFirstByteFailFast(ctx, err) && (res == nil || !res.ResponseCommitted)
+
 	input := cooldownInputForModel(networkErrorInput(cfg.ID, keyIndex, statusCode), actualModel)
 	input.ModelScoped = util.IsModelScopedNetworkError(err)
 	if deferChannelCooldown {
 		action := s.decideCooldownAction(ctx, cfg, input)
 		keyFallback := cfg.RetryOtherKeysOnFailure &&
 			s.cooldownManager.CanFallbackToOtherKey(s.completeCooldownInput(cfg, input))
-		if action == cooldown.ActionRetryChannel && !keyFallback {
+		if action == cooldown.ActionRetryChannel && !keyFallback && !failFast {
 			failure.nextAction = action
 			return failure, action
 		}
 	}
 
 	action := s.applyCooldownDecision(ctx, cfg, input)
+	if failFast {
+		failure.status = http.StatusServiceUnavailable
+		failure.nextAction = cooldown.ActionReturnClient
+		failure.firstByteFailFast = true
+		log.Printf("[TIMEOUT] [渠道路由首字超时-直接503] 渠道ID=%d, 模型=%s, 实际耗时=%.2fs", cfg.ID, actualModel, duration)
+		return failure, cooldown.ActionReturnClient
+	}
 	failure.nextAction = action
 	return failure, action
 }

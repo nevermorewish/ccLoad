@@ -1,7 +1,6 @@
 package app
 
 import (
-	"ccLoad/internal/model"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"ccLoad/internal/model"
 )
 
 func TestNonStreamDesignatedChannel(t *testing.T) {
@@ -18,7 +19,7 @@ func TestNonStreamDesignatedChannel(t *testing.T) {
 			primary := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				primaryCalls.Add(1)
 				w.Header().Set("Content-Type", "text/event-stream")
-				io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"primary\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+				_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"primary\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 			}))
 			defer primary.Close()
 			body := `{"error":{"message":"target result"}}`
@@ -29,7 +30,7 @@ func TestNonStreamDesignatedChannel(t *testing.T) {
 				targetCalls.Add(1)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
-				io.WriteString(w, body)
+				_, _ = io.WriteString(w, body)
 			}))
 			defer target.Close()
 			env := setupProxyTestEnv(t, []testChannel{

@@ -109,6 +109,19 @@ test('explicit timeout destination round-trips and requires a timeout', () => {
 });
 
 
+test('first byte fail fast returns 503 without a destination channel', () => {
+  const draft = { ...routes.emptyRuleDraft(), models: ['kimi-k3.1-pro'], firstByteTimeout: '20', firstByteTimeoutFailFast: true };
+  const rule = routes.draftsToConfig([draft]).config.rules[0];
+  assert.equal(rule.first_byte_timeout_seconds, 20);
+  assert.equal(rule.first_byte_timeout_fail_fast, true);
+  assert.equal(rule.first_byte_timeout_channel_id, undefined);
+  assert.equal(routes.ruleToDraft(rule).firstByteTimeoutFailFast, true);
+  assert.match(routes.summarizeRule(rule), /首字超过 20 秒直接返回 503/);
+  assert.match(routes.draftsToConfig([{ ...draft, firstByteTimeout: '' }]).error, /503/);
+  assert.match(routes.draftsToConfig([{ ...draft, firstByteTimeoutChannel: '40' }]).error, /不能同时设置/);
+  assert.equal(routes.draftsToConfig([{ ...routes.emptyRuleDraft(), models: ['m'] }]).config.rules[0].first_byte_timeout_fail_fast, undefined);
+});
+
 test('non-stream destination round-trips independently of first byte timeout', () => {
   const draft = { ...routes.emptyRuleDraft(), models: ['kimi-k3.1-pro'], nonStreamChannel: '44' };
   const rule = routes.draftsToConfig([draft]).config.rules[0];

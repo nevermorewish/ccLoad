@@ -60,8 +60,10 @@ type channelRouteSimulation struct {
 	Reason      string                       `json:"reason"`
 	Pools       []channelRouteSimulationPool `json:"pools"`
 	// FirstByteTimeoutSeconds 是命中规则的首字超时；0 表示沿用系统设置。
+	// FirstByteTimeoutFailFast 时超时直接返回 503，不切换渠道。
 	FirstByteTimeoutSeconds   int   `json:"first_byte_timeout_seconds"`
 	FirstByteTimeoutChannelID int64 `json:"first_byte_timeout_channel_id,omitempty"`
+	FirstByteTimeoutFailFast  bool  `json:"first_byte_timeout_fail_fast,omitempty"`
 	NonStreamChannelID        int64 `json:"non_stream_channel_id,omitempty"`
 }
 
@@ -180,6 +182,7 @@ func (s *Server) HandleSimulateChannelRoute(c *gin.Context) {
 		Pools:                     make([]channelRouteSimulationPool, 0, len(route.pools)),
 		FirstByteTimeoutSeconds:   int(route.firstByteTimeout / time.Second),
 		FirstByteTimeoutChannelID: route.firstByteTimeoutChannelID,
+		FirstByteTimeoutFailFast:  route.firstByteTimeoutFailFast,
 		NonStreamChannelID:        route.nonStreamChannelID,
 	}
 	for _, pool := range route.pools {

@@ -1109,7 +1109,8 @@ func (s *Server) tryChannelWithSameChannelRetries(
 		pending := &pendingSameChannelCooldowns{}
 		result, err := s.tryChannelWithKeys(context.WithValue(ctx, pendingSameChannelCooldownsKey{}, pending), cfg, reqCtx, w)
 		if attempt < cfg.SameChannelRetries && err == nil && len(pending.inputs) > 0 && ctx.Err() == nil &&
-			result != nil && !result.succeeded && !result.isClientCanceled && !result.operatorAborted && !shouldUseTimeoutChannel(reqCtx, result) {
+			result != nil && !result.succeeded && !result.isClientCanceled && !result.operatorAborted &&
+			!result.firstByteFailFast && !shouldUseTimeoutChannel(reqCtx, result) {
 			log.Printf("[RETRY] 渠道 %s (ID=%d) 同渠道重试 %d/%d (status=%d)",
 				cfg.Name, cfg.ID, attempt+1, cfg.SameChannelRetries, result.status)
 			continue
@@ -1125,6 +1126,13 @@ func (s *Server) tryChannelWithSameChannelRetries(
 		}
 		last := pending.inputs[len(pending.inputs)-1]
 		key := sameChannelFailureKey{channelID: cfg.ID, model: last.Model}
+		// 立即失败已决定结束请求：暂缓的冷却直接落库，不再按连续失败次数豁免。
+		if result != nil && result.firstByteFailFast {
+			for _, in := range pending.inputs {
+				s.applyCooldownDecision(ctx, cfg, in)
+			}
+			return result, err
+		}
 		if failures := s.sameChannelFailures.add(key, attempt+1); failures <= cfg.SameChannelRetries {
 			log.Printf("[COOLDOWN] 渠道 %s (ID=%d) 连续失败 %d/%d 次，暂不冷却 (status=%d)",
 				cfg.Name, cfg.ID, failures, cfg.SameChannelRetries, last.StatusCode)

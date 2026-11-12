@@ -91,6 +91,10 @@ func TestParseChannelRouteConfigNormalizes(t *testing.T) {
 		"first byte timeout too long": func(r *ChannelRouteRule) {
 			r.FirstByteTimeoutSeconds = maxChannelRouteFirstByteTimeoutSeconds + 1
 		},
+		"fail fast without timeout": func(r *ChannelRouteRule) { r.FirstByteTimeoutFailFast = true },
+		"fail fast with target": func(r *ChannelRouteRule) {
+			r.FirstByteTimeoutSeconds, r.FirstByteTimeoutChannelID, r.FirstByteTimeoutFailFast = 20, 3, true
+		},
 	}
 	for name, mutate := range cases {
 		rule := valid
@@ -662,6 +666,57 @@ func TestProxy_ChannelRouteRequestedChannelHeaderBypassesPools(t *testing.T) {
 
 // 规则首字超时放弃只回响应头、迟迟不出内容的渠道：响应尚未提交，直接切换下一个候选；
 // 超时渠道的该模型随之冷却，后续请求不再等待它。
+func TestProxy_ChannelRouteFirstByteTimeoutFailFastReturns503(t *testing.T) {
+	t.Parallel()
+	var stalledRequests atomic.Int32
+	stalled := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stalledRequests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(stalled.Close)
+	var fallbackRequests atomic.Int32
+	fallback := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fallbackRequests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"kimi-k3\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"+
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	t.Cleanup(fallback.Close)
+	env := setupProxyTestEnv(t, []testChannel{
+		{name: "stalled", upstreamProtocol: "anthropic", models: "kimi-k3", priority: 100, channelPool: 1},
+		{name: "fallback", upstreamProtocol: "anthropic", models: "kimi-k3", priority: 100, channelPool: 0},
+	}, map[int]string{0: stalled.URL, 1: fallback.URL})
+	useChannelRoutes(t, env.server, ChannelRouteRule{
+		ID: "kimi", Enabled: true, Models: []string{"kimi-k3"}, DefaultPool: 1, Sticky: channelRouteStickyOff,
+		FirstByteTimeoutSeconds: 1, FirstByteTimeoutFailFast: true,
+	})
+	request := map[string]any{
+		"model": "kimi-k3", "max_tokens": 16, "stream": true,
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+
+	started := time.Now()
+	response := doProxyRequest(t, env.engine, "/v1/messages", request, nil)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503 without failover", response.Code, response.Body.String())
+	}
+	if stalledRequests.Load() != 1 || fallbackRequests.Load() != 0 || time.Since(started) < time.Second {
+		t.Fatalf("stalled=%d fallback=%d elapsed=%v, want single attempt then 503", stalledRequests.Load(), fallbackRequests.Load(), time.Since(started))
+	}
+
+	// 冷却仍按首字节超时落模型级：后续请求直接跳过该渠道。
+	response = doProxyRequest(t, env.engine, "/v1/messages", request, nil)
+	if response.Code != http.StatusOK || stalledRequests.Load() != 1 || fallbackRequests.Load() != 1 {
+		t.Fatalf("status=%d stalled=%d fallback=%d, want cooled channel skipped", response.Code, stalledRequests.Load(), fallbackRequests.Load())
+	}
+	if counts := env.server.channelPoolQueues.snapshot(); len(counts) != 0 {
+		t.Fatalf("queue reservations leaked: %v", counts)
+	}
+}
+
 func TestProxy_ChannelRouteFirstByteTimeoutSwitchesChannel(t *testing.T) {
 	t.Parallel()
 	var stalledRequests atomic.Int32

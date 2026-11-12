@@ -19,6 +19,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"ccLoad/internal/model"
+	"ccLoad/internal/util"
 )
 
 // 渠道路由：渠道按渠道组（主渠道/渠道1/渠道2）划分，路由规则按模型匹配后，
@@ -87,6 +88,9 @@ type ChannelRouteOverflow struct {
 // FirstByteTimeoutSeconds>0 时覆盖系统首字超时（含协议覆盖）：命中本规则的流式请求在某个渠道
 // 等待首个有效内容超过该秒数，按首字节超时（598）放弃该渠道；配置目标时只尝试目标一次，
 // 否则按原候选顺序重试。0 沿用系统设置。
+// FirstByteTimeoutFailFast=true 时命中规则的请求在首字超时后不切换渠道、不重试，直接以 503
+// 结束本次请求；冷却仍按首字节超时（598）记模型级，后续请求照常跳过该渠道。
+// 与 FirstByteTimeoutChannelID 互斥：一个要立刻失败，一个要转最终渠道。
 // NonStreamChannelID>0 时客户端非流式请求直接使用指定渠道，成功或错误均作为最终结果。
 type ChannelRouteRule struct {
 	ID                        string                  `json:"id"`
@@ -100,6 +104,7 @@ type ChannelRouteRule struct {
 	Strict                    bool                    `json:"strict"`
 	FirstByteTimeoutSeconds   int                     `json:"first_byte_timeout_seconds"`
 	FirstByteTimeoutChannelID int64                   `json:"first_byte_timeout_channel_id,omitempty"`
+	FirstByteTimeoutFailFast  bool                    `json:"first_byte_timeout_fail_fast,omitempty"`
 	NonStreamChannelID        int64                   `json:"non_stream_channel_id,omitempty"`
 }
 
@@ -267,6 +272,12 @@ func normalizeChannelRouteRule(rule ChannelRouteRule) (ChannelRouteRule, error) 
 	if rule.FirstByteTimeoutChannelID < 0 || (rule.FirstByteTimeoutChannelID > 0 && rule.FirstByteTimeoutSeconds == 0) {
 		return ChannelRouteRule{}, fmt.Errorf("first_byte_timeout_channel_id requires a positive timeout and channel ID")
 	}
+	if rule.FirstByteTimeoutFailFast && rule.FirstByteTimeoutSeconds == 0 {
+		return ChannelRouteRule{}, fmt.Errorf("first_byte_timeout_fail_fast requires a positive timeout")
+	}
+	if rule.FirstByteTimeoutFailFast && rule.FirstByteTimeoutChannelID > 0 {
+		return ChannelRouteRule{}, fmt.Errorf("first_byte_timeout_fail_fast cannot be combined with first_byte_timeout_channel_id")
+	}
 	return rule, nil
 }
 
@@ -424,7 +435,7 @@ func (s *Server) commitChannelRouteConfig(ctx context.Context, config ChannelRou
 func channelRouteRuleEqual(a, b ChannelRouteRule) bool {
 	return a.ID == b.ID && a.Name == b.Name && a.Enabled == b.Enabled && slices.Equal(a.Models, b.Models) &&
 		a.DefaultPool == b.DefaultPool && slices.Equal(a.TokenTiers, b.TokenTiers) && slices.Equal(a.Overflow, b.Overflow) &&
-		a.Sticky == b.Sticky && a.Strict == b.Strict && a.FirstByteTimeoutSeconds == b.FirstByteTimeoutSeconds && a.FirstByteTimeoutChannelID == b.FirstByteTimeoutChannelID && a.NonStreamChannelID == b.NonStreamChannelID
+		a.Sticky == b.Sticky && a.Strict == b.Strict && a.FirstByteTimeoutSeconds == b.FirstByteTimeoutSeconds && a.FirstByteTimeoutChannelID == b.FirstByteTimeoutChannelID && a.FirstByteTimeoutFailFast == b.FirstByteTimeoutFailFast && a.NonStreamChannelID == b.NonStreamChannelID
 }
 
 // channelRoutePoolDecisionEqual 忽略首字超时：它只影响渠道尝试、不改变渠道组决策，
@@ -451,7 +462,9 @@ type channelPoolRoute struct {
 	// firstByteTimeout 是命中规则配置的首字超时，每次渠道尝试生效；0 表示沿用系统设置。
 	firstByteTimeout          time.Duration
 	firstByteTimeoutChannelID int64
-	nonStreamChannelID        int64
+	// firstByteTimeoutFailFast 时首字超时直接以 503 结束请求，不切换渠道也不再重试。
+	firstByteTimeoutFailFast bool
+	nonStreamChannelID       int64
 
 	mu           sync.Mutex
 	queues       *channelPoolQueues
@@ -510,6 +523,16 @@ func channelRouteFirstByteTimeout(ctx context.Context, fallback time.Duration) t
 		return route.firstByteTimeout
 	}
 	return fallback
+}
+
+// channelRouteFirstByteFailFast 报告本次首字超时是否由命中规则要求立即失败：
+// 只影响结束方式（503 + 不再重试），冷却仍按 598 记模型级。
+func channelRouteFirstByteFailFast(ctx context.Context, err error) bool {
+	if !errors.Is(err, util.ErrUpstreamFirstByteTimeout) {
+		return false
+	}
+	route := channelPoolRouteFromContext(ctx)
+	return route != nil && route.firstByteTimeoutFailFast
 }
 
 // rank 返回渠道组在本次决策中的尝试顺位；nil 决策下所有组同为 0。
@@ -660,6 +683,7 @@ func (s *Server) decideChannelPoolRoute(in channelPoolRouteInput) *channelPoolRo
 		ruleID: rule.ID, ruleName: rule.Name, tier: -1, inputTokens: -1, reason: channelRouteReasonDefault,
 		firstByteTimeout:          time.Duration(rule.FirstByteTimeoutSeconds) * time.Second,
 		firstByteTimeoutChannelID: rule.FirstByteTimeoutChannelID,
+		firstByteTimeoutFailFast:  rule.FirstByteTimeoutFailFast,
 		nonStreamChannelID:        rule.NonStreamChannelID,
 	}
 
