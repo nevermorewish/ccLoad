@@ -27,6 +27,7 @@ type RuleCardProps = {
 }
 
 function RuleCard({ draft, index, total, inflight, knownModels, channels, onChange, onMove, onRemove }: RuleCardProps) {
+  const [timeoutExpanded, setTimeoutExpanded] = useState(() => Boolean(draft.firstByteTimeout || draft.firstByteTimeoutChannel))
   const summary = useMemo(() => {
     const { config } = draftsToConfig([draft])
     return config ? summarizeRule(config.rules[0]) : ''
@@ -117,11 +118,17 @@ function RuleCard({ draft, index, total, inflight, knownModels, channels, onChan
     <div className="route-field">
       <span className="route-label">首字超时</span>
       <div className="cell-stack">
+        {timeoutExpanded ? <>
         <div className="toolbar route-row">
           <label className="muted">超过<input className="input compact" value={draft.firstByteTimeout} placeholder="系统设置" inputMode="numeric" aria-label={`${label} 首字超时秒数`} onChange={(event) => onChange({ firstByteTimeout: event.target.value })} />秒仍未收到首个内容，转到</label>
           <SearchableSelect ariaLabel={`${label} 首字超时目标渠道`} className="combobox-inline" value={draft.firstByteTimeoutChannel} options={[{ value: '', label: '按原候选顺序（未指定）' }, ...channels.map((channel) => ({ value: String(channel.id), label: `#${channel.id} ${channel.name}${channel.enabled ? '' : '（已停用）'}` }))]} onChange={(value) => onChange({ firstByteTimeoutChannel: value })} />
+          <button type="button" className="btn btn-sm" aria-label={`${label} 移除超时`} onClick={() => { onChange({ firstByteTimeout: '', firstByteTimeoutChannel: '' }); setTimeoutExpanded(false) }}>移除超时</button>
         </div>
         <span className="table-note">流式请求（含强制上游流式）超时后转到指定渠道，只尝试一次，成功或错误均直接返回。目标渠道不再套用本规则的首字超时，仍遵守系统超时、权限和限额；目标不可用时直接报错。未指定目标时保留原候选顺序重试。秒数留空或 0 沿用系统设置，最长 {MAX_FIRST_BYTE_TIMEOUT_SECONDS} 秒。</span>
+        </> : <>
+          <div><button type="button" className="btn btn-sm" aria-label={`${label} 添加超时`} onClick={() => setTimeoutExpanded(true)}>+ 添加超时</button></div>
+          <span className="table-note">可选。不添加时沿用系统超时设置；添加后可设置本规则的等待秒数和超时目标渠道。</span>
+        </>}
       </div>
     </div>
   </div>
