@@ -3160,101 +3160,6 @@ func TestNativeCodexWebsocketScopesTurnStateToIssuingAccount(t *testing.T) {
 
 // HTTP 客户端只从响应头取 turn-state；HTTP 续写重拨原生 WS 时，握手头里的令牌
 // 必须经合成响应带标签回到 HTTP 响应头。
-func TestHTTPResponsesTagsNativeCodexWebsocketHandshakeTurnState(t *testing.T) {
-	t.Parallel()
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	completeTurn := func(conn *websocket.Conn, responseID string) {
-		if _, _, err := conn.ReadMessage(); err != nil {
-			t.Errorf("read %s request: %v", responseID, err)
-			return
-		}
-		if err := conn.WriteJSON(map[string]any{
-			"type": "response.completed",
-			"response": map[string]any{
-				"id": responseID, "output": []any{},
-				"usage": map[string]any{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-			},
-		}); err != nil {
-			t.Errorf("write %s completion: %v", responseID, err)
-		}
-	}
-	serveWebsocket := func(responseID string, handshakeHeader http.Header, handshakes *atomic.Int32) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !websocket.IsWebSocketUpgrade(r) {
-				t.Errorf("%s upstream received HTTP request, want native websocket", responseID)
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			conn, err := upgrader.Upgrade(w, r, handshakeHeader)
-			if err != nil {
-				t.Errorf("upgrade %s websocket: %v", responseID, err)
-				return
-			}
-			defer func() { _ = conn.Close() }()
-			handshakes.Add(1)
-			completeTurn(conn, responseID)
-			_, _, _ = conn.ReadMessage()
-		}))
-	}
-	var firstHandshakes, secondHandshakes atomic.Int32
-	first := serveWebsocket("resp-handshake-1", nil, &firstHandshakes)
-	defer first.Close()
-	second := serveWebsocket("resp-handshake-2", http.Header{"X-Codex-Turn-State": []string{"state-handshake"}}, &secondHandshakes)
-	defer second.Close()
-
-	env := setupProxyTestEnv(t, []testChannel{
-		{name: "handshake-first", upstreamProtocol: "codex", websockets: true, models: "gpt-test", priority: 100},
-		{
-			name: "handshake-oauth", upstreamProtocol: "codex", websockets: true, models: "gpt-test", priority: 90,
-			authType:        model.AuthTypeCodexOAuth,
-			oauthCredential: codexProxyTestCredential(t, "at-handshake", "rt-handshake", "account-handshake"),
-		},
-	}, map[int]string{0: first.URL, 1: second.URL})
-
-	downstream := dialResponsesWebsocketWithSessionID(t, env.engine, "handshake-turn-state")
-	if err := downstream.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatalf("set handshake downstream deadline: %v", err)
-	}
-	if err := downstream.WriteJSON(map[string]any{
-		"type": "response.create", "model": "gpt-test",
-		"input": []any{map[string]any{"role": "user", "content": "one"}},
-	}); err != nil {
-		t.Fatalf("write first handshake turn: %v", err)
-	}
-	readWebsocketUntilType(t, downstream, "response.completed")
-	_ = downstream.Close()
-
-	// 停用首个渠道：HTTP 续写仍挂着已建立的上游 WS，但目标换成 OAuth 渠道，必须重拨。
-	configs, err := env.store.ListConfigs(context.Background())
-	if err != nil {
-		t.Fatalf("list handshake channels: %v", err)
-	}
-	for _, cfg := range configs {
-		if cfg.Name == "handshake-first" {
-			cfg.Enabled = false
-			if _, err := env.store.UpdateConfig(context.Background(), cfg.ID, cfg); err != nil {
-				t.Fatalf("disable first handshake channel: %v", err)
-			}
-		}
-	}
-	env.server.InvalidateChannelListCache()
-
-	response := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{
-		"model": "gpt-test", "stream": true, "previous_response_id": "resp-handshake-1",
-		"input": []any{map[string]any{"role": "user", "content": "two"}},
-	}, map[string]string{"Session-Id": "handshake-turn-state"})
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "resp-handshake-2") {
-		t.Fatalf("HTTP continuation status=%d body=%s", response.Code, response.Body.String())
-	}
-	if firstHandshakes.Load() != 1 || secondHandshakes.Load() != 1 {
-		t.Fatalf("handshakes first=%d second=%d, want 1/1", firstHandshakes.Load(), secondHandshakes.Load())
-	}
-	tagged := response.Header().Get("X-Codex-Turn-State")
-	if !strings.HasPrefix(tagged, "ccl1.") || !strings.HasSuffix(tagged, ".state-handshake") {
-		t.Fatalf("HTTP turn-state header = %q, want account-tagged state-handshake", tagged)
-	}
-}
-
 func TestNativeCodexWebsocketWindowHeaderRules(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -4154,6 +4059,110 @@ func TestCodexHTTPGatewayChainPreservesThreadConcurrency(t *testing.T) {
 	}
 }
 
+func TestHTTPResponsesSameSessionRequestsAreNotSerialized(t *testing.T) {
+	t.Parallel()
+	type arrival struct {
+		content            string
+		previousResponseID string
+		inputItems         int
+	}
+	arrived := make(chan arrival, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseUpstream)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read upstream body: %v", err)
+			return
+		}
+		content := gjson.GetBytes(body, "input.0.content").String()
+		if content != "turn-1" {
+			arrived <- arrival{
+				content:            content,
+				previousResponseID: gjson.GetBytes(body, "previous_response_id").String(),
+				inputItems:         len(gjson.GetBytes(body, "input").Array()),
+			}
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-%s\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n", content)
+	}))
+	defer upstream.Close()
+	env := setupProxyTestEnv(t, []testChannel{{
+		name: "same-session-http", upstreamProtocol: "codex", models: "gpt-test", priority: 100,
+	}}, map[int]string{0: upstream.URL})
+	env.server.client = upstream.Client()
+	sessionHeaders := map[string]string{"Session-Id": "shared-http-session"}
+
+	first := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{
+		"model": "gpt-test", "stream": true,
+		"input": []any{map[string]any{"role": "user", "content": "turn-1"}},
+	}, sessionHeaders)
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), "resp-turn-1") {
+		t.Fatalf("first turn status=%d body=%s", first.Code, first.Body.String())
+	}
+
+	// 同一 Session-Id 的独立请求与 previous_response_id 续接都不能排在进行中的请求之后。
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	for _, payload := range []map[string]any{
+		{"model": "gpt-test", "stream": true, "input": []any{map[string]any{"role": "user", "content": "independent"}}},
+		{
+			"model": "gpt-test", "stream": true, "previous_response_id": "resp-turn-1",
+			"input": []any{map[string]any{"role": "user", "content": "continuation"}},
+		},
+	} {
+		go func() {
+			responses <- doProxyRequest(t, env.engine, "/v1/responses", payload, sessionHeaders)
+		}()
+	}
+
+	arrivals := make(map[string]arrival, 2)
+	timer := time.NewTimer(time.Second)
+	for len(arrivals) < 2 {
+		select {
+		case got := <-arrived:
+			arrivals[got.content] = got
+		case <-timer.C:
+			releaseUpstream()
+			for completed := 0; completed < 2; completed++ {
+				select {
+				case <-responses:
+				case <-time.After(2 * time.Second):
+				}
+			}
+			t.Fatalf("upstream arrivals before release=%d, want 2; same-session requests were serialized", len(arrivals))
+		}
+	}
+	if !timer.Stop() {
+		<-timer.C
+	}
+	releaseUpstream()
+
+	for completed := 0; completed < 2; completed++ {
+		select {
+		case recorder := <-responses:
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("same-session response status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("same-session HTTP response did not finish")
+		}
+	}
+	if got := arrivals["independent"]; got.previousResponseID != "" || got.inputItems != 1 {
+		t.Fatalf("independent request reached upstream as %+v, want original single-item body", got)
+	}
+	if got := arrivals["continuation"]; got.previousResponseID != "resp-turn-1" || got.inputItems != 1 {
+		t.Fatalf("continuation reached upstream as %+v, want native previous_response_id body", got)
+	}
+}
+
 func TestHTTPResponsesReportsActiveUpstreamLifecycle(t *testing.T) {
 	t.Parallel()
 	requestArrived := make(chan struct{})
@@ -4249,11 +4258,17 @@ func TestHTTPResponsesReportsActiveUpstreamLifecycle(t *testing.T) {
 	}
 }
 
-func TestResponsesExecutionSessionSwitchesFromDownstreamWebsocketToHTTP(t *testing.T) {
+func TestHTTPResponsesDoNotContinueWebsocketExecutionTranscript(t *testing.T) {
 	t.Parallel()
 	var handshakes atomic.Int32
+	var httpCalls atomic.Int32
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !websocket.IsWebSocketUpgrade(r) {
+			httpCalls.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Errorf("upgrade cross-transport websocket: %v", err)
@@ -4261,29 +4276,25 @@ func TestResponsesExecutionSessionSwitchesFromDownstreamWebsocketToHTTP(t *testi
 		}
 		defer func() { _ = conn.Close() }()
 		handshakes.Add(1)
-		for turn := 1; turn <= 2; turn++ {
-			var request map[string]any
-			if err := conn.ReadJSON(&request); err != nil {
-				t.Errorf("read cross-transport request %d: %v", turn, err)
-				return
-			}
-			if turn == 2 && request["previous_response_id"] != "resp-cross-1" {
-				t.Errorf("cross-transport continuation=%#v", request)
-			}
-			_ = conn.WriteJSON(map[string]any{
-				"type": "response.completed",
-				"response": map[string]any{
-					"id": fmt.Sprintf("resp-cross-%d", turn), "output": []any{},
-					"usage": map[string]any{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-				},
-			})
+		var request map[string]any
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Errorf("read websocket turn: %v", err)
+			return
 		}
+		_ = conn.WriteJSON(map[string]any{
+			"type": "response.completed",
+			"response": map[string]any{
+				"id": "resp-cross-1", "output": []any{},
+				"usage": map[string]any{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+			},
+		})
 	}))
 	defer upstream.Close()
 	env := setupProxyTestEnv(t, []testChannel{{
 		name: "cross-transport", upstreamProtocol: "codex", websockets: true,
 		models: "gpt-test", priority: 100,
 	}}, map[int]string{0: upstream.URL})
+	env.server.client = upstream.Client()
 	downstreamWS := dialResponsesWebsocketWithSessionID(t, env.engine, "cross-mode")
 	if err := downstreamWS.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatalf("set cross-transport WS deadline: %v", err)
@@ -4297,19 +4308,21 @@ func TestResponsesExecutionSessionSwitchesFromDownstreamWebsocketToHTTP(t *testi
 	readWebsocketUntilType(t, downstreamWS, "response.completed")
 	_ = downstreamWS.Close()
 
+	// HTTP 不读写执行会话 transcript：WS 产出的 Response ID 不能经 HTTP 本地续接，
+	// 客户端须重发完整会话；拒绝发生在触达上游之前。
 	downstreamHTTP := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{
 		"model": "gpt-test", "stream": true,
 		"previous_response_id": "resp-cross-1",
 		"input":                []any{map[string]any{"role": "user", "content": "two"}},
 	}, map[string]string{"Session-Id": "cross-mode"})
-	if downstreamHTTP.Code != http.StatusOK || !strings.Contains(downstreamHTTP.Body.String(), "resp-cross-2") {
+	if downstreamHTTP.Code != http.StatusBadRequest ||
+		gjson.GetBytes(downstreamHTTP.Body.Bytes(), "error.code").String() != "previous_response_not_found" {
 		t.Fatalf("cross-transport HTTP status=%d body=%s", downstreamHTTP.Code, downstreamHTTP.Body.String())
 	}
-	if handshakes.Load() != 1 {
-		t.Fatalf("cross-transport handshakes=%d, want 1", handshakes.Load())
+	if handshakes.Load() != 1 || httpCalls.Load() != 0 {
+		t.Fatalf("cross-transport upstream handshakes=%d http=%d, want 1/0", handshakes.Load(), httpCalls.Load())
 	}
 }
-
 func TestHTTPResponsesUnknownPreviousIDRejectsBeforeUpstream(t *testing.T) {
 	t.Parallel()
 	var websocketCalls atomic.Int32

@@ -1,12 +1,10 @@
 package app
 
 import (
-	"bytes"
 	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"ccLoad/internal/protocol"
@@ -659,37 +657,4 @@ func reasoningToolOutputFailed(item gjson.Result) bool {
 		}
 	}
 	return false
-}
-
-// A non-stream HTTP continuation may read locally owned WS history for the
-// decision, while its upstream request retains ordinary HTTP wire semantics.
-func (s *Server) localReasoningTranscript(r *proxyRequestContext) []byte {
-	if s.responsesExecutionSessions == nil || r.clientProtocol != protocol.Codex || gjson.GetBytes(r.body, "previous_response_id").String() == "" {
-		return nil
-	}
-	identity := responsesExecutionSessionID(r.header)
-	if identity == "" || r.tokenHash == "" {
-		return nil
-	}
-	store := s.responsesExecutionSessions
-	store.mu.Lock()
-	session := store.sessions[responsesExecutionSessionKey(r.tokenHash, identity)]
-	if session == nil {
-		store.mu.Unlock()
-		return nil
-	}
-	select {
-	case session.turn <- struct{}{}:
-	default:
-		store.mu.Unlock()
-		return nil
-	}
-	session.lastAccess = time.Now()
-	store.mu.Unlock()
-	defer session.releaseTurn()
-	replay, _, local, err := session.transcript.normalizeHTTPRequests(r.body)
-	if err != nil || !local {
-		return nil
-	}
-	return bytes.Clone(replay)
 }

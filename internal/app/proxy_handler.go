@@ -570,46 +570,17 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 	}
 	ctx = withChannelRestrictionToken(ctx, tokenHashStr)
 
-	var executionSession *responsesExecutionSession
+	// HTTP Responses 只借用执行会话做渠道粘性（首选渠道、模型行），不取 turn lock、不读写
+	// transcript、不复用上游 WS：同一 Session-Id 的请求各自原样转发、互不排队；
+	// previous_response_id 交给上游，按 responsesHTTPRoutes 路由到产出该响应的渠道。
+	// 会话容量或预算超限只放弃粘性，不拒绝 HTTP 请求。
 	var routingSession *responsesExecutionSession
-	var executionSessionRequestBody []byte
-	var nativeRequestBody []byte
 	if clientProtocol == protocol.Codex && isStreaming && requestMethod == http.MethodPost &&
-		requestFamily == protocol.RequestFamilyResponses {
-		sessionID := responsesExecutionSessionID(c.Request.Header)
-		// Ordinary HTTP requests only need process-local state when the client supplied
-		// the explicit Session-Id contract. Cache routing hints are not conversation IDs.
-		if tokenHashStr != "" && sessionID != "" {
-			var releaseSession func()
-			var errSession error
-			executionSession, releaseSession, errSession = s.responsesExecutionSessions.acquire(tokenHashStr, sessionID)
-			if errSession != nil {
-				writeLocalProxyError(c, http.StatusTooManyRequests, errSession.Error())
-				return
-			}
-			defer releaseSession()
-			if errAcquire := executionSession.acquireTurn(ctx); errAcquire != nil {
-				writeLocalProxyError(c, http.StatusRequestTimeout, errAcquire.Error())
-				return
-			}
-			defer executionSession.releaseTurn()
-			routingSession = executionSession
-			replayBody, incrementalBody, localContinuation, errNormalize :=
-				executionSession.transcript.normalizeHTTPRequests(all)
-			if errNormalize != nil {
-				writeLocalProxyError(c, http.StatusBadRequest, errNormalize.Error())
-				return
-			}
-			if !localContinuation {
-				executionSession = nil
-			} else {
-				executionSessionRequestBody = replayBody
-				// HTTP may continue an already established upstream websocket, but it must
-				// never create one. Without an attached socket, preserve HTTP wire semantics.
-				if _, connected := executionSession.upstream.targetSnapshot(); connected {
-					all = replayBody
-					nativeRequestBody = incrementalBody
-				}
+		requestFamily == protocol.RequestFamilyResponses && tokenHashStr != "" {
+		if sessionID := responsesExecutionSessionID(c.Request.Header); sessionID != "" {
+			if session, releaseSession, errSession := s.responsesExecutionSessions.acquire(tokenHashStr, sessionID); errSession == nil {
+				defer releaseSession()
+				routingSession = session
 			}
 		}
 	}
@@ -621,14 +592,10 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 	})
 	reqChannelFilter := extractRequestedChannelFilter(c.Request)
 	continuesResponse := clientProtocol == protocol.Codex && requestFamily == protocol.RequestFamilyResponses &&
-		routingSession == nil && strings.TrimSpace(gjson.GetBytes(all, "previous_response_id").String()) != ""
+		strings.TrimSpace(gjson.GetBytes(all, "previous_response_id").String()) != ""
 	var poolRoute *channelPoolRoute
 	if channelPoolRoutingApplies(requestMethod, requestFamily, clientProtocol, originalModel, reqChannelFilter, continuesResponse) {
-		routeBody := all
-		if len(executionSessionRequestBody) > 0 {
-			routeBody = executionSessionRequestBody // 本地续接时完整 transcript 才是真实输入
-		}
-		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: originalModel, body: routeBody, session: sessionKey, now: time.Now()})
+		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: originalModel, body: all, session: sessionKey, now: time.Now()})
 		defer poolRoute.releaseReservation()
 		ctx = withChannelPoolRoute(ctx, poolRoute)
 	}
@@ -750,8 +717,9 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 	}
 	if routingSession != nil {
 		reqCtx.routingSession = routingSession
+		reqCtx.sessionRoutingOnly = true
 	}
-	if clientProtocol == protocol.Codex && requestFamily == protocol.RequestFamilyResponses && routingSession == nil {
+	if clientProtocol == protocol.Codex && requestFamily == protocol.RequestFamilyResponses {
 		if previousID := strings.TrimSpace(gjson.GetBytes(all, "previous_response_id").String()); previousID != "" {
 			route, found := s.responsesHTTPRoutes.get(tokenHashStr, previousID)
 			if !found {
@@ -762,22 +730,8 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 			reqCtx.nativeProtocolOnly = true
 		}
 	}
-	reqCtx.responsesReplayBody = executionSessionRequestBody
-	if executionSession != nil && nativeRequestBody != nil {
-		reqCtx.nativeCodexWS = executionSession.upstream
-		reqCtx.nativeCodexBody = nativeRequestBody
-	}
 	if requestMethod == http.MethodPost && reasoningTurnEndpoint(effectiveRequestPath) && s.reasoningTarget(reqCtx) {
-		reasoningExplicit := hasExplicitThinkingSuffix(reasoningModel)
-		transcript := all
-		if len(executionSessionRequestBody) > 0 {
-			transcript = executionSessionRequestBody
-		} else if !reasoningExplicit {
-			if local := s.localReasoningTranscript(reqCtx); local != nil {
-				transcript = local
-			}
-		}
-		s.prepareReasoningTurn(ctx, reqCtx, transcript, originalReasoningBody, reasoningExplicit)
+		s.prepareReasoningTurn(ctx, reqCtx, all, originalReasoningBody, hasExplicitThinkingSuffix(reasoningModel))
 		ctx = withReasoningRequest(ctx, reqCtx)
 	}
 	reqCtx.observer = &ForwardObserver{
@@ -805,9 +759,6 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 
 	lastResult, succeeded := s.runProxyAttemptLoop(ctx, cands, reqCtx, c.Writer)
 	if succeeded {
-		if executionSession != nil && lastResult != nil && lastResult.hasResponsesTurn {
-			s.responsesExecutionSessions.commit(executionSession, executionSessionRequestBody, lastResult.responsesTurn)
-		}
 		return
 	}
 	if countTokensRequest && (lastResult == nil || !lastResult.isClientCanceled) {

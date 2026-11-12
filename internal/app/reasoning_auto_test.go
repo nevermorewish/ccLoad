@@ -1807,9 +1807,12 @@ func TestReasoningAutoHTTPAndWebsocketShareState(t *testing.T) {
 		t.Fatal(err)
 	}
 	readWebsocketUntilType(t, conn, "response.completed")
+	// HTTP 不续接执行会话 transcript：客户端发送完整会话，判断状态仍按会话身份跨传输共享。
 	reasoningAutoRequest(t, env, "/v1/responses", map[string]any{
-		"model": "gpt-5.6-sol", "stream": true, "previous_response_id": "resp-auto-2",
+		"model": "gpt-5.6-sol", "stream": true,
 		"input": []any{
+			map[string]any{"role": "user", "content": "The migration is settled; perform the mechanical work."},
+			map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "business answer"}}},
 			map[string]any{"type": "reasoning", "id": "rs-local-history", "encrypted_content": "opaque-local-history"},
 			map[string]any{"type": "function_call", "id": "fc-verify", "call_id": "call-verify", "name": "verify_migration", "arguments": "{}"},
 			map[string]any{"type": "function_call_output", "call_id": "call-verify", "output": "migration verification completed"},
@@ -1822,7 +1825,7 @@ func TestReasoningAutoHTTPAndWebsocketShareState(t *testing.T) {
 		t.Fatalf("transport switch lost reasoning state: %+v", decisions)
 	}
 	if !strings.Contains(decisions[2].Conversation, "migration is settled") || !strings.Contains(decisions[2].Conversation, "business answer") || !strings.Contains(decisions[2].Conversation, "migration verification completed") {
-		t.Fatalf("HTTP continuation lost locally owned WS history: %q", decisions[2].Conversation)
+		t.Fatalf("HTTP full-conversation request lost history: %q", decisions[2].Conversation)
 	}
 	entry := waitForProxyLogMatching(t, env, func(entry *model.LogEntry) bool {
 		return entry.ClientProtocol != util.ProtocolSystemOne && entry.ReasoningDecision != nil && entry.ReasoningDecision.SuggestedEffort == "medium"

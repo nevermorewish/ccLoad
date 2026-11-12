@@ -156,48 +156,6 @@ func (s *responsesWebsocketSession) requireReplacementReplay() {
 	}
 }
 
-// normalizeHTTPRequests keeps ordinary Responses HTTP semantics intact:
-// no previous_response_id starts a replacement response, while a continuation
-// may replay to another protocol/transport only when this process owns the
-// referenced transcript. The caller keeps the original native HTTP wire body.
-func (s *responsesWebsocketSession) normalizeHTTPRequests(payload []byte) (
-	replayRequest, incrementalRequest []byte, localContinuation bool, err error,
-) {
-	websocketPayload, err := sjson.SetBytes(payload, "type", responsesWebsocketRequestCreate)
-	if err != nil {
-		return nil, nil, false, err
-	}
-	if input := gjson.GetBytes(payload, "input"); input.Type == gjson.String {
-		// HTTP accepts a string shorthand; local transcript replay merges items.
-		websocketPayload, err = sjson.SetBytes(websocketPayload, "input", []map[string]string{{"role": "user", "content": input.String()}})
-		if err != nil {
-			return nil, nil, false, fmt.Errorf("normalize HTTP input: %w", err)
-		}
-	}
-	previousID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
-	if previousID != "" && len(s.lastRequest) == 0 {
-		return nil, nil, false, nil
-	}
-	if previousID == "" {
-		replayRequest, err = normalizeInitialResponsesWebsocketRequest(websocketPayload, s.maxBodyBytes)
-		if err != nil {
-			return nil, nil, false, err
-		}
-		return replayRequest, bytes.Clone(replayRequest), true, nil
-	}
-	if !gjson.GetBytes(websocketPayload, "instructions").Exists() {
-		instructions := gjson.GetBytes(s.lastRequest, "instructions")
-		if instructions.Exists() {
-			websocketPayload, err = sjson.SetRawBytes(websocketPayload, "instructions", []byte(instructions.Raw))
-			if err != nil {
-				return nil, nil, false, fmt.Errorf("inherit HTTP instructions: %w", err)
-			}
-		}
-	}
-	replayRequest, incrementalRequest, err = s.normalizeRequests(websocketPayload)
-	return replayRequest, incrementalRequest, err == nil, err
-}
-
 func (s *responsesWebsocketSession) commit(request []byte, result responsesWebsocketTurnResult) {
 	if s == nil {
 		return

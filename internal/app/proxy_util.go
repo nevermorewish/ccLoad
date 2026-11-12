@@ -373,6 +373,7 @@ type proxyRequestContext struct {
 	reasoningApplied        string
 	reasoningApplyReason    string
 	routingSession          *responsesExecutionSession // 当前 Responses execution session 的首选渠道
+	sessionRoutingOnly      bool                       // HTTP 请求只借用 routingSession 做渠道粘性，不碰 transcript 与上游 WS
 	sessionAffinityKey      string                     // Anthropic/Codex 会话绑定键（令牌+会话 ID），空表示不绑定
 	sessionAffinity         sessionAffinityTarget      // 请求开始时的会话绑定，channelID=0 表示无
 	channelPoolRoute        *channelPoolRoute          // 渠道路由决策（渠道组顺序、队列名额与组粘性）；nil 表示不分组

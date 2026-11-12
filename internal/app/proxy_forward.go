@@ -3199,7 +3199,7 @@ func (s *Server) forwardAttempt(
 	if cfg.UsesAntigravityOAuth() && (wantsAntigravityWebSearch(reqCtx.body) || wantsAntigravityWebSearch(bodyToSend)) {
 		actualModel = antigravityWebSearchModel(actualModel)
 	}
-	if reqCtx.routingSession != nil {
+	if reqCtx.routingSession != nil && !reqCtx.sessionRoutingOnly {
 		reqCtx.routingSession.noteActualModel(actualModel)
 	}
 	requestPath := rewriteUpstreamRequestPath(reqCtx.requestPath, actualModel)

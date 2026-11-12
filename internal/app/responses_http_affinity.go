@@ -71,7 +71,8 @@ func (s *responsesHTTPRouteStore) put(tokenHash, responseID string, route respon
 func (s *Server) rememberResponsesHTTPRoute(req *proxyRequestContext, res *fwResult, channelID int64, baseURL, key, actualModel string) {
 	if req.clientProtocol != protocol.Codex || req.upstreamProtocol != protocol.Codex ||
 		protocol.DetectRequestFamily(req.requestPath) != protocol.RequestFamilyResponses ||
-		req.nativeCodexWS != nil || req.routingSession != nil || gjson.GetBytes(req.body, "store").Raw == "false" {
+		req.nativeCodexWS != nil || (req.routingSession != nil && !req.sessionRoutingOnly) ||
+		gjson.GetBytes(req.body, "store").Raw == "false" {
 		return
 	}
 	if res.HasResponsesTurnResult && !res.ResponsesTurnResult.interrupted {

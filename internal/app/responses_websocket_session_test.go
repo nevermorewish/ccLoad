@@ -49,27 +49,3 @@ func TestResponsesWebsocketSessionPreservesExplicitInstructions(t *testing.T) {
 		t.Fatalf("instructions = %q, want %q", got, "second-turn")
 	}
 }
-
-func TestResponsesWebsocketSessionKeepsHTTPInstructionCompatibility(t *testing.T) {
-	session := newResponsesWebsocketSession(1 << 20)
-
-	first, _, localContinuation, err := session.normalizeHTTPRequests([]byte(`{"model":"gpt-5.4","instructions":"first-turn","input":[{"type":"message","role":"user","content":"first"}]}`))
-	if err != nil {
-		t.Fatalf("normalize first HTTP request: %v", err)
-	}
-	if !localContinuation {
-		t.Fatal("first HTTP request was not treated as a local continuation")
-	}
-	session.commit(first, responsesWebsocketTurnResult{completedResponseID: "resp-1"})
-
-	second, _, localContinuation, err := session.normalizeHTTPRequests([]byte(`{"previous_response_id":"resp-1","input":[{"type":"message","role":"user","content":"second"}]}`))
-	if err != nil {
-		t.Fatalf("normalize HTTP continuation: %v", err)
-	}
-	if !localContinuation {
-		t.Fatal("HTTP continuation was not treated as local")
-	}
-	if got := gjson.GetBytes(second, "instructions").String(); got != "first-turn" {
-		t.Fatalf("HTTP instructions = %q, want %q", got, "first-turn")
-	}
-}
