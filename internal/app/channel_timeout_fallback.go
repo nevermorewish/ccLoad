@@ -28,7 +28,10 @@ func shouldUseTimeoutChannel(req *proxyRequestContext, result *proxyResult) bool
 // The destination may be outside the normal pool order, but never outside the
 // token scope, model capabilities, availability window or configured limits.
 func (s *Server) tryTimeoutChannel(ctx context.Context, sourceID int64, req *proxyRequestContext, w http.ResponseWriter) (*proxyResult, bool) {
-	targetID := req.channelPoolRoute.firstByteTimeoutChannelID
+	return s.tryDesignatedChannel(ctx, sourceID, req.channelPoolRoute.firstByteTimeoutChannelID, "first byte timeout", req, w)
+}
+
+func (s *Server) tryDesignatedChannel(ctx context.Context, sourceID, targetID int64, label string, req *proxyRequestContext, w http.ResponseWriter) (*proxyResult, bool) {
 	fail := func(status int, message string) (*proxyResult, bool) {
 		return &proxyResult{status: status, channelID: &targetID, body: []byte(message), nextAction: cooldown.ActionReturnClient}, false
 	}
@@ -36,29 +39,34 @@ func (s *Server) tryTimeoutChannel(ctx context.Context, sourceID int64, req *pro
 		return buildCtxDoneResult(&model.Config{ID: targetID}, ctx.Err()), false
 	}
 	if targetID == sourceID {
-		return fail(http.StatusBadGateway, "first byte timeout target is the timed-out channel")
+		return fail(http.StatusBadGateway, label+" target is the timed-out channel")
 	}
 	cfg, err := s.store.GetConfig(ctx, targetID)
-	if err != nil || cfg == nil || !cfg.Enabled || cfg.IsSystemOne() || !s.configSupportsModelWithFuzzyMatch(cfg, req.originalModel) {
-		return fail(http.StatusServiceUnavailable, fmt.Sprintf("first byte timeout target channel %d is unavailable for this model", targetID))
+	if err != nil || cfg == nil || !cfg.Enabled || cfg.IsSystemOne() || channelRequiresProtocolBridge(cfg) || !s.configSupportsModelWithFuzzyMatch(cfg, req.originalModel) {
+		return fail(http.StatusServiceUnavailable, fmt.Sprintf("%s target channel %d is unavailable for this model", label, targetID))
 	}
 	// Use a fresh pool decision only for destination eligibility. Preserve the
 	// original reservation so the in-flight count follows the final attempt.
 	ctx = context.WithValue(ctx, terminalChannelAttemptKey{}, true)
 	ctx = withChannelPoolRoute(ctx, &channelPoolRoute{pools: []int{cfg.ChannelPool}})
-	eligible, err := s.filterCooldownChannels(ctx, []*model.Config{cfg}, req.originalModel, string(req.clientProtocol))
+	var eligible []*model.Config
+	if label == "non-stream" {
+		eligible, err = s.filterCooldownChannelsStrict(ctx, []*model.Config{cfg}, req.originalModel, string(req.clientProtocol))
+	} else {
+		eligible, err = s.filterCooldownChannels(ctx, []*model.Config{cfg}, req.originalModel, string(req.clientProtocol))
+	}
 	if err != nil || len(eligible) == 0 {
-		return fail(http.StatusServiceUnavailable, fmt.Sprintf("first byte timeout target channel %d is not eligible", targetID))
+		return fail(http.StatusServiceUnavailable, fmt.Sprintf("%s target channel %d is not eligible", label, targetID))
 	}
 	req.terminalChannel = true
 	defer func() { req.terminalChannel = false }()
 	req.channelPoolRoute.moveReservation(cfg.ChannelPool)
 	result, err := s.tryChannelWithSameChannelRetries(ctx, eligible[0], req, w)
 	if err != nil {
-		return fail(http.StatusBadGateway, fmt.Sprintf("first byte timeout target channel %d could not be used", targetID))
+		return fail(http.StatusBadGateway, fmt.Sprintf("%s target channel %d could not be used", label, targetID))
 	}
 	if result == nil {
-		return fail(http.StatusBadGateway, "first byte timeout target returned no result")
+		return fail(http.StatusBadGateway, label+" target returned no result")
 	}
 	result.nextAction = cooldown.ActionReturnClient
 	if !result.succeeded && result.header != nil && result.status >= 300 && result.status < 596 {

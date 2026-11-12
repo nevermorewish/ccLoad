@@ -62,6 +62,7 @@ type channelRouteSimulation struct {
 	// FirstByteTimeoutSeconds 是命中规则的首字超时；0 表示沿用系统设置。
 	FirstByteTimeoutSeconds   int   `json:"first_byte_timeout_seconds"`
 	FirstByteTimeoutChannelID int64 `json:"first_byte_timeout_channel_id,omitempty"`
+	NonStreamChannelID        int64 `json:"non_stream_channel_id,omitempty"`
 }
 
 // HandleGetChannelRoutes 返回渠道路由规则、各渠道组概况与实时队列。
@@ -104,13 +105,21 @@ func (s *Server) HandleUpdateChannelRoutes(c *gin.Context) {
 		return
 	}
 	for _, rule := range config.Rules {
-		if rule.FirstByteTimeoutChannelID == 0 {
-			continue
-		}
-		cfg, err := s.store.GetConfig(c.Request.Context(), rule.FirstByteTimeoutChannelID)
-		if err != nil || cfg == nil || !cfg.Enabled || cfg.IsSystemOne() || channelRequiresProtocolBridge(cfg) {
-			RespondErrorMsg(c, http.StatusBadRequest, "first byte timeout target must be an enabled native-protocol channel")
-			return
+		for _, target := range []struct {
+			id    int64
+			label string
+		}{
+			{rule.FirstByteTimeoutChannelID, "first byte timeout"},
+			{rule.NonStreamChannelID, "non-stream"},
+		} {
+			if target.id == 0 {
+				continue
+			}
+			cfg, err := s.store.GetConfig(c.Request.Context(), target.id)
+			if err != nil || cfg == nil || !cfg.Enabled || cfg.IsSystemOne() || channelRequiresProtocolBridge(cfg) {
+				RespondErrorMsg(c, http.StatusBadRequest, target.label+" target must be an enabled native-protocol channel")
+				return
+			}
 		}
 	}
 	if err := s.commitChannelRouteConfig(c.Request.Context(), config); err != nil {
@@ -171,6 +180,7 @@ func (s *Server) HandleSimulateChannelRoute(c *gin.Context) {
 		Pools:                     make([]channelRouteSimulationPool, 0, len(route.pools)),
 		FirstByteTimeoutSeconds:   int(route.firstByteTimeout / time.Second),
 		FirstByteTimeoutChannelID: route.firstByteTimeoutChannelID,
+		NonStreamChannelID:        route.nonStreamChannelID,
 	}
 	for _, pool := range route.pools {
 		result.Pools = append(result.Pools, channelRouteSimulationPool{

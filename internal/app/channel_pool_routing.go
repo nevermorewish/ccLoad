@@ -87,6 +87,7 @@ type ChannelRouteOverflow struct {
 // FirstByteTimeoutSeconds>0 时覆盖系统首字超时（含协议覆盖）：命中本规则的流式请求在某个渠道
 // 等待首个有效内容超过该秒数，按首字节超时（598）放弃该渠道；配置目标时只尝试目标一次，
 // 否则按原候选顺序重试。0 沿用系统设置。
+// NonStreamChannelID>0 时客户端非流式请求直接使用指定渠道，成功或错误均作为最终结果。
 type ChannelRouteRule struct {
 	ID                        string                  `json:"id"`
 	Name                      string                  `json:"name"`
@@ -99,6 +100,7 @@ type ChannelRouteRule struct {
 	Strict                    bool                    `json:"strict"`
 	FirstByteTimeoutSeconds   int                     `json:"first_byte_timeout_seconds"`
 	FirstByteTimeoutChannelID int64                   `json:"first_byte_timeout_channel_id,omitempty"`
+	NonStreamChannelID        int64                   `json:"non_stream_channel_id,omitempty"`
 }
 
 // ChannelRouteConfig 是系统设置 channel_route_rules 的完整值；规则按顺序匹配，首条启用且命中的规则生效。
@@ -258,6 +260,9 @@ func normalizeChannelRouteRule(rule ChannelRouteRule) (ChannelRouteRule, error) 
 
 	if rule.FirstByteTimeoutSeconds < 0 || rule.FirstByteTimeoutSeconds > maxChannelRouteFirstByteTimeoutSeconds {
 		return ChannelRouteRule{}, fmt.Errorf("first_byte_timeout_seconds must be between 0 and %d", maxChannelRouteFirstByteTimeoutSeconds)
+	}
+	if rule.NonStreamChannelID < 0 {
+		return ChannelRouteRule{}, fmt.Errorf("non_stream_channel_id must be >= 0")
 	}
 	if rule.FirstByteTimeoutChannelID < 0 || (rule.FirstByteTimeoutChannelID > 0 && rule.FirstByteTimeoutSeconds == 0) {
 		return ChannelRouteRule{}, fmt.Errorf("first_byte_timeout_channel_id requires a positive timeout and channel ID")
@@ -419,7 +424,7 @@ func (s *Server) commitChannelRouteConfig(ctx context.Context, config ChannelRou
 func channelRouteRuleEqual(a, b ChannelRouteRule) bool {
 	return a.ID == b.ID && a.Name == b.Name && a.Enabled == b.Enabled && slices.Equal(a.Models, b.Models) &&
 		a.DefaultPool == b.DefaultPool && slices.Equal(a.TokenTiers, b.TokenTiers) && slices.Equal(a.Overflow, b.Overflow) &&
-		a.Sticky == b.Sticky && a.Strict == b.Strict && a.FirstByteTimeoutSeconds == b.FirstByteTimeoutSeconds && a.FirstByteTimeoutChannelID == b.FirstByteTimeoutChannelID
+		a.Sticky == b.Sticky && a.Strict == b.Strict && a.FirstByteTimeoutSeconds == b.FirstByteTimeoutSeconds && a.FirstByteTimeoutChannelID == b.FirstByteTimeoutChannelID && a.NonStreamChannelID == b.NonStreamChannelID
 }
 
 // channelRoutePoolDecisionEqual 忽略首字超时：它只影响渠道尝试、不改变渠道组决策，
@@ -446,6 +451,7 @@ type channelPoolRoute struct {
 	// firstByteTimeout 是命中规则配置的首字超时，每次渠道尝试生效；0 表示沿用系统设置。
 	firstByteTimeout          time.Duration
 	firstByteTimeoutChannelID int64
+	nonStreamChannelID        int64
 
 	mu           sync.Mutex
 	queues       *channelPoolQueues
@@ -654,6 +660,7 @@ func (s *Server) decideChannelPoolRoute(in channelPoolRouteInput) *channelPoolRo
 		ruleID: rule.ID, ruleName: rule.Name, tier: -1, inputTokens: -1, reason: channelRouteReasonDefault,
 		firstByteTimeout:          time.Duration(rule.FirstByteTimeoutSeconds) * time.Second,
 		firstByteTimeoutChannelID: rule.FirstByteTimeoutChannelID,
+		nonStreamChannelID:        rule.NonStreamChannelID,
 	}
 
 	base := rule.DefaultPool

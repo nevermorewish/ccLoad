@@ -107,3 +107,16 @@ test('explicit timeout destination round-trips and requires a timeout', () => {
   assert.match(routes.summarizeRule(rule), /渠道 #40，返回最终结果/);
   assert.match(routes.draftsToConfig([{ ...draft, firstByteTimeout: '' }]).error, /指定超时渠道/);
 });
+
+
+test('non-stream destination round-trips independently of first byte timeout', () => {
+  const draft = { ...routes.emptyRuleDraft(), models: ['kimi-k3.1-pro'], nonStreamChannel: '44' };
+  const rule = routes.draftsToConfig([draft]).config.rules[0];
+  assert.equal(rule.non_stream_channel_id, 44);
+  assert.equal(rule.first_byte_timeout_seconds, 0);
+  assert.equal(routes.ruleToDraft(rule).nonStreamChannel, '44');
+  assert.match(routes.summarizeRule(rule), /非流式请求直接使用渠道 #44/);
+  assert.equal(routes.ruleToDraft({ ...rule, non_stream_channel_id: undefined }).nonStreamChannel, '');
+  assert.equal(routes.draftsToConfig([{ ...draft, nonStreamChannel: '' }]).config.rules[0].non_stream_channel_id, undefined);
+  assert.match(routes.draftsToConfig([{ ...draft, nonStreamChannel: '-1' }]).error, /非流式/);
+});

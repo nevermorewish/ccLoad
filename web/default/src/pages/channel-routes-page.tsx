@@ -107,6 +107,14 @@ function RuleCard({ draft, index, total, inflight, knownModels, channels, onChan
     </div>
 
     <div className="route-field">
+      <span className="route-label">非流式请求</span>
+      <div className="cell-stack">
+        <SearchableSelect ariaLabel={`${label} 非流式指定渠道`} className="combobox-inline" value={draft.nonStreamChannel} options={[{ value: '', label: '按原路由规则（未指定）' }, ...channels.map((channel) => ({ value: String(channel.id), label: `#${channel.id} ${channel.name}${channel.enabled ? '' : '（已停用）'}` }))]} onChange={(value) => onChange({ nonStreamChannel: value })} />
+        <span className="table-note">命中本规则的非流式请求直接使用指定渠道，只尝试一次，成功或错误均直接返回。优先于 Token 档位、会话粘性及队列溢出；仍遵守模型支持、权限、限额和系统超时。目标不可用时直接报错，未指定时沿用原路由规则。</span>
+      </div>
+    </div>
+
+    <div className="route-field">
       <span className="route-label">首字超时</span>
       <div className="cell-stack">
         <div className="toolbar route-row">
@@ -231,6 +239,7 @@ export function ChannelRoutesPage() {
       {simulateError && <p className="error-text" role="alert">{simulateError}</p>}
       {simulated && <div className="cell-stack">
         <span>{simulated.matched ? `命中规则「${simulated.rule_name || simulated.rule_id}」` : '未命中规则（默认顺序）'} · 依据：{ROUTE_REASONS[simulated.reason] ?? simulated.reason}{simulated.tier >= 0 ? `（档位 ${simulated.tier + 1}）` : ''} · 输入 Token {simulated.input_tokens.toLocaleString()} · 首字超时：{simulated.first_byte_timeout_seconds > 0 ? `${simulated.first_byte_timeout_seconds} 秒后${simulated.first_byte_timeout_channel_id ? `转到渠道 #${simulated.first_byte_timeout_channel_id}，返回最终结果` : '按候选顺序切换'}` : '沿用系统设置'}</span>
+        {simulated.non_stream_channel_id ? <span>非流式请求：直接使用渠道 #{simulated.non_stream_channel_id}，返回最终结果；下方渠道组顺序用于其他请求。</span> : null}
         <span className="route-order">{simulated.pools.map((pool, order) => <span key={pool.pool} className={`badge ${order === 0 ? 'badge-good' : 'badge-muted'}`}>{order + 1}. {pool.name}（进行中 {pool.inflight}）</span>)}</span>
         {dirty && <span className="warn-text">有未保存的修改，模拟结果基于已保存的规则。</span>}
       </div>}
