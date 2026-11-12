@@ -673,11 +673,13 @@ func (s *Server) handleProxySuccess(
 		s.antigravityCredentials.updateQuotaState(ctx, cfg, actualModel, time.Time{}, false)
 	}
 
-	if cfg.RetryOtherKeysOnFailure && reqCtx.routingSession != nil {
+	if !reqCtx.terminalChannel && cfg.RetryOtherKeysOnFailure && reqCtx.routingSession != nil {
 		reqCtx.routingSession.rememberPreferredChannel(cfg.ID)
 	}
-	s.sessionAffinity.bind(reqCtx.sessionAffinityKey, sessionAffinityTarget{channelID: cfg.ID, keyIndex: keyIndex}, time.Now())
-	s.bindChannelPoolAffinity(reqCtx.channelPoolRoute, cfg.ChannelPool)
+	if !reqCtx.terminalChannel {
+		s.sessionAffinity.bind(reqCtx.sessionAffinityKey, sessionAffinityTarget{channelID: cfg.ID, keyIndex: keyIndex}, time.Now())
+		s.bindChannelPoolAffinity(reqCtx.channelPoolRoute, cfg.ChannelPool)
+	}
 
 	s.AddLogAsync(buildProxyLogEntry(reqCtx, cfg, actualModel, selectedKey, res.Status, duration, res, ""))
 	if !reqCtx.countTokens() {

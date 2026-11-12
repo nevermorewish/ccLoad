@@ -47,6 +47,31 @@ func simulatedPools(result channelRouteSimulation) []int {
 	return pools
 }
 
+func TestAdminChannelRouteTimeoutTarget(t *testing.T) {
+	t.Parallel()
+	server := newInMemoryServer(t)
+	target := addPoolChannel(t, server, "final", 2, 10, "kimi-k3")
+	rule := ChannelRouteRule{ID: "timeout", Enabled: true, Models: []string{"kimi-k3"}, FirstByteTimeoutSeconds: 20, FirstByteTimeoutChannelID: target.ID}
+	status, view, body := putChannelRoutes(t, server, ChannelRouteConfig{Rules: []ChannelRouteRule{rule}})
+	if status != http.StatusOK || len(view.Channels) != 1 || view.Config.Rules[0].FirstByteTimeoutChannelID != target.ID {
+		t.Fatalf("save status=%d body=%s", status, body)
+	}
+	status, simulation := simulateChannelRoute(t, server, map[string]any{"model": "kimi-k3"})
+	if status != http.StatusOK || simulation.FirstByteTimeoutChannelID != target.ID {
+		t.Fatalf("simulation=%+v status=%d", simulation, status)
+	}
+	for _, invalid := range []ChannelRouteRule{
+		{Models: []string{"kimi-k3"}, FirstByteTimeoutSeconds: 20, FirstByteTimeoutChannelID: -1},
+		{Models: []string{"kimi-k3"}, FirstByteTimeoutChannelID: target.ID},
+		{Models: []string{"kimi-k3"}, FirstByteTimeoutSeconds: 20, FirstByteTimeoutChannelID: target.ID + 100},
+	} {
+		status, _, body := putChannelRoutes(t, server, ChannelRouteConfig{Rules: []ChannelRouteRule{invalid}})
+		if status != http.StatusBadRequest {
+			t.Fatalf("invalid target accepted: status=%d body=%s", status, body)
+		}
+	}
+}
+
 func TestAdminChannelRoutesSaveGetAndSimulate(t *testing.T) {
 	server := newInMemoryServer(t)
 	addPoolChannel(t, server, "main", 0, 10, "kimi-k3")

@@ -31,7 +31,14 @@ type channelRouteInflightView struct {
 	Inflight int    `json:"inflight"`
 }
 
+type channelRouteTargetView struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
 type channelRoutesView struct {
+	Channels []channelRouteTargetView   `json:"channels"`
 	Config   ChannelRouteConfig         `json:"config"`
 	Pools    []channelRoutePoolView     `json:"pools"`
 	Inflight []channelRouteInflightView `json:"inflight"`
@@ -53,7 +60,8 @@ type channelRouteSimulation struct {
 	Reason      string                       `json:"reason"`
 	Pools       []channelRouteSimulationPool `json:"pools"`
 	// FirstByteTimeoutSeconds 是命中规则的首字超时；0 表示沿用系统设置。
-	FirstByteTimeoutSeconds int `json:"first_byte_timeout_seconds"`
+	FirstByteTimeoutSeconds   int   `json:"first_byte_timeout_seconds"`
+	FirstByteTimeoutChannelID int64 `json:"first_byte_timeout_channel_id,omitempty"`
 }
 
 // HandleGetChannelRoutes 返回渠道路由规则、各渠道组概况与实时队列。
@@ -94,6 +102,16 @@ func (s *Server) HandleUpdateChannelRoutes(c *gin.Context) {
 	if err != nil {
 		RespondErrorMsg(c, http.StatusBadRequest, "invalid channel routes: "+err.Error())
 		return
+	}
+	for _, rule := range config.Rules {
+		if rule.FirstByteTimeoutChannelID == 0 {
+			continue
+		}
+		cfg, err := s.store.GetConfig(c.Request.Context(), rule.FirstByteTimeoutChannelID)
+		if err != nil || cfg == nil || !cfg.Enabled || cfg.IsSystemOne() || channelRequiresProtocolBridge(cfg) {
+			RespondErrorMsg(c, http.StatusBadRequest, "first byte timeout target must be an enabled native-protocol channel")
+			return
+		}
 	}
 	if err := s.commitChannelRouteConfig(c.Request.Context(), config); err != nil {
 		RespondError(c, http.StatusInternalServerError, err)
@@ -150,8 +168,9 @@ func (s *Server) HandleSimulateChannelRoute(c *gin.Context) {
 	result := channelRouteSimulation{
 		Model: routingModel, Matched: route.ruleID != "", RuleID: route.ruleID, RuleName: route.ruleName,
 		Tier: route.tier, InputTokens: inputTokens, Reason: route.reason,
-		Pools:                   make([]channelRouteSimulationPool, 0, len(route.pools)),
-		FirstByteTimeoutSeconds: int(route.firstByteTimeout / time.Second),
+		Pools:                     make([]channelRouteSimulationPool, 0, len(route.pools)),
+		FirstByteTimeoutSeconds:   int(route.firstByteTimeout / time.Second),
+		FirstByteTimeoutChannelID: route.firstByteTimeoutChannelID,
 	}
 	for _, pool := range route.pools {
 		result.Pools = append(result.Pools, channelRouteSimulationPool{
@@ -172,7 +191,11 @@ func (s *Server) channelRoutesView(ctx context.Context) (channelRoutesView, erro
 		pools[pool] = channelRoutePoolView{Pool: pool, Name: channelPoolName(pool), Models: []string{}}
 		poolModels[pool] = make(map[string]struct{})
 	}
+	targets := make([]channelRouteTargetView, 0, len(cfgs))
 	for _, cfg := range cfgs {
+		if cfg != nil && !cfg.IsSystemOne() && !channelRequiresProtocolBridge(cfg) {
+			targets = append(targets, channelRouteTargetView{ID: cfg.ID, Name: cfg.Name, Enabled: cfg.Enabled})
+		}
 		if cfg == nil || !model.ValidChannelPool(cfg.ChannelPool) {
 			continue
 		}
@@ -202,7 +225,7 @@ func (s *Server) channelRoutesView(ctx context.Context) (channelRoutesView, erro
 			pools[item.Pool].Inflight += item.Inflight
 		}
 	}
-	return channelRoutesView{Config: s.channelRouteConfig(), Pools: pools, Inflight: inflight}, nil
+	return channelRoutesView{Config: s.channelRouteConfig(), Pools: pools, Inflight: inflight, Channels: targets}, nil
 }
 
 func (s *Server) channelRouteInflight() []channelRouteInflightView {

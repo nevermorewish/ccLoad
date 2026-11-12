@@ -85,18 +85,20 @@ type ChannelRouteOverflow struct {
 // ChannelRouteRule 是一条渠道路由规则：按模型匹配后决定渠道组的尝试顺序。
 // Strict=true 时只使用规则选中的渠道组（队列溢出目标与会话粘性组除外），不回退其他组。
 // FirstByteTimeoutSeconds>0 时覆盖系统首字超时（含协议覆盖）：命中本规则的流式请求在某个渠道
-// 等待首个有效内容超过该秒数，按首字节超时（598）放弃该渠道并切换下一个候选；0 沿用系统设置。
+// 等待首个有效内容超过该秒数，按首字节超时（598）放弃该渠道；配置目标时只尝试目标一次，
+// 否则按原候选顺序重试。0 沿用系统设置。
 type ChannelRouteRule struct {
-	ID                      string                  `json:"id"`
-	Name                    string                  `json:"name"`
-	Enabled                 bool                    `json:"enabled"`
-	Models                  []string                `json:"models"`
-	DefaultPool             int                     `json:"default_pool"`
-	TokenTiers              []ChannelRouteTokenTier `json:"token_tiers"`
-	Overflow                []ChannelRouteOverflow  `json:"overflow"`
-	Sticky                  string                  `json:"sticky"`
-	Strict                  bool                    `json:"strict"`
-	FirstByteTimeoutSeconds int                     `json:"first_byte_timeout_seconds"`
+	ID                        string                  `json:"id"`
+	Name                      string                  `json:"name"`
+	Enabled                   bool                    `json:"enabled"`
+	Models                    []string                `json:"models"`
+	DefaultPool               int                     `json:"default_pool"`
+	TokenTiers                []ChannelRouteTokenTier `json:"token_tiers"`
+	Overflow                  []ChannelRouteOverflow  `json:"overflow"`
+	Sticky                    string                  `json:"sticky"`
+	Strict                    bool                    `json:"strict"`
+	FirstByteTimeoutSeconds   int                     `json:"first_byte_timeout_seconds"`
+	FirstByteTimeoutChannelID int64                   `json:"first_byte_timeout_channel_id,omitempty"`
 }
 
 // ChannelRouteConfig 是系统设置 channel_route_rules 的完整值；规则按顺序匹配，首条启用且命中的规则生效。
@@ -257,6 +259,9 @@ func normalizeChannelRouteRule(rule ChannelRouteRule) (ChannelRouteRule, error) 
 	if rule.FirstByteTimeoutSeconds < 0 || rule.FirstByteTimeoutSeconds > maxChannelRouteFirstByteTimeoutSeconds {
 		return ChannelRouteRule{}, fmt.Errorf("first_byte_timeout_seconds must be between 0 and %d", maxChannelRouteFirstByteTimeoutSeconds)
 	}
+	if rule.FirstByteTimeoutChannelID < 0 || (rule.FirstByteTimeoutChannelID > 0 && rule.FirstByteTimeoutSeconds == 0) {
+		return ChannelRouteRule{}, fmt.Errorf("first_byte_timeout_channel_id requires a positive timeout and channel ID")
+	}
 	return rule, nil
 }
 
@@ -414,7 +419,7 @@ func (s *Server) commitChannelRouteConfig(ctx context.Context, config ChannelRou
 func channelRouteRuleEqual(a, b ChannelRouteRule) bool {
 	return a.ID == b.ID && a.Name == b.Name && a.Enabled == b.Enabled && slices.Equal(a.Models, b.Models) &&
 		a.DefaultPool == b.DefaultPool && slices.Equal(a.TokenTiers, b.TokenTiers) && slices.Equal(a.Overflow, b.Overflow) &&
-		a.Sticky == b.Sticky && a.Strict == b.Strict && a.FirstByteTimeoutSeconds == b.FirstByteTimeoutSeconds
+		a.Sticky == b.Sticky && a.Strict == b.Strict && a.FirstByteTimeoutSeconds == b.FirstByteTimeoutSeconds && a.FirstByteTimeoutChannelID == b.FirstByteTimeoutChannelID
 }
 
 // channelRoutePoolDecisionEqual 忽略首字超时：它只影响渠道尝试、不改变渠道组决策，
@@ -439,7 +444,8 @@ type channelPoolRoute struct {
 	reason      string
 	stickyKey   channelPoolAffinityKey
 	// firstByteTimeout 是命中规则配置的首字超时，每次渠道尝试生效；0 表示沿用系统设置。
-	firstByteTimeout time.Duration
+	firstByteTimeout          time.Duration
+	firstByteTimeoutChannelID int64
 
 	mu           sync.Mutex
 	queues       *channelPoolQueues
@@ -491,6 +497,9 @@ func channelPoolRouteFromContext(ctx context.Context) *channelPoolRoute {
 // channelRouteFirstByteTimeout 返回渠道尝试使用的首字超时：命中规则配置了首字超时时覆盖 fallback
 // （系统全局值或协议覆盖值），否则原样返回 fallback。
 func channelRouteFirstByteTimeout(ctx context.Context, fallback time.Duration) time.Duration {
+	if terminalChannelAttempt(ctx) {
+		return fallback
+	}
 	if route := channelPoolRouteFromContext(ctx); route != nil && route.firstByteTimeout > 0 {
 		return route.firstByteTimeout
 	}
@@ -643,7 +652,8 @@ func (s *Server) decideChannelPoolRoute(in channelPoolRouteInput) *channelPoolRo
 	}
 	route := &channelPoolRoute{
 		ruleID: rule.ID, ruleName: rule.Name, tier: -1, inputTokens: -1, reason: channelRouteReasonDefault,
-		firstByteTimeout: time.Duration(rule.FirstByteTimeoutSeconds) * time.Second,
+		firstByteTimeout:          time.Duration(rule.FirstByteTimeoutSeconds) * time.Second,
+		firstByteTimeoutChannelID: rule.FirstByteTimeoutChannelID,
 	}
 
 	base := rule.DefaultPool

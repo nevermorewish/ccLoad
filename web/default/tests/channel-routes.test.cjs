@@ -97,3 +97,13 @@ test('channel editor keeps the channel pool through load and save', () => {
   assert.equal(api.channelPoolLabel(undefined), '主渠道');
   assert.equal(api.channelPoolLabel('1'), '渠道1');
 });
+
+
+test('explicit timeout destination round-trips and requires a timeout', () => {
+  const draft = { ...routes.emptyRuleDraft(), models: ['kimi-k3.1-pro'], firstByteTimeout: '20', firstByteTimeoutChannel: '40' };
+  const rule = routes.draftsToConfig([draft]).config.rules[0];
+  assert.equal(rule.first_byte_timeout_channel_id, 40);
+  assert.equal(routes.ruleToDraft(rule).firstByteTimeoutChannel, '40');
+  assert.match(routes.summarizeRule(rule), /渠道 #40，返回最终结果/);
+  assert.match(routes.draftsToConfig([{ ...draft, firstByteTimeout: '' }]).error, /指定超时渠道/);
+});

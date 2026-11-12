@@ -3354,7 +3354,7 @@ func (s *Server) forwardAttempt(
 		reqCtx.debugData = res.DebugData
 	}
 
-	if err == nil && cfg.UsesAntigravityOAuth() && !cfg.AntigravityCredits && res != nil && !res.ResponseCommitted && res.Status == http.StatusTooManyRequests {
+	if !reqCtx.terminalChannel && err == nil && cfg.UsesAntigravityOAuth() && !cfg.AntigravityCredits && res != nil && !res.ResponseCommitted && res.Status == http.StatusTooManyRequests {
 		reason, delay := antigravityLimitDetails(res.Body)
 		if reason == "RATE_LIMIT_EXCEEDED" && delay > 0 && delay < 3*time.Second {
 			credential, parseErr := antigravityauth.ParseCredential([]byte(cfg.OAuthCredential))
@@ -3379,7 +3379,7 @@ func (s *Server) forwardAttempt(
 	bodyRepaired := false
 	// 只有主机名参与官方 Anthropic 判定，解析失败按非官方处理。
 	retryTarget, _ := url.Parse(strings.TrimSpace(baseURL))
-	for !cfg.AntigravityCredits && ctx.Err() == nil {
+	for !reqCtx.terminalChannel && !cfg.AntigravityCredits && ctx.Err() == nil {
 		retryStrategies = appendSendStrategy(retryStrategies, res)
 		retrySourcePlan := plan
 		retryBodyRulesApplied := false
@@ -3557,6 +3557,12 @@ func (s *Server) forwardAttempt(
 			ctx, cfg, keyIndex, actualModel, selectedKey, reqCtx.tokenID, reqCtx.clientIP,
 			duration, err, res, reqCtx, deferChannelCooldown,
 		)
+		return result, action, nil
+	}
+
+	// 指定超时目标的 HTTP 错误是最终响应，保留状态、响应头与正文，不再修复或重试。
+	if reqCtx.terminalChannel && !res.ResponseCommitted && res.Status >= 300 {
+		result, action := s.handleProxyErrorResponse(ctx, cfg, keyIndex, actualModel, selectedKey, res, duration, reqCtx, false, true, false)
 		return result, action, nil
 	}
 
@@ -4345,7 +4351,7 @@ func (s *Server) attemptKeyAcrossURLs(
 			Abort:            reqCtx.abortChannel,
 		})
 
-		shouldDeferChannelCooldown := urlIdx < len(sortedURLs)-1
+		shouldDeferChannelCooldown := !reqCtx.terminalChannel && urlIdx < len(sortedURLs)-1
 
 		if urlEntry.idx < 0 || urlEntry.idx >= len(cfg.URLs) {
 			return nil, nil, fmt.Errorf("invalid URL selector index %d for channel %d", urlEntry.idx, cfg.ID)
@@ -4405,6 +4411,9 @@ func (s *Server) attemptKeyAcrossURLs(
 			}
 			if result != nil && !result.succeeded && result.header != nil {
 				lastUpstreamFailure = result
+			}
+			if result != nil && (reqCtx.terminalChannel || shouldUseTimeoutChannel(reqCtx, result)) {
+				return result, nil, nil
 			}
 			if result != nil && result.operatorAborted {
 				return result, nil, nil
@@ -4856,6 +4865,9 @@ func (s *Server) tryOAuthChannel(
 		result := immediate
 		if result == nil {
 			result = lastFailure
+		}
+		if reqCtx.terminalChannel {
+			return result, nil
 		}
 		if result != nil && credentialRejected(result) {
 			if credentialErr != nil || attempt == 1 {

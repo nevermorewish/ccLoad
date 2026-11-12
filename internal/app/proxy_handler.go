@@ -928,6 +928,10 @@ func (s *Server) runProxyAttemptLoopWithFailureBoundary(
 				continue
 			}
 		}
+		// 指定目标即使因首选渠道冷却而被正常选路选中，也按最终尝试处理。
+		if route := reqCtx.channelPoolRoute; route != nil && route.firstByteTimeoutChannelID == cfg.ID {
+			return s.tryTimeoutChannel(ctx, 0, reqCtx, w)
+		}
 		// 队列计数跟随实际尝试的渠道组：回退到其他组后，原组的进行中请求数随之减少。
 		reqCtx.channelPoolRoute.moveReservation(cfg.ChannelPool)
 		result, err := s.tryChannelWithSameChannelRetries(ctx, cfg, reqCtx, w)
@@ -989,6 +993,9 @@ func (s *Server) runProxyAttemptLoopWithFailureBoundary(
 				break
 			}
 
+			if shouldUseTimeoutChannel(reqCtx, result) {
+				return s.tryTimeoutChannel(ctx, cfg.ID, reqCtx, w)
+			}
 			if shouldStopTryingChannels(result) {
 				break
 			}
@@ -1078,19 +1085,25 @@ func (s *Server) tryChannelWithSameChannelRetries(
 	reqCtx *proxyRequestContext,
 	w http.ResponseWriter,
 ) (*proxyResult, error) {
-	if cfg.SameChannelRetries <= 0 {
+	if cfg.SameChannelRetries <= 0 || reqCtx.terminalChannel {
 		return s.tryChannelWithKeys(ctx, cfg, reqCtx, w)
 	}
 	for attempt := 0; ; attempt++ {
 		pending := &pendingSameChannelCooldowns{}
 		result, err := s.tryChannelWithKeys(context.WithValue(ctx, pendingSameChannelCooldownsKey{}, pending), cfg, reqCtx, w)
 		if attempt < cfg.SameChannelRetries && err == nil && len(pending.inputs) > 0 && ctx.Err() == nil &&
-			result != nil && !result.succeeded && !result.isClientCanceled && !result.operatorAborted {
+			result != nil && !result.succeeded && !result.isClientCanceled && !result.operatorAborted && !shouldUseTimeoutChannel(reqCtx, result) {
 			log.Printf("[RETRY] 渠道 %s (ID=%d) 同渠道重试 %d/%d (status=%d)",
 				cfg.Name, cfg.ID, attempt+1, cfg.SameChannelRetries, result.status)
 			continue
 		}
 		if len(pending.inputs) == 0 {
+			return result, err
+		}
+		if shouldUseTimeoutChannel(reqCtx, result) {
+			for _, in := range pending.inputs {
+				s.applyCooldownDecision(ctx, cfg, in)
+			}
 			return result, err
 		}
 		last := pending.inputs[len(pending.inputs)-1]
