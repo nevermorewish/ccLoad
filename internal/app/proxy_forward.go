@@ -3560,8 +3560,8 @@ func (s *Server) forwardAttempt(
 		return result, action, nil
 	}
 
-	// 指定超时目标的 HTTP 错误是最终响应，保留状态、响应头与正文，不再修复或重试。
-	if reqCtx.terminalChannel && !res.ResponseCommitted && res.Status >= 300 {
+	// 指定超时目标或关闭 400 重试时，保留最终错误，不再探测协议或切换渠道。
+	if !res.ResponseCommitted && ((reqCtx.terminalChannel && res.Status >= 300) || channelDisables400Retry(cfg, res)) {
 		result, action := s.handleProxyErrorResponse(ctx, cfg, keyIndex, actualModel, selectedKey, res, duration, reqCtx, false, true, false)
 		return result, action, nil
 	}
@@ -3736,7 +3736,7 @@ func retryBodyForRejectedRequest(
 	plan protocol.TransformPlan,
 	res *fwResult,
 ) ([]byte, string, bool) {
-	if cfg.PassthroughEnabled() {
+	if cfg.PassthroughEnabled() || channelDisables400Retry(cfg, res) {
 		return nil, "", false
 	}
 	if retryBody, strategy, ok := usageSemanticsRetryBodyFor400(upstreamProtocol, plan, res); ok {
@@ -4867,6 +4867,9 @@ func (s *Server) tryOAuthChannel(
 			result = lastFailure
 		}
 		if reqCtx.terminalChannel {
+			return result, nil
+		}
+		if result != nil && cfg.Disable400Retry && result.status == http.StatusBadRequest && result.nextAction == cooldown.ActionReturnClient {
 			return result, nil
 		}
 		if result != nil && credentialRejected(result) {

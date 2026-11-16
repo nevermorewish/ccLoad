@@ -1333,6 +1333,9 @@ func (s *Server) handleUpdateChannel(c *gin.Context, id int64) {
 		req.OAuthQuotaPassthrough = existing.OAuthQuotaPassthrough
 	}
 	// Older editors do not submit this setting; omission must not disable retries.
+	if _, submitted := rawReq["disable_400_retry"]; !submitted {
+		req.Disable400Retry = existing.Disable400Retry
+	}
 	if _, submitted := rawReq["same_channel_retries"]; !submitted {
 		req.SameChannelRetries = existing.SameChannelRetries
 	}

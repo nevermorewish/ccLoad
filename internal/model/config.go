@@ -748,6 +748,9 @@ type Config struct {
 	// 中间失败不累计冷却。0 表示不重试（默认）。
 	SameChannelRetries int `json:"same_channel_retries"`
 
+	// Disable400Retry returns upstream HTTP 400 without repair or failover.
+	Disable400Retry bool `json:"disable_400_retry"`
+
 	// 渠道组（0=主渠道，1=渠道1，2=渠道2），由渠道路由规则决定请求优先使用哪一组。
 	ChannelPool int `json:"channel_pool"`
 
@@ -814,6 +817,7 @@ func (c *Config) Clone() *Config {
 		AvailableTimeEnd:              c.AvailableTimeEnd,
 		RetryOtherKeysOnFailure:       c.RetryOtherKeysOnFailure,
 		SameChannelRetries:            c.SameChannelRetries,
+		Disable400Retry:               c.Disable400Retry,
 		ChannelPool:                   c.ChannelPool,
 		OAuthCredential:               c.OAuthCredential,
 		CodexAccessToken:              c.CodexAccessToken,

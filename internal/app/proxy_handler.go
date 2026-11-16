@@ -1109,7 +1109,7 @@ func (s *Server) tryChannelWithSameChannelRetries(
 		pending := &pendingSameChannelCooldowns{}
 		result, err := s.tryChannelWithKeys(context.WithValue(ctx, pendingSameChannelCooldownsKey{}, pending), cfg, reqCtx, w)
 		if attempt < cfg.SameChannelRetries && err == nil && len(pending.inputs) > 0 && ctx.Err() == nil &&
-			result != nil && !result.succeeded && !result.isClientCanceled && !result.operatorAborted &&
+			result != nil && result.nextAction != cooldown.ActionReturnClient && !result.succeeded && !result.isClientCanceled && !result.operatorAborted &&
 			!result.firstByteFailFast && !shouldUseTimeoutChannel(reqCtx, result) {
 			log.Printf("[RETRY] 渠道 %s (ID=%d) 同渠道重试 %d/%d (status=%d)",
 				cfg.Name, cfg.ID, attempt+1, cfg.SameChannelRetries, result.status)

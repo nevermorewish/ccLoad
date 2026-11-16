@@ -46,6 +46,7 @@ type ChannelRequest struct {
 	AvailableTimeEnd              string                        `json:"available_time_end,omitempty"`
 	RetryOtherKeysOnFailure       bool                          `json:"retry_other_keys_on_failure"`
 	SameChannelRetries            int                           `json:"same_channel_retries"`
+	Disable400Retry               bool                          `json:"disable_400_retry"`
 	ChannelPool                   int                           `json:"channel_pool"` // 渠道组：0=主渠道，1=渠道1，2=渠道2
 	ManagementAccount             *channelManagementInput       `json:"management_account,omitempty"`
 
@@ -565,6 +566,7 @@ func (cr *ChannelRequest) ToConfig() *model.Config {
 		AvailableTimeEnd:              cr.AvailableTimeEnd,
 		RetryOtherKeysOnFailure:       cr.RetryOtherKeysOnFailure,
 		SameChannelRetries:            cr.SameChannelRetries,
+		Disable400Retry:               cr.Disable400Retry,
 		ChannelPool:                   cr.ChannelPool,
 	}
 }

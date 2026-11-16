@@ -115,7 +115,7 @@ func TestAdminAPI_ExportChannelsCSV(t *testing.T) {
 		header[0] = strings.TrimPrefix(header[0], "\ufeff")
 	}
 
-	expectedHeaders := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "api_key_model_scope_auto", "urls", "priority", "sort_override", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "oauth_quota_passthrough", "scheduled_check_interval_minutes", "scheduled_check_start_time", "same_channel_retries", "channel_pool"}
+	expectedHeaders := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "api_key_model_scope_auto", "urls", "priority", "sort_override", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "oauth_quota_passthrough", "scheduled_check_interval_minutes", "scheduled_check_start_time", "same_channel_retries", "channel_pool", "disable_400_retry"}
 	if len(header) != len(expectedHeaders) {
 		t.Fatalf("Header字段数量不匹配: 期望 %d, 实际: %d\nHeader: %v", len(expectedHeaders), len(header), header)
 	}
@@ -1649,10 +1649,11 @@ func TestAdminAPI_ExportImportRoundTrip(t *testing.T) {
 
 	// 步骤1：创建原始测试数据
 	originalConfig := &model.Config{
-		Name:       "RoundTrip-Test",
-		URLs:       model.ChannelURLs{{URL: "https://roundtrip.example.com"}},
-		Priority:   15,
-		Websockets: true,
+		Name:            "RoundTrip-Test",
+		Disable400Retry: true,
+		URLs:            model.ChannelURLs{{URL: "https://roundtrip.example.com"}},
+		Priority:        15,
+		Websockets:      true,
 		ModelEntries: []model.ModelEntry{
 			{Model: "model-a", RedirectModel: ""},
 			{Model: "model-b", RedirectModel: ""},
@@ -1751,6 +1752,9 @@ func TestAdminAPI_ExportImportRoundTrip(t *testing.T) {
 		t.Errorf("URL不匹配: 期望 %v, 实际 %v", originalConfig.GetURLs(), restoredConfig.GetURLs())
 	}
 
+	if restoredConfig.Disable400Retry != originalConfig.Disable400Retry {
+		t.Fatal("400 retry policy lost on CSV round trip")
+	}
 	if restoredConfig.Priority != originalConfig.Priority {
 		t.Errorf("Priority不匹配: 期望 %d, 实际 %d", originalConfig.Priority, restoredConfig.Priority)
 	}

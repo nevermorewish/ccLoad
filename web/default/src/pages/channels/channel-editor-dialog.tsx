@@ -31,7 +31,7 @@ const VIRTUAL_THRESHOLD = 50
 const VIRTUAL_ROW_HEIGHT = 52
 const VIRTUAL_BUFFER = 5
 
-const blankForm = (authType = 'api_key', pool = 0): ChannelForm => ({ name: '', auth_type: authType, urls: [{ url: '' }], priority: 0, enabled: true, models: [], api_keys: [{ api_key: '', cost_multiplier: 1, priority: 0 }], protocol_transform_mode: 'auto', key_strategy: 'sequential', same_channel_retries: 0, channel_pool: pool })
+const blankForm = (authType = 'api_key', pool = 0): ChannelForm => ({ name: '', auth_type: authType, urls: [{ url: '' }], priority: 0, enabled: true, models: [], api_keys: [{ api_key: '', cost_multiplier: 1, priority: 0 }], protocol_transform_mode: 'auto', key_strategy: 'sequential', same_channel_retries: 0, disable_400_retry: false, channel_pool: pool })
 const poolOptions = CHANNEL_POOLS.map((pool) => ({ value: String(pool.value), label: `渠道组：${pool.label}` }))
 const keyCooling = (row: ChannelKeyRow) => Number(row.cooldown_until ?? 0) * 1000 > Date.now()
 
@@ -296,6 +296,7 @@ export function ChannelEditorDialog({ open, editing, duplicateOf, createAuthType
         <SearchableSelect ariaLabel="认证类型" className="combobox-inline" value={form.auth_type} disabled options={AUTH_TYPES} onChange={() => undefined} />
         <SearchableSelect ariaLabel="渠道组" className="combobox-inline" value={String(form.channel_pool ?? 0)} options={poolOptions} onChange={(value) => update('channel_pool', Number(value))} />
         {!isSystemOne && <SearchableSelect ariaLabel="协议处理" className="combobox-inline" value={String(form.protocol_transform_mode ?? 'auto')} options={[{ value: 'auto', label: '协议处理：自动（原生优先）' }, { value: 'upstream', label: '协议处理：上游直通' }, { value: 'local', label: '协议处理：ccLoad 转换' }]} onChange={(value) => update('protocol_transform_mode', value)} />}
+        <label className="muted" title="关闭后，上游返回 HTTP 400 时直接返回错误，不再修复参数、换 Key、换 URL 或换渠道重试，也不触发冷却；其他状态码不受影响。"><input type="checkbox" checked={!form.disable_400_retry} onChange={(event) => update('disable_400_retry', !event.target.checked)} /> 400 错误重试</label>
         <label className="muted">同渠道重试<input className="input compact" type="number" min={0} max={10} step={1} value={Number(form.same_channel_retries ?? 0)} onChange={(event) => update('same_channel_retries', Number(event.target.value))} /></label>
       </div>
 

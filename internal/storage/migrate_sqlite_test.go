@@ -2766,3 +2766,34 @@ func verifyOpenAICacheWriteTTLMigrationAndRoundTrip(t *testing.T, db *sql.DB, st
 		}
 	}
 }
+
+func TestMigrateSQLiteDisable400RetryDefault(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "retry400.db")
+	store, err := createSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := store.CreateConfig(ctx, &model.Config{Name: "legacy", URLs: model.ChannelURLs{{URL: "https://example.com"}}, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ExecContext(ctx, "ALTER TABLE channels DROP COLUMN disable_400_retry"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = createSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	got, err := store.GetConfig(ctx, cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Disable400Retry {
+		t.Fatal("legacy channel must migrate with false default")
+	}
+}

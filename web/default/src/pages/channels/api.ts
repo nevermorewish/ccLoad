@@ -46,6 +46,7 @@ export type ChannelForm = {
   protocol_transform_mode?: string
   retry_other_keys_on_failure?: boolean
   same_channel_retries?: number
+  disable_400_retry?: boolean
   /** 渠道组：0=主渠道，1=渠道1，2=渠道2（internal/model/config.go:ChannelPoolCount） */
   channel_pool?: number
   daily_cost_limit?: number
@@ -156,6 +157,7 @@ export function formFromEditor(data: ChannelEditorData, fallback: Channel): Chan
     protocol_transform_mode: String(raw.protocol_transform_mode ?? 'auto'),
     retry_other_keys_on_failure: Boolean(raw.retry_other_keys_on_failure),
     same_channel_retries: Number(raw.same_channel_retries ?? 0),
+    disable_400_retry: Boolean(raw.disable_400_retry),
     channel_pool: Number(raw.channel_pool ?? 0),
     daily_cost_limit: Number(raw.daily_cost_limit ?? 0),
     scheduled_check_enabled: Boolean(raw.scheduled_check_enabled),

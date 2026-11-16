@@ -102,7 +102,7 @@ func (s *Server) HandleExportChannelsCSV(c *gin.Context) {
 	writer := csv.NewWriter(buf)
 	defer writer.Flush()
 
-	header := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "api_key_model_scope_auto", "urls", "priority", "sort_override", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "oauth_quota_passthrough", "scheduled_check_interval_minutes", "scheduled_check_start_time", "same_channel_retries", "channel_pool"}
+	header := []string{"id", "name", "api_key", "api_key_allowed_models", "api_key_detected_models", "api_key_cost_multipliers", "api_key_priorities", "api_key_model_scope_empty", "api_key_model_scope_auto", "urls", "priority", "sort_override", "rpm_limit", "max_concurrency", "model_entries_json", "protocol_transform_mode", "key_strategy", "enabled", "scheduled_check_enabled", "scheduled_check_model", "cooldown_detection_rules", "retry_other_keys_on_failure", "auth_type", "oauth_credential", "management_daily_checkin_enabled", "management_daily_checkin_time", "websockets", "oauth_quota_passthrough", "scheduled_check_interval_minutes", "scheduled_check_start_time", "same_channel_retries", "channel_pool", "disable_400_retry"}
 	if err := writer.Write(header); err != nil {
 		RespondError(c, http.StatusInternalServerError, err)
 		return
@@ -237,6 +237,7 @@ func (s *Server) HandleExportChannelsCSV(c *gin.Context) {
 			cfg.ScheduledCheckStartTime,
 			strconv.Itoa(cfg.SameChannelRetries),
 			strconv.Itoa(cfg.ChannelPool),
+			strconv.FormatBool(cfg.Disable400Retry),
 		}
 		if err := writer.Write(record); err != nil {
 			RespondError(c, http.StatusInternalServerError, err)
@@ -337,13 +338,14 @@ func (s *Server) HandleImportChannelsCSV(c *gin.Context) {
 	_, hasInterval := columnIndex["scheduled_check_interval_minutes"]
 	_, hasStart := columnIndex["scheduled_check_start_time"]
 	_, hasSameChannelRetries := columnIndex["same_channel_retries"]
+	_, hasDisable400Retry := columnIndex["disable_400_retry"]
 	existingCooldownDetectionRulesByName := make(map[string]*model.CooldownDetectionRules)
 	existingRetryOtherKeysOnFailureByName := make(map[string]bool)
 	existingWebsocketsByName := make(map[string]bool)
 	existingOAuthQuotaPassthroughByName := make(map[string]bool)
 	existingAPIKeysByName := make(map[string][]*model.APIKey)
 	existingModelEntriesByName := make(map[string][]model.ModelEntry)
-	if !hasInterval || !hasStart || !hasSameChannelRetries || !hasScheduledCheckColumn || !hasScheduledCheckModelColumn || !hasCooldownDetectionRulesColumn || !hasRetryOtherKeysOnFailureColumn || !hasWebsocketsColumn || !hasOAuthQuotaPassthroughColumn || !hasAPIKeyAllowedModelsColumn || !hasAPIKeyDetectedModelsColumn || !hasAPIKeyCostMultipliersColumn || !hasAPIKeyPrioritiesColumn || !hasAPIKeyModelScopeEmptyColumn || !hasAPIKeyModelScopeAutoColumn || !hasModelPricingColumn {
+	if !hasInterval || !hasStart || !hasSameChannelRetries || !hasDisable400Retry || !hasScheduledCheckColumn || !hasScheduledCheckModelColumn || !hasCooldownDetectionRulesColumn || !hasRetryOtherKeysOnFailureColumn || !hasWebsocketsColumn || !hasOAuthQuotaPassthroughColumn || !hasAPIKeyAllowedModelsColumn || !hasAPIKeyDetectedModelsColumn || !hasAPIKeyCostMultipliersColumn || !hasAPIKeyPrioritiesColumn || !hasAPIKeyModelScopeEmptyColumn || !hasAPIKeyModelScopeAutoColumn || !hasModelPricingColumn {
 		existingConfigs, err := s.store.ListConfigs(c.Request.Context())
 		if err != nil {
 			RespondError(c, http.StatusInternalServerError, err)
@@ -789,6 +791,21 @@ func (s *Server) parseChannelImportRow(
 		start = fetch("scheduled_check_start_time")
 	}
 
+	disable400Retry := false
+	if existing := existingSchedulesByName[name]; existing != nil {
+		disable400Retry = existing.Disable400Retry
+	}
+	if _, present := columnIndex["disable_400_retry"]; present {
+		disable400Retry = false
+		if raw := fetch("disable_400_retry"); raw != "" {
+			parsed, ok := parseImportEnabled(raw)
+			if !ok {
+				return nil, fmt.Sprintf("第%d行 disable_400_retry 必须为布尔值: %s", lineNo, raw), true
+			}
+			disable400Retry = parsed
+		}
+	}
+
 	sameChannelRetries := 0
 	if existing := existingSchedulesByName[name]; existing != nil {
 		sameChannelRetries = existing.SameChannelRetries
@@ -937,6 +954,7 @@ func (s *Server) parseChannelImportRow(
 		CooldownDetectionRules:        cooldownDetectionRules,
 		RetryOtherKeysOnFailure:       retryOtherKeysOnFailure,
 		SameChannelRetries:            sameChannelRetries,
+		Disable400Retry:               disable400Retry,
 	}
 
 	// 解析并构建API Keys

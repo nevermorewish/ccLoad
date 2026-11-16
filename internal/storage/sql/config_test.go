@@ -47,6 +47,7 @@ func TestConfig_CreateAndGet(t *testing.T) {
 		ProtocolTransformMode:   model.ProtocolTransformModeLocal,
 		RetryOtherKeysOnFailure: true,
 		SameChannelRetries:      2,
+		Disable400Retry:         true,
 		AvailableTimeStart:      "22:00",
 		AvailableTimeEnd:        "08:00",
 		RPMLimit:                60,
@@ -99,6 +100,9 @@ func TestConfig_CreateAndGet(t *testing.T) {
 	}
 	if !got.RetryOtherKeysOnFailure {
 		t.Error("expected retry_other_keys_on_failure=true")
+	}
+	if !got.Disable400Retry || !got.Clone().Disable400Retry {
+		t.Fatal("disable_400_retry lost")
 	}
 	if got.SameChannelRetries != 2 {
 		t.Errorf("same_channel_retries: got %d, want 2", got.SameChannelRetries)

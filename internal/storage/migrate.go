@@ -225,6 +225,9 @@ func migrate(ctx context.Context, db *sql.DB, dialect Dialect) error {
 			if err := ensureChannelsRetryOtherKeysOnFailure(ctx, db, dialect); err != nil {
 				return fmt.Errorf("migrate channels retry_other_keys_on_failure: %w", err)
 			}
+			if err := ensureColumn(ctx, db, dialect, "channels", "disable_400_retry", "TINYINT NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+				return fmt.Errorf("migrate channels disable_400_retry: %w", err)
+			}
 			if err := ensureChannelsSameChannelRetries(ctx, db, dialect); err != nil {
 				return fmt.Errorf("migrate channels same_channel_retries: %w", err)
 			}

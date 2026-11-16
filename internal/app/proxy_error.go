@@ -803,6 +803,12 @@ func countTokensUpstreamErrorResult(cfg *model.Config, res *fwResult, duration f
 	}, action
 }
 
+// channelDisables400Retry applies only to upstream HTTP 400 responses.
+func channelDisables400Retry(cfg *model.Config, res *fwResult) bool {
+	return cfg != nil && cfg.Disable400Retry && res != nil &&
+		(res.UpstreamStatus == http.StatusBadRequest || (res.UpstreamStatus == 0 && res.Status == http.StatusBadRequest))
+}
+
 // handleProxyErrorResponse 处理代理错误响应（业务逻辑层）
 // 从proxy.go提取，遵循SRP原则
 // 注意：与 handleErrorResponse（HTTP层）不同
@@ -862,7 +868,7 @@ func (s *Server) handleProxyErrorResponse(
 		failure.proxyLogWritten = true
 	}
 
-	if forceReturnClient {
+	if forceReturnClient || channelDisables400Retry(cfg, res) {
 		failure.nextAction = cooldown.ActionReturnClient
 		return failure, cooldown.ActionReturnClient
 	}

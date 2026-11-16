@@ -161,3 +161,13 @@ test('video-to-images defaults off and survives enable, reload, and disable', ()
   assert.equal(loaded.video_to_images, true);
   assert.equal(advancedToPayload({ ...loaded, video_to_images: false }, false).custom_request_rules, null);
 });
+
+test('400 retry toggle retains disabled and re-enabled values', () => {
+  const channel = { id: 1, name: 'Primary', auth_type: 'api_key', urls: [{ url: 'https://example.invalid' }], models: [{ model: 'test' }], disable_400_retry: true };
+  const form = api.formFromEditor({ channel }, channel);
+  const extras = { customRules: null, cooldownRules: null, management: null };
+  assert.equal(form.disable_400_retry, true);
+  assert.equal(api.formToPayload(form, extras).disable_400_retry, true);
+  assert.equal(api.formToPayload({ ...form, disable_400_retry: false }, extras).disable_400_retry, false);
+  assert.equal(api.formFromEditor({ channel: { ...channel, disable_400_retry: undefined } }, channel).disable_400_retry, false);
+});

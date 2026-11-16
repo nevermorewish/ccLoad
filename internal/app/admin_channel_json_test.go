@@ -36,7 +36,7 @@ func importJSONFixture(t *testing.T, server *Server, data []byte) (int, string) 
 func TestAdminChannelJSONExportImportRoundTrip(t *testing.T) {
 	source := newInMemoryServer(t)
 	cfg, err := source.store.CreateConfig(context.Background(), &model.Config{
-		Name: "json-backup", URLs: model.ChannelURLs{{URL: "https://api.example.com"}},
+		Disable400Retry: true, Name: "json-backup", URLs: model.ChannelURLs{{URL: "https://api.example.com"}},
 		AuthType: model.AuthTypeAPIKey, Enabled: true, Priority: 17,
 		ModelEntries:          []model.ModelEntry{{Model: "test-model"}},
 		ScheduledCheckEnabled: true, ScheduledCheckIntervalMinutes: 15, ScheduledCheckStartTime: "08:30",
@@ -73,7 +73,7 @@ func TestAdminChannelJSONExportImportRoundTrip(t *testing.T) {
 		t.Fatalf("imported configs=%v, err=%v", configs, err)
 	}
 	got := configs[0]
-	if got.Name != cfg.Name || got.DailyCostLimit != 12.5 || got.ProxyURL != cfg.ProxyURL || got.AvailableTimeStart != "09:00" || !got.ScheduledCheckEnabled {
+	if !got.Disable400Retry || got.Name != cfg.Name || got.DailyCostLimit != 12.5 || got.ProxyURL != cfg.ProxyURL || got.AvailableTimeStart != "09:00" || !got.ScheduledCheckEnabled {
 		t.Fatalf("imported config lost settings: %+v", got)
 	}
 	keys, err := target.store.GetAPIKeys(context.Background(), got.ID)
