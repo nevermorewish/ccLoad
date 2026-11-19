@@ -564,6 +564,7 @@ func initDefaultSettings(ctx context.Context, db *sql.DB, dialect Dialect) error
 		{config.AntigravityURLSettingKey, "", "string", "Antigravity OAuth API根地址(留空使用渠道URL；填写后覆盖渠道URL)", ""},
 		{config.AnthropicBaseURLSettingKey, "", "string", "Anthropic OAuth API根地址(留空使用渠道URL；填写后覆盖渠道URL)", ""},
 		{"log_retention_days", "7", "int", "日志保留天数(-1永久保留,1-365天)", "7"},
+		{config.LoggingInputTokensExcludeCacheSettingKey, "true", "bool", "日志 input_tokens 记可计费输入(扣除缓存读写)；关闭后改记上游 prompt 总量(含缓存)，用于与上游 usage 对账。只影响日志，不影响计费", "true"},
 		{"max_key_retries", "3", "int", "单渠道最大Key重试次数", "3"},
 		{"max_concurrency", "1000", "int", "最大并发请求数(限制同时处理的代理请求数量)", "1000"},
 		{"http_read_timeout_seconds", "0", "duration", "下游请求读取超时(秒,覆盖请求头+请求体的整段读取,0=使用内建默认值120秒)", "0"},

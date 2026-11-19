@@ -42,7 +42,7 @@ func (s *Server) HandleErrors(c *gin.Context) {
 			RespondErrorMsg(c, http.StatusInternalServerError, "读取日志脱敏元数据失败")
 			return
 		}
-		projected := projectTokenLogs(logs, channels, s.logModelPrices(c.Request.Context(), logs))
+		projected := projectTokenLogs(logs, channels, s.logModelPrices(c.Request.Context(), logs), s.logInputTokensModeValue())
 		if hideTokenChannels(c) {
 			for i := range projected {
 				projected[i].ChannelID = 0
@@ -60,7 +60,7 @@ func (s *Server) HandleErrors(c *gin.Context) {
 		RespondJSONWithCount(c, http.StatusOK, projected, total)
 		return
 	}
-	RespondJSONWithCount(c, http.StatusOK, projectDashboardLogs(logs, s.logModelPrices(c.Request.Context(), logs)), total)
+	RespondJSONWithCount(c, http.StatusOK, projectDashboardLogs(logs, s.logModelPrices(c.Request.Context(), logs), s.logInputTokensModeValue()), total)
 }
 
 func (s *Server) tokenLogChannels(ctx context.Context, logs []*model.LogEntry) (map[int64]tokenLogChannelMetadata, error) {

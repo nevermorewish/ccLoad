@@ -16,6 +16,11 @@ const (
 	CodexMap429To503SettingKey = "codex_map_429_to_503"
 	// SessionAffinityEnabledSettingKey 控制会话粘性：开启后同一会话绑定上次成功的渠道与 Key。
 	SessionAffinityEnabledSettingKey = "enable_session_affinity"
+	// LoggingInputTokensExcludeCacheSettingKey 控制日志 input_tokens 的口径。
+	// 开启（默认）时记可计费输入（OpenAI/Codex/Gemini 的 prompt_tokens 已扣除缓存分项）；
+	// 关闭时记上游 prompt 总量（含缓存读写），用于与上游 usage 对账。两端都不影响计费。
+	LoggingInputTokensExcludeCacheSettingKey = "logging_input_tokens_exclude_cache"
+	DefaultLoggingInputTokensExcludeCache    = true
 )
 
 // HTTP服务器配置常量

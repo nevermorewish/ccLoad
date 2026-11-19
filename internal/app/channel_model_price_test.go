@@ -204,7 +204,7 @@ func TestProxy_ModelVariantLogOmitsAmbiguousPriceBreakdown(t *testing.T) {
 			t.Fatalf("missing persisted cost=%v", cost)
 		}
 	}
-	for _, projected := range projectDashboardLogs(logs, env.server.logModelPrices(context.Background(), logs)) {
+	for _, projected := range projectDashboardLogs(logs, env.server.logModelPrices(context.Background(), logs), env.server.logInputTokensModeValue()) {
 		if projected.CostBreakdown != nil {
 			t.Fatalf("ambiguous log cost=%v exposed misleading breakdown=%+v", projected.Cost, projected.CostBreakdown)
 		}

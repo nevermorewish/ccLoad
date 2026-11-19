@@ -135,7 +135,8 @@ func settingsRequireRestart(updates map[string]string) bool {
 	}
 	_, hotReloadedMultimodal := updates[modelMultimodalFallbackSettingKey]
 	_, hotReloadedPricing := updates[modelCustomPricingSettingKey]
-	hotReloaded := hotReloadedMultimodal || hotReloadedPricing
+	_, hotReloadedLogInput := updates[config.LoggingInputTokensExcludeCacheSettingKey]
+	hotReloaded := hotReloadedMultimodal || hotReloadedPricing || hotReloadedLogInput
 	return !hotReloaded
 }
 
@@ -164,9 +165,22 @@ func (s *Server) commitSettingUpdates(updates map[string]string, persist func() 
 		s.modelPricingUpdateMu.Lock()
 		defer s.modelPricingUpdateMu.Unlock()
 	}
+	logInputValue, updatesLogInput := updates[config.LoggingInputTokensExcludeCacheSettingKey]
+	var logInputMode logInputTokensMode
+	if updatesLogInput {
+		excludeCache, ok := parseSettingBool(logInputValue)
+		if !ok {
+			return false, fmt.Errorf("parse validated %s setting: must be true/false or 1/0",
+				config.LoggingInputTokensExcludeCacheSettingKey)
+		}
+		logInputMode = parseLogInputTokensMode(excludeCache)
+	}
 
 	if err := persist(); err != nil {
 		return false, err
+	}
+	if updatesLogInput {
+		s.setLogInputTokensMode(logInputMode)
 	}
 	if updatesMultimodalFallback {
 		s.setMultimodalFallbackModels(multimodalFallbackModels)

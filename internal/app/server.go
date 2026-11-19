@@ -167,10 +167,12 @@ type Server struct {
 	multimodalFallbackModels   atomic.Pointer[multimodalFallbackSnapshot]
 	multimodalFallbackUpdateMu sync.Mutex
 	modelPricingUpdateMu       sync.Mutex
-	settingsUpdateMu           sync.Mutex
-	reasoningAuto              model.ReasoningAutoConfig
-	reasoningStates            reasoningStateStore
-	reasoningDecisionSlots     chan struct{}
+	// 日志 input_tokens 口径（热更新）。零值等于默认剔除缓存，与历史行为一致。
+	logInputTokensMode     atomic.Int32
+	settingsUpdateMu       sync.Mutex
+	reasoningAuto          model.ReasoningAutoConfig
+	reasoningStates        reasoningStateStore
+	reasoningDecisionSlots chan struct{}
 
 	// 渠道路由规则同样以不可变快照热更新，保存即生效。
 	channelRoutes        atomic.Pointer[channelRouteSnapshot]
@@ -347,6 +349,7 @@ func newServer(store storage.Store, logBatchTimeout time.Duration) *Server {
 		channelPoolQueues:         newChannelPoolQueues(),
 	}
 	s.setMultimodalFallbackModels(runtimeCfg.MultimodalFallbackModels)
+	s.setLogInputTokensMode(loadLogInputTokensMode(configService))
 	s.setChannelRouteConfig(loadChannelRouteConfig(configService))
 
 	reg := protocol.NewRegistry()

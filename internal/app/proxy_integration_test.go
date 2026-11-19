@@ -3060,7 +3060,7 @@ func TestProxy_CodexFastModeBillsByRateCard(t *testing.T) {
 			if entry.CodexHasCredits != tc.credits || math.Abs(entry.Cost-standard*tc.multiplier) > 1e-12 {
 				t.Fatalf("credits=%t cost=%v, want credits=%t cost=%v", entry.CodexHasCredits, entry.Cost, tc.credits, standard*tc.multiplier)
 			}
-			breakdown := projectDashboardLogs(logs, env.server.logModelPrices(ctx, logs))[0].CostBreakdown
+			breakdown := projectDashboardLogs(logs, env.server.logModelPrices(ctx, logs), env.server.logInputTokensModeValue())[0].CostBreakdown
 			if breakdown == nil || breakdown.ServiceTierMultiplier != tc.multiplier || math.Abs(breakdown.Total-entry.Cost) > 1e-12 {
 				t.Fatalf("breakdown=%+v, want multiplier %v total %v", breakdown, tc.multiplier, entry.Cost)
 			}

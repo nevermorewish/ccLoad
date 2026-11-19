@@ -154,26 +154,32 @@ func buildLogCostBreakdown(entry *model.LogEntry, modelPrice logModelPriceFunc) 
 	return &breakdown
 }
 
-func projectDashboardLogs(logs []*model.LogEntry, modelPrice logModelPriceFunc) []dashboardLogEntry {
+func projectDashboardLogs(logs []*model.LogEntry, modelPrice logModelPriceFunc, mode logInputTokensMode) []dashboardLogEntry {
 	projected := make([]dashboardLogEntry, 0, len(logs))
 	for _, entry := range logs {
 		if entry == nil {
 			continue
 		}
+		// 成本明细先按可计费输入算好，再换展示用的 input；两者顺序不能颠倒。
+		breakdown := buildLogCostBreakdown(entry, modelPrice)
+		entry.InputTokens = displayInputTokens(mode, entry)
 		projected = append(projected, dashboardLogEntry{
 			LogEntry:      entry,
-			CostBreakdown: buildLogCostBreakdown(entry, modelPrice),
+			CostBreakdown: breakdown,
 		})
 	}
 	return projected
 }
 
-func projectTokenLogs(logs []*model.LogEntry, channels map[int64]tokenLogChannelMetadata, modelPrice logModelPriceFunc) []tokenLogEntry {
+func projectTokenLogs(logs []*model.LogEntry, channels map[int64]tokenLogChannelMetadata, modelPrice logModelPriceFunc, mode logInputTokensMode) []tokenLogEntry {
 	projected := make([]tokenLogEntry, 0, len(logs))
 	for _, entry := range logs {
 		if entry == nil {
 			continue
 		}
+		// 成本明细先按可计费输入算好，再换展示用的 input；两者顺序不能颠倒。
+		breakdown := buildLogCostBreakdown(entry, modelPrice)
+		entry.InputTokens = displayInputTokens(mode, entry)
 		multiplier := entry.CostMultiplier
 		if multiplier < 0 {
 			multiplier = 1
@@ -218,7 +224,7 @@ func projectTokenLogs(logs []*model.LogEntry, channels map[int64]tokenLogChannel
 			Cache12hInputTokens:      entry.Cache12hInputTokens,
 			Cost:                     entry.Cost,
 			EffectiveCost:            entry.Cost * multiplier,
-			CostBreakdown:            buildLogCostBreakdown(entry, modelPrice),
+			CostBreakdown:            breakdown,
 		})
 	}
 	return projected
