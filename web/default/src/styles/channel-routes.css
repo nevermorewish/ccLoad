@@ -14,6 +14,10 @@
 .route-models { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .route-chip .link-button { padding: 0 2px; line-height: 1; }
 .route-row { margin-bottom: 0; align-items: center; }
+.route-thinking-tier { display: grid; gap: 6px; padding: 8px 0; border-top: 1px dashed rgba(148, 163, 184, .28); }
+.route-thinking-tier:first-child { padding-top: 0; border-top: 0; }
+.route-efforts { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.route-efforts label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
 .route-order { display: flex; flex-wrap: wrap; gap: 8px; }
 .route-simulate { margin-top: 4px; }
 .route-simulate h2 { margin: 0 0 6px; font-size: 18px; }

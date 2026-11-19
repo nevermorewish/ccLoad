@@ -2,6 +2,7 @@ import { CHANNEL_POOLS, channelPoolLabel } from './channels/api'
 
 /** 与 internal/app/channel_pool_routing.go 的 ChannelRouteConfig 一一对应。 */
 export type TokenTier = { min_tokens: number; max_tokens: number; pool: number }
+export type ThinkingTier = { efforts: string[]; pool: number }
 export type QueueOverflow = { pool: number; max_queue: number; target_pool: number }
 export type StickyMode = 'off' | 'tier' | 'session'
 export type RouteRule = {
@@ -11,6 +12,8 @@ export type RouteRule = {
   models: string[]
   default_pool: number
   token_tiers: TokenTier[]
+  /** 思考档位档位，优先于 token_tiers；未配置时行为不变。 */
+  thinking_tiers?: ThinkingTier[]
   overflow: QueueOverflow[]
   sticky: StickyMode
   strict: boolean
@@ -32,6 +35,9 @@ export type Simulation = {
   rule_id: string
   rule_name: string
   tier: number
+  /** 命中的思考档位下标，-1 表示未命中；thinking_effort 为空表示请求未声明档位。 */
+  thinking_tier: number
+  thinking_effort: string
   input_tokens: number
   reason: string
   pools: Array<{ pool: number; name: string; inflight: number }>
@@ -43,6 +49,7 @@ export type Simulation = {
 
 /** 编辑草稿：Token 与队列保持输入原文（支持 8k / 50k 写法），保存时统一换算校验。 */
 export type TierDraft = { min: string; max: string; pool: number }
+export type ThinkingTierDraft = { efforts: string[]; pool: number }
 export type OverflowDraft = { pool: number; maxQueue: string; target: number }
 export type RuleDraft = {
   key: string
@@ -52,6 +59,7 @@ export type RuleDraft = {
   models: string[]
   defaultPool: number
   tiers: TierDraft[]
+  thinkingTiers: ThinkingTierDraft[]
   overflow: OverflowDraft[]
   sticky: StickyMode
   strict: boolean
@@ -65,13 +73,38 @@ export type RuleDraft = {
 export const MAX_FIRST_BYTE_TIMEOUT_SECONDS = 3600
 
 export const STICKY_MODES: Array<{ value: StickyMode; label: string; hint: string }> = [
-  { value: 'off', label: '会话粘性：关闭', hint: '每个请求独立按 Token 档位与队列分流' },
-  { value: 'tier', label: '会话粘性：同档位', hint: '同一会话在同一 Token 档位内固定渠道组（不受队列溢出影响），档位变化时重新分流' },
+  { value: 'off', label: '会话粘性：关闭', hint: '每个请求独立按思考档位、Token 档位与队列分流' },
+  { value: 'tier', label: '会话粘性：同档位', hint: '同一会话在同一思考/Token 档位内固定渠道组（不受队列溢出影响），档位变化时重新分流' },
   { value: 'session', label: '会话粘性：整会话', hint: '同一会话固定在首次成功的渠道组，直到该组不可用或 1 小时无请求' },
 ]
 
 export const ROUTE_REASONS: Record<string, string> = {
-  default: '默认渠道组', token_tier: '输入 Token 档位', overflow: '队列溢出', sticky: '会话粘性',
+  default: '默认渠道组', thinking_tier: '思考档位', token_tier: '输入 Token 档位', overflow: '队列溢出', sticky: '会话粘性',
+}
+
+/** 思考档位选项，与后端 channelRouteThinkingEfforts 一致；空串表示请求未声明档位。 */
+export const THINKING_EFFORTS: Array<{ value: string; label: string }> = [
+  { value: '', label: '未声明档位' },
+  { value: 'none', label: 'none（关闭思考）' },
+  { value: 'minimal', label: 'minimal' },
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'xhigh', label: 'xhigh' },
+  { value: 'max', label: 'max' },
+  { value: 'auto', label: 'auto（自动）' },
+  { value: '*', label: '任意档位' },
+]
+
+const effortLabel = (effort: string) => THINKING_EFFORTS.find((item) => item.value === effort)?.label ?? effort
+
+/** 思考档位集合的展示文案：按选项顺序排列，稳定可读。 */
+export function describeEfforts(efforts: string[]): string {
+  const order = THINKING_EFFORTS.map((item) => item.value)
+  return [...efforts]
+    .sort((a, b) => order.indexOf(a) - order.indexOf(b))
+    .map(effortLabel)
+    .join(' / ')
 }
 
 export const POOL_OPTIONS = CHANNEL_POOLS.map((pool) => ({ value: String(pool.value), label: pool.label }))
@@ -116,7 +149,7 @@ export function describeTier(tier: TokenTier): string {
 }
 
 export function emptyRuleDraft(): RuleDraft {
-  return { key: nextKey(), id: '', name: '', enabled: true, models: [], defaultPool: 0, tiers: [], overflow: [], sticky: 'tier', strict: false, firstByteTimeout: '', firstByteTimeoutChannel: '', firstByteTimeoutFailFast: false, nonStreamChannel: '' }
+  return { key: nextKey(), id: '', name: '', enabled: true, models: [], defaultPool: 0, tiers: [], thinkingTiers: [], overflow: [], sticky: 'tier', strict: false, firstByteTimeout: '', firstByteTimeoutChannel: '', firstByteTimeoutFailFast: false, nonStreamChannel: '' }
 }
 
 /** 示例：kimi-k3 输入 < 8k 走渠道1、≥ 50k 走渠道2，渠道1 进行中达到 100 时溢出到渠道2，同档位会话粘性。 */
@@ -134,6 +167,7 @@ export function ruleToDraft(rule: RouteRule): RuleDraft {
     key: nextKey(), id: rule.id ?? '', name: rule.name ?? '', enabled: rule.enabled !== false,
     models: [...(rule.models ?? [])], defaultPool: Number(rule.default_pool ?? 0),
     tiers: (rule.token_tiers ?? []).map((tier) => ({ min: formatTokens(tier.min_tokens), max: formatTokens(tier.max_tokens), pool: Number(tier.pool ?? 0) })),
+    thinkingTiers: (rule.thinking_tiers ?? []).map((tier) => ({ efforts: [...(tier.efforts ?? [])], pool: Number(tier.pool ?? 0) })),
     overflow: (rule.overflow ?? []).map((item) => ({ pool: Number(item.pool ?? 0), maxQueue: String(item.max_queue ?? ''), target: Number(item.target_pool ?? 0) })),
     sticky, strict: Boolean(rule.strict),
     nonStreamChannel: rule.non_stream_channel_id ? String(rule.non_stream_channel_id) : '',
@@ -195,10 +229,16 @@ export function draftsToConfig(drafts: RuleDraft[]): { config?: RouteConfig; err
     if (draft.firstByteTimeoutFailFast && target > 0) return { error: `${label}：超时直接返回 503 与指定超时渠道不能同时设置` }
     const nonStreamTarget = parseSecondsInput(draft.nonStreamChannel ?? '')
     if (nonStreamTarget === null) return { error: `${label}：非流式请求必须指定有效渠道` }
+    const thinkingTiers: ThinkingTier[] = []
+    for (const [tierIndex, tier] of draft.thinkingTiers.entries()) {
+      if (!tier.efforts.length) return { error: `${label}：第 ${tierIndex + 1} 个思考档位至少选择一个档位` }
+      thinkingTiers.push({ efforts: [...tier.efforts], pool: tier.pool })
+    }
     rules.push({
       ...(nonStreamTarget > 0 ? { non_stream_channel_id: nonStreamTarget } : {}),
       ...(target > 0 ? { first_byte_timeout_channel_id: target } : {}),
       ...(draft.firstByteTimeoutFailFast ? { first_byte_timeout_fail_fast: true } : {}),
+      ...(thinkingTiers.length ? { thinking_tiers: thinkingTiers } : {}),
       id: draft.id, name: draft.name.trim(), enabled: draft.enabled, models, default_pool: draft.defaultPool,
       token_tiers: tiers, overflow, sticky: draft.sticky, strict: draft.strict, first_byte_timeout_seconds: firstByteTimeout,
     })
@@ -208,8 +248,11 @@ export function draftsToConfig(drafts: RuleDraft[]): { config?: RouteConfig; err
 
 /** 规则摘要：一行说明分流效果，列表折叠时也能看出规则意图。 */
 export function summarizeRule(rule: RouteRule): string {
-  const parts = rule.token_tiers.map((tier) => `${describeTier(tier)} → ${channelPoolLabel(tier.pool)}`)
-  parts.push(`${rule.token_tiers.length ? '其余' : '全部'} → ${channelPoolLabel(rule.default_pool)}`)
+  const parts: string[] = []
+  for (const tier of rule.thinking_tiers ?? []) parts.push(`思考 ${describeEfforts(tier.efforts)} → ${channelPoolLabel(tier.pool)}`)
+  for (const tier of rule.token_tiers) parts.push(`${describeTier(tier)} → ${channelPoolLabel(tier.pool)}`)
+  const fallback = rule.thinking_tiers?.length || rule.token_tiers.length ? '其余' : '全部'
+  parts.push(`${fallback} → ${channelPoolLabel(rule.default_pool)}`)
   for (const item of rule.overflow) parts.push(`${channelPoolLabel(item.pool)} 进行中 ≥ ${item.max_queue} 时优先 ${channelPoolLabel(item.target_pool)}`)
   if (rule.first_byte_timeout_seconds > 0) {
     parts.push(rule.first_byte_timeout_fail_fast

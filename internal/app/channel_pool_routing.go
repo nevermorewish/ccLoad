@@ -29,15 +29,16 @@ import (
 // 队列溢出、会话粘性指向它们）时参与选路。
 
 const (
-	channelRouteRulesSettingKey = "channel_route_rules"
-	maxChannelRouteRulesBytes   = 64 * 1024
-	maxChannelRouteRules        = 64
-	maxChannelRouteRuleModels   = 64
-	maxChannelRouteTokenTiers   = 16
-	maxChannelRouteNameRunes    = 64
-	maxChannelRouteIDLength     = 64
-	maxChannelRouteModelLength  = 191
-	maxChannelRouteQueue        = 1_000_000
+	channelRouteRulesSettingKey  = "channel_route_rules"
+	maxChannelRouteRulesBytes    = 64 * 1024
+	maxChannelRouteRules         = 64
+	maxChannelRouteRuleModels    = 64
+	maxChannelRouteTokenTiers    = 16
+	maxChannelRouteThinkingTiers = 16
+	maxChannelRouteNameRunes     = 64
+	maxChannelRouteIDLength      = 64
+	maxChannelRouteModelLength   = 191
+	maxChannelRouteQueue         = 1_000_000
 	// 规则级首字超时上限：超过 1 小时已失去“卡住即切换渠道”的意义。
 	maxChannelRouteFirstByteTimeoutSeconds = 3600
 
@@ -47,10 +48,11 @@ const (
 	channelRouteStickyTier    = "tier"
 	channelRouteStickySession = "session"
 
-	channelRouteReasonDefault   = "default"
-	channelRouteReasonTokenTier = "token_tier"
-	channelRouteReasonOverflow  = "overflow"
-	channelRouteReasonSticky    = "sticky"
+	channelRouteReasonDefault      = "default"
+	channelRouteReasonTokenTier    = "token_tier"
+	channelRouteReasonThinkingTier = "thinking_tier"
+	channelRouteReasonOverflow     = "overflow"
+	channelRouteReasonSticky       = "sticky"
 
 	// 二进制载荷（base64 图片/文件、data URL）不按字符估算，按单张图片的经验值计入。
 	routeBinaryPayloadMinBytes = 512
@@ -83,6 +85,24 @@ type ChannelRouteOverflow struct {
 	TargetPool int `json:"target_pool"`
 }
 
+// ChannelRouteThinkingTier 把思考档位落在 Efforts 的请求分到 Pool，按顺序取第一个命中的档位。
+// Efforts 每个元素是归一化后的小写档位名：none/auto/minimal/low/medium/high/xhigh/max，
+// "*" 匹配任意档位（含未声明），空串匹配「请求未声明思考档位」。
+type ChannelRouteThinkingTier struct {
+	Efforts []string `json:"efforts"`
+	Pool    int      `json:"pool"`
+}
+
+// matches 报告请求的归一化档位是否落在本档位；effort 为空表示请求未声明档位。
+func (t ChannelRouteThinkingTier) matches(effort string) bool {
+	for _, candidate := range t.Efforts {
+		if candidate == "*" || candidate == effort {
+			return true
+		}
+	}
+	return false
+}
+
 // ChannelRouteRule 是一条渠道路由规则：按模型匹配后决定渠道组的尝试顺序。
 // Strict=true 时只使用规则选中的渠道组（队列溢出目标与会话粘性组除外），不回退其他组。
 // FirstByteTimeoutSeconds>0 时覆盖系统首字超时（含协议覆盖）：命中本规则的流式请求在某个渠道
@@ -92,20 +112,24 @@ type ChannelRouteOverflow struct {
 // 结束本次请求；冷却仍按首字节超时（598）记模型级，后续请求照常跳过该渠道。
 // 与 FirstByteTimeoutChannelID 互斥：一个要立刻失败，一个要转最终渠道。
 // NonStreamChannelID>0 时客户端非流式请求直接使用指定渠道，成功或错误均作为最终结果。
+// ThinkingTiers 按请求的思考档位（reasoning_effort / thinking.effort / thinkingLevel 等，
+// 或模型名后缀）决定渠道组，优先于 Token 档位：思考档位是客户端对本次请求的显式选择，
+// 而输入 Token 只是估算。未配置或都不命中时退回 Token 档位与 DefaultPool。
 type ChannelRouteRule struct {
-	ID                        string                  `json:"id"`
-	Name                      string                  `json:"name"`
-	Enabled                   bool                    `json:"enabled"`
-	Models                    []string                `json:"models"`
-	DefaultPool               int                     `json:"default_pool"`
-	TokenTiers                []ChannelRouteTokenTier `json:"token_tiers"`
-	Overflow                  []ChannelRouteOverflow  `json:"overflow"`
-	Sticky                    string                  `json:"sticky"`
-	Strict                    bool                    `json:"strict"`
-	FirstByteTimeoutSeconds   int                     `json:"first_byte_timeout_seconds"`
-	FirstByteTimeoutChannelID int64                   `json:"first_byte_timeout_channel_id,omitempty"`
-	FirstByteTimeoutFailFast  bool                    `json:"first_byte_timeout_fail_fast,omitempty"`
-	NonStreamChannelID        int64                   `json:"non_stream_channel_id,omitempty"`
+	ID                        string                     `json:"id"`
+	Name                      string                     `json:"name"`
+	Enabled                   bool                       `json:"enabled"`
+	Models                    []string                   `json:"models"`
+	DefaultPool               int                        `json:"default_pool"`
+	TokenTiers                []ChannelRouteTokenTier    `json:"token_tiers"`
+	ThinkingTiers             []ChannelRouteThinkingTier `json:"thinking_tiers,omitempty"`
+	Overflow                  []ChannelRouteOverflow     `json:"overflow"`
+	Sticky                    string                     `json:"sticky"`
+	Strict                    bool                       `json:"strict"`
+	FirstByteTimeoutSeconds   int                        `json:"first_byte_timeout_seconds"`
+	FirstByteTimeoutChannelID int64                      `json:"first_byte_timeout_channel_id,omitempty"`
+	FirstByteTimeoutFailFast  bool                       `json:"first_byte_timeout_fail_fast,omitempty"`
+	NonStreamChannelID        int64                      `json:"non_stream_channel_id,omitempty"`
 }
 
 // ChannelRouteConfig 是系统设置 channel_route_rules 的完整值；规则按顺序匹配，首条启用且命中的规则生效。
@@ -252,6 +276,34 @@ func normalizeChannelRouteRule(rule ChannelRouteRule) (ChannelRouteRule, error) 
 	}
 	rule.Overflow = overflow
 
+	if len(rule.ThinkingTiers) > maxChannelRouteThinkingTiers {
+		return ChannelRouteRule{}, fmt.Errorf("too many thinking tiers (max %d)", maxChannelRouteThinkingTiers)
+	}
+	thinkingTiers := make([]ChannelRouteThinkingTier, 0, len(rule.ThinkingTiers))
+	for i, tier := range rule.ThinkingTiers {
+		if !model.ValidChannelPool(tier.Pool) {
+			return ChannelRouteRule{}, fmt.Errorf("thinking_tiers[%d]: invalid pool %d", i, tier.Pool)
+		}
+		efforts := make([]string, 0, len(tier.Efforts))
+		seenEfforts := make(map[string]struct{}, len(tier.Efforts))
+		for _, raw := range tier.Efforts {
+			effort := strings.ToLower(strings.TrimSpace(raw))
+			if effort != "*" && !validChannelRouteThinkingEffort(effort) {
+				return ChannelRouteRule{}, fmt.Errorf("thinking_tiers[%d]: invalid effort %q (allowed: *, none, auto, minimal, low, medium, high, xhigh, max; empty string matches a request with no effort)", i, raw)
+			}
+			if _, exists := seenEfforts[effort]; exists {
+				continue
+			}
+			seenEfforts[effort] = struct{}{}
+			efforts = append(efforts, effort)
+		}
+		if len(efforts) == 0 {
+			return ChannelRouteRule{}, fmt.Errorf("thinking_tiers[%d]: efforts cannot be empty", i)
+		}
+		thinkingTiers = append(thinkingTiers, ChannelRouteThinkingTier{Efforts: efforts, Pool: tier.Pool})
+	}
+	rule.ThinkingTiers = thinkingTiers
+
 	switch strings.ToLower(strings.TrimSpace(rule.Sticky)) {
 	case "", channelRouteStickyOff:
 		rule.Sticky = channelRouteStickyOff
@@ -279,6 +331,21 @@ func normalizeChannelRouteRule(rule ChannelRouteRule) (ChannelRouteRule, error) 
 		return ChannelRouteRule{}, fmt.Errorf("first_byte_timeout_fail_fast cannot be combined with first_byte_timeout_channel_id")
 	}
 	return rule, nil
+}
+
+// channelRouteThinkingEfforts 是思考档位规则接受的档位名，与 thinking.ThinkingLevel 一致。
+var channelRouteThinkingEfforts = map[string]struct{}{
+	"none": {}, "auto": {}, "minimal": {}, "low": {}, "medium": {}, "high": {}, "xhigh": {}, "max": {},
+}
+
+// validChannelRouteThinkingEffort 接受上表的档位名；空串单独表示「请求未声明档位」，
+// 是一个合法的匹配对象，由 matches 按字面比较。
+func validChannelRouteThinkingEffort(effort string) bool {
+	if effort == "" {
+		return true
+	}
+	_, ok := channelRouteThinkingEfforts[effort]
+	return ok
 }
 
 func validChannelRouteRuleID(id string) bool {
@@ -452,13 +519,18 @@ func channelRoutePoolDecisionEqual(a, b ChannelRouteRule) bool {
 // channelPoolRoute 是单个请求的渠道组决策：pools 按尝试顺序排列，未列出的组不参与选路。
 // 决策同时持有首选组的队列名额（reserve），实际尝试换组时随之转移，请求结束时归还。
 type channelPoolRoute struct {
-	ruleID      string
-	ruleName    string
-	pools       []int
-	tier        int // 命中的 Token 档位下标；-1 表示使用默认渠道组
-	inputTokens int // 估算输入 Token；-1 表示规则未配置档位、未估算
-	reason      string
-	stickyKey   channelPoolAffinityKey
+	ruleID   string
+	ruleName string
+	pools    []int
+	tier     int // 命中的 Token 档位下标；-1 表示未命中 Token 档位
+	// thinkingTier 是命中的思考档位下标；-1 表示规则未配置思考档位或都不命中。
+	// thinkingEffort 是本次请求归一化后的思考档位，仅在规则配置了思考档位时填写，
+	// 供管理端模拟回显；空串表示请求未声明档位。
+	thinkingTier   int
+	thinkingEffort string
+	inputTokens    int // 估算输入 Token；-1 表示规则未配置档位、未估算
+	reason         string
+	stickyKey      channelPoolAffinityKey
 	// firstByteTimeout 是命中规则配置的首字超时，每次渠道尝试生效；0 表示沿用系统设置。
 	firstByteTimeout          time.Duration
 	firstByteTimeoutChannelID int64
@@ -475,6 +547,9 @@ type channelPoolRoute struct {
 type channelPoolRouteInput struct {
 	model string
 	body  []byte
+	// thinkingEffort 是本次请求归一化后的思考档位（thinkingEffortFromRequest 的结果）；
+	// 空串表示请求未声明档位。只在规则配置了思考档位时参与决策。
+	thinkingEffort string
 	// session 惰性返回会话粘性键（令牌+客户端会话 ID），只在命中规则启用会话粘性时调用；
 	// nil 或空串表示无会话身份。
 	session func() string
@@ -673,14 +748,15 @@ func (s *Server) routeChannelPools(in channelPoolRouteInput) *channelPoolRoute {
 }
 
 // decideChannelPoolRoute 计算渠道组顺序，不占用队列名额（管理端模拟复用）。
-// 顺序：Token 档位（未命中用默认组）→ 会话粘性 → 队列溢出 → 非严格模式追加其余组。
+// 顺序：思考档位（未命中退回 Token 档位）→ Token 档位（未命中用默认组）→ 会话粘性 →
+// 队列溢出 → 非严格模式追加其余组。
 func (s *Server) decideChannelPoolRoute(in channelPoolRouteInput) *channelPoolRoute {
 	rule := s.channelRoutes.Load().match(in.model)
 	if rule == nil {
 		return defaultChannelPoolRoute()
 	}
 	route := &channelPoolRoute{
-		ruleID: rule.ID, ruleName: rule.Name, tier: -1, inputTokens: -1, reason: channelRouteReasonDefault,
+		ruleID: rule.ID, ruleName: rule.Name, tier: -1, thinkingTier: -1, inputTokens: -1, reason: channelRouteReasonDefault,
 		firstByteTimeout:          time.Duration(rule.FirstByteTimeoutSeconds) * time.Second,
 		firstByteTimeoutChannelID: rule.FirstByteTimeoutChannelID,
 		firstByteTimeoutFailFast:  rule.FirstByteTimeoutFailFast,
@@ -688,7 +764,19 @@ func (s *Server) decideChannelPoolRoute(in channelPoolRouteInput) *channelPoolRo
 	}
 
 	base := rule.DefaultPool
-	if len(rule.TokenTiers) > 0 {
+	// 思考档位先于 Token 档位：它是客户端对本次请求的显式选择，而输入 Token 只是估算。
+	// 规则未配置档位、或档位都不命中时退回 Token 档位。
+	effort := in.thinkingEffort
+	if len(rule.ThinkingTiers) > 0 {
+		route.thinkingEffort = effort
+		for i, tier := range rule.ThinkingTiers {
+			if tier.matches(effort) {
+				base, route.thinkingTier, route.reason = tier.Pool, i, channelRouteReasonThinkingTier
+				break
+			}
+		}
+	}
+	if route.thinkingTier < 0 && len(rule.TokenTiers) > 0 {
 		tokens := in.inputTokens
 		if !in.inputTokensKnown {
 			tokens = estimateRouteInputTokens(in.body)
@@ -717,8 +805,8 @@ func (s *Server) decideChannelPoolRoute(in channelPoolRouteInput) *channelPoolRo
 				now = time.Now()
 			}
 			if bound, ok := s.channelPoolAffinity.lookup(route.stickyKey, now); ok && model.ValidChannelPool(bound.pool) &&
-				(rule.Sticky == channelRouteStickySession || bound.tier == route.tier) {
-				// 粘性组优先；它不可用时退回本次按 Token 档位计算出的组。
+				(rule.Sticky == channelRouteStickySession || (bound.tier == route.tier && bound.thinkingTier == route.thinkingTier)) {
+				// 粘性组优先；它不可用时退回本次按思考/Token 档位计算出的组。
 				appendPool(bound.pool)
 				appendPool(base)
 				route.reason = channelRouteReasonSticky
@@ -768,7 +856,7 @@ func (s *Server) bindChannelPoolAffinity(route *channelPoolRoute, pool int) {
 	if s == nil || route == nil || route.stickyKey.ruleID == "" {
 		return
 	}
-	s.channelPoolAffinity.bind(route.stickyKey, channelPoolAffinityTarget{pool: pool, tier: route.tier}, time.Now())
+	s.channelPoolAffinity.bind(route.stickyKey, channelPoolAffinityTarget{pool: pool, tier: route.tier, thinkingTier: route.thinkingTier}, time.Now())
 }
 
 // ============================================================================
@@ -837,6 +925,9 @@ type channelPoolAffinityKey struct {
 type channelPoolAffinityTarget struct {
 	pool int
 	tier int
+	// thinkingTier 是绑定时命中的思考档位下标；-1 表示当时未命中思考档位。
+	// 规则配置了思考档位时，tier 粘性要求两档都相同，否则请求换了思考档位仍会被拉回旧组。
+	thinkingTier int
 }
 
 type channelPoolAffinityEntry struct {

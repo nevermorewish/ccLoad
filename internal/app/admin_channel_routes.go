@@ -51,14 +51,18 @@ type channelRouteSimulationPool struct {
 }
 
 type channelRouteSimulation struct {
-	Model       string                       `json:"model"`
-	Matched     bool                         `json:"matched"`
-	RuleID      string                       `json:"rule_id"`
-	RuleName    string                       `json:"rule_name"`
-	Tier        int                          `json:"tier"`
-	InputTokens int                          `json:"input_tokens"`
-	Reason      string                       `json:"reason"`
-	Pools       []channelRouteSimulationPool `json:"pools"`
+	Model    string `json:"model"`
+	Matched  bool   `json:"matched"`
+	RuleID   string `json:"rule_id"`
+	RuleName string `json:"rule_name"`
+	Tier     int    `json:"tier"`
+	// ThinkingTier 是命中的思考档位下标，-1 表示未命中；ThinkingEffort 是参与判断的归一化档位
+	// （空串表示请求未声明档位）。
+	ThinkingTier   int                          `json:"thinking_tier"`
+	ThinkingEffort string                       `json:"thinking_effort"`
+	InputTokens    int                          `json:"input_tokens"`
+	Reason         string                       `json:"reason"`
+	Pools          []channelRouteSimulationPool `json:"pools"`
 	// FirstByteTimeoutSeconds 是命中规则的首字超时；0 表示沿用系统设置。
 	// FirstByteTimeoutFailFast 时超时直接返回 503，不切换渠道。
 	FirstByteTimeoutSeconds   int   `json:"first_byte_timeout_seconds"`
@@ -144,6 +148,8 @@ func (s *Server) HandleSimulateChannelRoute(c *gin.Context) {
 		Model       string          `json:"model"`
 		InputTokens *int            `json:"input_tokens"`
 		Body        json.RawMessage `json:"body"`
+		// ThinkingEffort 显式指定思考档位；省略时按 body 解析，与真实请求一致。
+		ThinkingEffort string `json:"thinking_effort"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		RespondErrorMsg(c, http.StatusBadRequest, "invalid request: "+err.Error())
@@ -166,6 +172,10 @@ func (s *Server) HandleSimulateChannelRoute(c *gin.Context) {
 		in.body = req.Body
 	default:
 		in.inputTokensKnown = true
+	}
+	in.thinkingEffort = normalizeThinkingEffort(req.ThinkingEffort)
+	if in.thinkingEffort == "" {
+		in.thinkingEffort = extractThinkingEffortFromJSON(in.body)
 	}
 	route := s.decideChannelPoolRoute(in)
 	// 规则未配置 Token 档位时决策不估算，这里仍展示输入 Token 便于核对。

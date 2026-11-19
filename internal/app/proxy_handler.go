@@ -595,7 +595,7 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 		strings.TrimSpace(gjson.GetBytes(all, "previous_response_id").String()) != ""
 	var poolRoute *channelPoolRoute
 	if channelPoolRoutingApplies(requestMethod, requestFamily, clientProtocol, originalModel, reqChannelFilter, continuesResponse) {
-		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: originalModel, body: all, session: sessionKey, now: time.Now()})
+		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: originalModel, body: all, thinkingEffort: thinkingEffort, session: sessionKey, now: time.Now()})
 		defer poolRoute.releaseReservation()
 		ctx = withChannelPoolRoute(ctx, poolRoute)
 	}

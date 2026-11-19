@@ -95,6 +95,13 @@ func TestParseChannelRouteConfigNormalizes(t *testing.T) {
 		"fail fast with target": func(r *ChannelRouteRule) {
 			r.FirstByteTimeoutSeconds, r.FirstByteTimeoutChannelID, r.FirstByteTimeoutFailFast = 20, 3, true
 		},
+		"invalid thinking effort": func(r *ChannelRouteRule) {
+			r.ThinkingTiers = []ChannelRouteThinkingTier{{Efforts: []string{"extreme"}, Pool: 1}}
+		},
+		"empty thinking efforts": func(r *ChannelRouteRule) { r.ThinkingTiers = []ChannelRouteThinkingTier{{Pool: 1}} },
+		"thinking tier pool": func(r *ChannelRouteRule) {
+			r.ThinkingTiers = []ChannelRouteThinkingTier{{Efforts: []string{"low"}, Pool: 9}}
+		},
 	}
 	for name, mutate := range cases {
 		rule := valid
@@ -181,6 +188,93 @@ func TestDecideChannelPoolRouteTokenTiersAndStrict(t *testing.T) {
 	}
 	if route := decidePools(server, "kimi-k3", 20000, ""); !slices.Equal(route.pools, []int{0}) {
 		t.Fatalf("strict default route=%+v, want only main pool", route)
+	}
+}
+
+// TestDecideChannelPoolRouteThinkingTiers 覆盖按思考档位分流：档位优先于输入 Token，
+// 未命中时退回 Token 档位，规则未配置思考档位时行为与以前完全一致。
+func TestDecideChannelPoolRouteThinkingTiers(t *testing.T) {
+	server := newInMemoryServer(t)
+	rule := kimiRouteRule()
+	rule.Strict = true
+	rule.ThinkingTiers = []ChannelRouteThinkingTier{
+		{Efforts: []string{"low", "minimal", "", "none"}, Pool: 1},
+		{Efforts: []string{"max", "*"}, Pool: 2},
+	}
+	useChannelRoutes(t, server, rule)
+	decide := func(effort string, tokens int) *channelPoolRoute {
+		return server.decideChannelPoolRoute(channelPoolRouteInput{
+			model: "kimi-k3", thinkingEffort: effort, inputTokens: tokens, inputTokensKnown: true, now: time.Now(),
+		})
+	}
+
+	for _, tc := range []struct {
+		name   string
+		effort string
+		tokens int
+		pool   int
+		tier   int
+		reason string
+	}{
+		{name: "low goes to pool 1", effort: "low", tokens: 60000, pool: 1, tier: 0, reason: channelRouteReasonThinkingTier},
+		{name: "undeclared effort matches the empty entry", effort: "", tokens: 60000, pool: 1, tier: 0, reason: channelRouteReasonThinkingTier},
+		{name: "max goes to pool 2", effort: "max", tokens: 100, pool: 2, tier: 1, reason: channelRouteReasonThinkingTier},
+		{name: "unlisted effort falls into the wildcard", effort: "high", tokens: 100, pool: 2, tier: 1, reason: channelRouteReasonThinkingTier},
+	} {
+		route := decide(tc.effort, tc.tokens)
+		if !slices.Equal(route.pools, []int{tc.pool}) || route.thinkingTier != tc.tier || route.reason != tc.reason || route.thinkingEffort != tc.effort {
+			t.Errorf("%s: route=%+v", tc.name, route)
+		}
+		// 思考档位命中时不做 Token 估算，输入 Token 也不参与决策。
+		if route.inputTokens != -1 || route.tier != -1 {
+			t.Errorf("%s: thinking tier decision still used the token tier: %+v", tc.name, route)
+		}
+	}
+
+	// 档位都不命中时退回 Token 档位，reason 也回到 token_tier。
+	fallback := kimiRouteRule()
+	fallback.Strict = true
+	fallback.ThinkingTiers = []ChannelRouteThinkingTier{{Efforts: []string{"low"}, Pool: 1}}
+	useChannelRoutes(t, server, fallback)
+	route := decide("high", 60000)
+	if !slices.Equal(route.pools, []int{2}) || route.thinkingTier != -1 || route.tier != 1 || route.reason != channelRouteReasonTokenTier {
+		t.Fatalf("thinking tier miss should fall back to the token tier: %+v", route)
+	}
+
+	// 未配置思考档位：与改动前一致，只看 Token 档位。
+	useChannelRoutes(t, server, kimiRouteRule())
+	if route := decide("low", 100); !slices.Equal(route.pools, []int{1, 0, 2}) || route.thinkingTier != -1 || route.thinkingEffort != "" || route.reason != channelRouteReasonTokenTier {
+		t.Fatalf("rule without thinking tiers changed behavior: %+v", route)
+	}
+}
+
+// TestDecideChannelPoolRouteThinkingTierStickiness 覆盖 tier 粘性同时比较思考档位：
+// 同一会话换了思考档位时必须重新分流，否则新档位的渠道组设置会失效。
+func TestDecideChannelPoolRouteThinkingTierStickiness(t *testing.T) {
+	server := newInMemoryServer(t)
+	rule := kimiRouteRule()
+	rule.Sticky = channelRouteStickyTier
+	rule.Strict = true
+	rule.ThinkingTiers = []ChannelRouteThinkingTier{{Efforts: []string{"low"}, Pool: 1}, {Efforts: []string{"max"}, Pool: 2}}
+	useChannelRoutes(t, server, rule)
+	decide := func(effort string) *channelPoolRoute {
+		return server.decideChannelPoolRoute(channelPoolRouteInput{
+			model: "kimi-k3", thinkingEffort: effort, inputTokens: 100, inputTokensKnown: true,
+			session: func() string { return "session-a" }, now: time.Now(),
+		})
+	}
+
+	first := decide("low")
+	if !slices.Equal(first.pools, []int{1}) || first.thinkingTier != 0 {
+		t.Fatalf("low route=%+v", first)
+	}
+	server.bindChannelPoolAffinity(first, 1)
+	if route := decide("low"); !slices.Equal(route.pools, []int{1}) || route.reason != channelRouteReasonSticky {
+		t.Fatalf("same effort should stay: %+v", route)
+	}
+	// 同一会话改用 max：粘性绑定属于 low 档，必须按新档位重新分流到渠道2。
+	if route := decide("max"); !slices.Equal(route.pools, []int{2}) || route.reason == channelRouteReasonSticky {
+		t.Fatalf("effort change reused the stale binding: %+v", route)
 	}
 }
 

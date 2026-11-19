@@ -609,7 +609,7 @@ func (s *Server) executeResponsesWebsocketTurn(
 	reqChannelFilter := extractRequestedChannelFilter(c.Request)
 	var poolRoute *channelPoolRoute
 	if channelPoolRoutingApplies(http.MethodPost, protocol.RequestFamilyResponses, protocol.Codex, modelName, reqChannelFilter, false) {
-		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: modelName, body: requestBody, session: sessionKey, now: time.Now()})
+		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: modelName, body: requestBody, thinkingEffort: thinkingEffort, session: sessionKey, now: time.Now()})
 		defer poolRoute.releaseReservation()
 		ctx = withChannelPoolRoute(ctx, poolRoute)
 	}

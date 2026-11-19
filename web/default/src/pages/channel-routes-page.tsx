@@ -5,9 +5,10 @@ import { getJSON, invalidateGetCache, postJSON, putJSON } from '../lib/api'
 import { CHANNEL_POOLS } from './channels/api'
 import '../styles/channel-routes.css'
 import {
-  MAX_FIRST_BYTE_TIMEOUT_SECONDS, POOL_OPTIONS, ROUTE_REASONS, STICKY_MODES, addModels, draftsToConfig, emptyRuleDraft, exampleRuleDraft,
-  inflightFor, parseTokenInput, ruleToDraft, summarizeRule, withPoolInflight,
-  type InflightView, type OverflowDraft, type RouteTarget, type RoutesView, type RuleDraft, type Simulation, type StickyMode, type TierDraft,
+  MAX_FIRST_BYTE_TIMEOUT_SECONDS, POOL_OPTIONS, ROUTE_REASONS, STICKY_MODES, THINKING_EFFORTS, addModels, describeEfforts, draftsToConfig,
+  emptyRuleDraft, exampleRuleDraft, inflightFor, parseTokenInput, ruleToDraft, summarizeRule, withPoolInflight,
+  type InflightView, type OverflowDraft, type RouteTarget, type RoutesView, type RuleDraft, type Simulation, type StickyMode,
+  type ThinkingTierDraft, type TierDraft,
 } from './channel-routes'
 
 // 进行中请求数是实时值，定时刷新渠道组概况；规则草稿只在加载、保存或手动刷新时同步。
@@ -34,6 +35,12 @@ function RuleCard({ draft, index, total, inflight, knownModels, channels, onChan
   }, [draft])
   const modelOptions = useMemo(() => knownModels.filter((name) => !draft.models.some((item) => item.toLowerCase() === name.toLowerCase())).map((name) => ({ value: name, label: name })), [knownModels, draft.models])
   const setTier = (tierIndex: number, patch: Partial<TierDraft>) => onChange({ tiers: draft.tiers.map((tier, itemIndex) => itemIndex === tierIndex ? { ...tier, ...patch } : tier) })
+  const setThinkingTier = (tierIndex: number, patch: Partial<ThinkingTierDraft>) => onChange({ thinkingTiers: draft.thinkingTiers.map((tier, itemIndex) => itemIndex === tierIndex ? { ...tier, ...patch } : tier) })
+  const toggleThinkingEffort = (tierIndex: number, effort: string) => {
+    const tier = draft.thinkingTiers[tierIndex]
+    const efforts = tier.efforts.includes(effort) ? tier.efforts.filter((item) => item !== effort) : [...tier.efforts, effort]
+    setThinkingTier(tierIndex, { efforts })
+  }
   const setOverflow = (overflowIndex: number, patch: Partial<OverflowDraft>) => onChange({ overflow: draft.overflow.map((item, itemIndex) => itemIndex === overflowIndex ? { ...item, ...patch } : item) })
   const label = `规则 ${index + 1}`
 
@@ -72,6 +79,28 @@ function RuleCard({ draft, index, total, inflight, knownModels, channels, onChan
           <label title="只使用规则选中的渠道组；队列溢出目标与会话粘性组除外"><input type="checkbox" checked={draft.strict} onChange={(event) => onChange({ strict: event.target.checked })} /> 严格模式（不回退其他渠道组）</label>
         </div>
         <span className="table-note">{STICKY_MODES.find((mode) => mode.value === draft.sticky)?.hint}。会话按客户端显式会话 ID 识别（Claude Code 会话、Codex Session-Id、X-Session-Id 等），无会话 ID 的请求不粘性。</span>
+      </div>
+    </div>
+
+    <div className="route-field">
+      <span className="route-label">思考档位</span>
+      <div className="cell-stack">
+        {draft.thinkingTiers.map((tier, tierIndex) => <div key={tierIndex} className="route-thinking-tier">
+          <div className="toolbar route-row">
+            <span className="muted">档位 {tierIndex + 1}</span>
+            <span className="muted">→</span>
+            <SearchableSelect ariaLabel={`${label} 思考档位 ${tierIndex + 1} 渠道组`} className="combobox-inline" value={String(tier.pool)} options={POOL_OPTIONS} onChange={(value) => setThinkingTier(tierIndex, { pool: Number(value) })} />
+            <button className="btn btn-sm" onClick={() => onChange({ thinkingTiers: draft.thinkingTiers.filter((_, itemIndex) => itemIndex !== tierIndex) })}>删除</button>
+          </div>
+          <div className="route-efforts" role="group" aria-label={`${label} 思考档位 ${tierIndex + 1} 档位选择`}>
+            {THINKING_EFFORTS.map((effort) => <label key={effort.value || 'none-declared'} className="muted">
+              <input type="checkbox" checked={tier.efforts.includes(effort.value)} onChange={() => toggleThinkingEffort(tierIndex, effort.value)} /> {effort.label}
+            </label>)}
+          </div>
+          {tier.efforts.length > 0 && <span className="table-note">命中：{describeEfforts(tier.efforts)}</span>}
+        </div>)}
+        <div><button className="btn btn-sm" disabled={draft.thinkingTiers.length >= 16} onClick={() => onChange({ thinkingTiers: [...draft.thinkingTiers, { efforts: [], pool: 1 }] })}>+ 添加思考档位</button></div>
+        <span className="table-note">按请求的思考档位分流，优先于输入 Token 档位：思考档位是客户端对本次请求的显式选择，输入 Token 只是估算。档位取自请求体的 reasoning_effort、thinking.effort、thinkingLevel 等字段，或模型名后缀（如 kimi-k3.1-pro(low)）。按顺序取第一个命中的档位，「未声明档位」匹配请求没有写思考字段，「任意档位」匹配全部；都不命中时退回输入 Token 档位与默认渠道组。调整档位会影响渠道组粘性：同一会话在同一档位内保持固定。</span>
       </div>
     </div>
 

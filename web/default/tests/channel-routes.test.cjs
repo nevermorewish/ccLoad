@@ -133,3 +133,19 @@ test('non-stream destination round-trips independently of first byte timeout', (
   assert.equal(routes.draftsToConfig([{ ...draft, nonStreamChannel: '' }]).config.rules[0].non_stream_channel_id, undefined);
   assert.match(routes.draftsToConfig([{ ...draft, nonStreamChannel: '-1' }]).error, /非流式/);
 });
+
+test('thinking tiers route by effort and round-trip', () => {
+  const draft = {
+    ...routes.emptyRuleDraft(), models: ['kimi-k3.1-pro'],
+    thinkingTiers: [{ efforts: ['low', ''], pool: 1 }, { efforts: ['max', '*'], pool: 2 }],
+  };
+  const rule = routes.draftsToConfig([draft]).config.rules[0];
+  assert.deepEqual(rule.thinking_tiers, [{ efforts: ['low', ''], pool: 1 }, { efforts: ['max', '*'], pool: 2 }]);
+  assert.deepEqual(routes.ruleToDraft(rule).thinkingTiers, [{ efforts: ['low', ''], pool: 1 }, { efforts: ['max', '*'], pool: 2 }]);
+  // 未填写思考档位时不写该字段，保持旧规则的载荷不变。
+  assert.equal(routes.draftsToConfig([{ ...routes.emptyRuleDraft(), models: ['m'] }]).config.rules[0].thinking_tiers, undefined);
+  assert.match(routes.draftsToConfig([{ ...draft, thinkingTiers: [{ efforts: [], pool: 1 }] }]).error, /至少选择一个档位/);
+  assert.equal(routes.describeEfforts(['*', 'low', '']), '未声明档位 / low / 任意档位');
+  assert.match(routes.summarizeRule(rule), /思考 未声明档位 \/ low → 渠道1/);
+  assert.match(routes.summarizeRule(rule), /思考 max \/ 任意档位 → 渠道2/);
+});
