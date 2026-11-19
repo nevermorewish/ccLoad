@@ -1993,20 +1993,31 @@ func (u *usageAccumulator) applyOpenAICacheWrite(details map[string]any) {
 		return
 	}
 	_, hasDetails := details["cache_write_tokens_details"]
-	if !hasDetails && total == u.Cache30mInputTokens+u.Cache12hInputTokens {
+	if !hasDetails && total == u.CacheCreationInputTokens {
+		// An aggregate-only SSE update can repeat an already classified snapshot.
 		return
 	}
 	u.setCacheCreationSnapshot(total, 0)
 	split, _ := details["cache_write_tokens_details"].(map[string]any)
-	short, shortOK := cacheCreationCount(split["ttl_30m_tokens"])
-	long, longOK := cacheCreationCount(split["ttl_12h_tokens"])
-	aggregate, aggregateOK := cacheCreationCount(details["cache_write_tokens"])
-	if !aggregateOK || !shortOK || !longOK || short > aggregate || long != aggregate-short {
+	aggregate, ok := cacheCreationCount(details["cache_write_tokens"])
+	if !ok || len(split) == 0 {
 		return
 	}
-	u.Cache5mInputTokens = 0
-	u.Cache30mInputTokens = short
-	u.Cache12hInputTokens = long
+	if short, long, ok := cacheWriteTTLSplit(split, "ttl_30m_tokens", "ttl_12h_tokens", aggregate); ok {
+		u.Cache5mInputTokens = 0
+		u.Cache30mInputTokens = short
+		u.Cache12hInputTokens = long
+		return
+	}
+	if five, hour, ok := cacheWriteTTLSplit(split, "ttl_5m_tokens", "ttl_1h_tokens", aggregate); ok {
+		u.setCacheCreationSnapshot(five, hour)
+	}
+}
+
+func cacheWriteTTLSplit(split map[string]any, shortKey, longKey string, total int) (short, long int, ok bool) {
+	short, shortOK := cacheCreationCount(split[shortKey])
+	long, longOK := cacheCreationCount(split[longKey])
+	return short, long, shortOK && longOK && short <= total && long == total-short
 }
 
 func cacheCreationCount(value any) (int, bool) {

@@ -2215,6 +2215,46 @@ func TestOpenAICacheWriteTTLUsage(t *testing.T) {
 	}
 }
 
+func TestMoonshotCacheWriteTTL(t *testing.T) {
+	for _, tc := range []struct {
+		name, details string
+		five, hour    int
+	}{
+		{"1h", `{"ttl_5m_tokens":0,"ttl_1h_tokens":3328}`, 0, 3328},
+		{"mixed", `{"ttl_5m_tokens":1024,"ttl_1h_tokens":2304}`, 1024, 2304},
+		{"inconsistent", `{"ttl_5m_tokens":256,"ttl_1h_tokens":3328}`, 3328, 0},
+		{"partial", `{"ttl_1h_tokens":3328}`, 3328, 0},
+	} {
+		for _, route := range []string{"chat-json", "chat-sse", "responses-json", "responses-sse"} {
+			t.Run(tc.name+"/"+route, func(t *testing.T) {
+				prefix := `{"usage":{"prompt_tokens":3355,"completion_tokens":3,"prompt_tokens_details":{`
+				proto := "openai"
+				if strings.HasPrefix(route, "responses") {
+					prefix = `{"usage":{"input_tokens":3355,"output_tokens":3,"input_tokens_details":{`
+					proto = "codex"
+				}
+				aggregate := prefix + `"cache_write_tokens":3328`
+				body := aggregate + `,"cache_write_tokens_details":` + tc.details + `}}}`
+				var parser usageParser = newJSONUsageParser(proto)
+				if strings.HasSuffix(route, "sse") {
+					parser = newSSEUsageParser(proto)
+					// The last frame repeats the total without its TTL breakdown.
+					body = "data: " + body + "\n\ndata: " + aggregate + "}}}\n\n"
+				}
+				if err := parser.Feed([]byte(body)); err != nil {
+					t.Fatal(err)
+				}
+				input, _, _, total := parser.GetUsage()
+				five, hour, _ := parser.GetCacheBreakdown()
+				short, long := parser.GetOpenAICacheBreakdown()
+				if input != 27 || total != 3328 || five != tc.five || hour != tc.hour || short != 0 || long != 0 {
+					t.Fatalf("input=%d total=%d 5m/1h=%d/%d 30m/12h=%d/%d", input, total, five, hour, short, long)
+				}
+			})
+		}
+	}
+}
+
 // TestOpenAICacheWriteTTLSSESnapshot 相同总量的无明细重发保留已知 TTL，变更或显式非法明细使其失效。
 // @param t 测试上下文。
 func TestOpenAICacheWriteTTLSSESnapshot(t *testing.T) {
