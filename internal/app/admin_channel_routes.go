@@ -188,7 +188,9 @@ func (s *Server) HandleSimulateChannelRoute(c *gin.Context) {
 	}
 	result := channelRouteSimulation{
 		Model: routingModel, Matched: route.ruleID != "", RuleID: route.ruleID, RuleName: route.ruleName,
-		Tier: route.tier, InputTokens: inputTokens, Reason: route.reason,
+		// ThinkingEffort 回显解析到的档位，即使规则没配置思考档位也照常显示，便于核对解析结果。
+		Tier: route.tier, ThinkingTier: route.thinkingTier, ThinkingEffort: in.thinkingEffort,
+		InputTokens: inputTokens, Reason: route.reason,
 		Pools:                     make([]channelRouteSimulationPool, 0, len(route.pools)),
 		FirstByteTimeoutSeconds:   int(route.firstByteTimeout / time.Second),
 		FirstByteTimeoutChannelID: route.firstByteTimeoutChannelID,

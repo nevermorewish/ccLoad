@@ -737,7 +737,7 @@ func (r *channelPoolRoute) releaseReservation() {
 // 渠道1、渠道2 是规则专用组，必须由启用且命中的规则显式选中才会承接请求，
 // 否则关闭渠道路由时它们仍会作为主渠道的兜底被选中。
 func defaultChannelPoolRoute() *channelPoolRoute {
-	return &channelPoolRoute{pools: []int{model.ChannelPoolMain}, tier: -1, inputTokens: -1, reason: channelRouteReasonDefault}
+	return &channelPoolRoute{pools: []int{model.ChannelPoolMain}, tier: -1, thinkingTier: -1, inputTokens: -1, reason: channelRouteReasonDefault}
 }
 
 // routeChannelPools 为代理请求做渠道组决策并占用首选组的队列名额；调用方必须 releaseReservation。
