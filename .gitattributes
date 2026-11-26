@@ -9,3 +9,6 @@ web/assets/bundles/* -whitespace
 
 # SSE framing fixtures must not acquire CRLF during Windows checkout.
 internal/app/testdata/*.txt text eol=lf
+
+# Shell scripts run inside Alpine/Debian images; CRLF breaks their shebang.
+*.sh text eol=lf
