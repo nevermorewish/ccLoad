@@ -12,3 +12,4 @@ internal/app/testdata/*.txt text eol=lf
 
 # Shell scripts run inside Alpine/Debian images; CRLF breaks their shebang.
 *.sh text eol=lf
+third_party/cursor-sdk-bridge/bridge.lock text eol=lf
