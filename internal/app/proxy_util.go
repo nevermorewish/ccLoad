@@ -762,6 +762,24 @@ func normalizeAnyrouterAdaptiveThinking(cfg *model.Config, upstreamProtocol, req
 	return updated
 }
 
+// channelPassthrough 报告本次请求是否按调用方原始字节透传：显式开启透传的渠道，
+// 以及 API Key 渠道（只有需要厂商专用 wire 的端点例外）。API Key 渠道不再补任何
+// 请求头、查询参数或 body 字段——补出来的 beta/身份会被 Bedrock 之类的上游拒绝。
+func channelPassthrough(cfg *model.Config, upstreamProtocol protocol.Protocol, requestPath, baseURL string) bool {
+	if cfg == nil {
+		return false
+	}
+	// 运维显式设置优先：关闭透传的渠道仍按内置 wire 处理。
+	if cfg.CustomRequestRules != nil && cfg.CustomRequestRules.Passthrough != nil {
+		return *cfg.CustomRequestRules.Passthrough
+	}
+	if cfg.GetAuthType() != model.AuthTypeAPIKey {
+		return false
+	}
+	return !isOpenCodeAPIKeyEndpoint(cfg, baseURL) &&
+		!isZAICodingPlanRequest(cfg, upstreamProtocol, requestPath)
+}
+
 func isAnyrouterChannel(cfg *model.Config) bool {
 	if cfg == nil {
 		return false

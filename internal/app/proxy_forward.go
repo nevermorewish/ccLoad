@@ -228,7 +228,7 @@ func (s *Server) buildProxyRequest(
 		callerBody = body
 	}
 	callerBodyIsAnthropic := reqCtx == nil || !reqCtx.transformPlan.NeedsTransform
-	passthrough := cfg.PassthroughEnabled()
+	passthrough := channelPassthrough(cfg, upstreamProtocol, requestPath, baseURL)
 	var callerWire anthropicCallerWire
 	if !passthrough && (isAnthropicMessagesRequest(upstreamProtocol, requestPath) || isAnthropicCountTokensRequest(upstreamProtocol, requestPath)) {
 		callerWire = classifyAnthropicRequestCallerWire(callerBody, hdr, upstreamProtocol, requestPath, callerBodyIsAnthropic)
@@ -361,7 +361,8 @@ func (s *Server) buildProxyRequest(
 	}
 
 	anthropicClaudeCodeWire := isAnthropicClaudeCodeMessagesRequest(cfg, upstreamProtocol, requestPath) && !isOpenCodeAPIKeyEndpoint(cfg, parsedUpstreamURL.String())
-	if !passthrough && isAnthropicMessagesRequest(upstreamProtocol, requestPath) {
+	// 本地校验与透传无关：不合法的 legacy 请求必须在出站前拒绝，而不是交给上游报错。
+	if isAnthropicMessagesRequest(upstreamProtocol, requestPath) {
 		if err = validateAnthropicLegacySystemRequestForUpstream(body, callerOwnsAnthropicWire, parsedUpstreamURL); err != nil {
 			return nil, err
 		}
@@ -420,6 +421,8 @@ func (s *Server) buildProxyRequest(
 	// 4. 注入普通渠道的静态认证头。Codex 的认证与官方客户端身份必须在
 	// 自定义 Header 规则之后重建，否则规则可以篡改渠道身份。
 	if !cfg.UsesOAuth() && (passthrough || upstreamProtocol != protocol.Codex) {
+		// injectAPIKeyHeaders 只写认证头（Anthropic 按上游地址决定是否带 Bearer），
+		// 其余请求头保持调用方原样。
 		injectAPIKeyHeaders(req, apiKey, runtimeUpstreamProtocol(reqCtx))
 	}
 
@@ -480,9 +483,6 @@ func (s *Server) buildProxyRequest(
 	} else if !passthrough && isZAICodingPlanRequest(cfg, upstreamProtocol, requestPath) {
 		injectZAICodingPlanHeaders(req, cfg, apiKey, body, hdr)
 		wireRebuilt = true
-	} else if anthropicClaudeCodeWire {
-		injectAnthropicAPIKeyHeaders(req, cfg, apiKey, body, callerOwnsAnthropicWire, hdr)
-		wireRebuilt = true
 	}
 	if mappedAnthropicSessionID != "" && anthropicHeaderValue(hdr, "X-Claude-Code-Session-Id") != "" &&
 		anthropicSessionIDFromBody(body) == mappedAnthropicSessionID {
@@ -506,12 +506,6 @@ func (s *Server) buildProxyRequest(
 		}
 	}
 
-	// 6.2 anyrouter 渠道：确保 anthropic-beta 包含 context-1m。必须排在指纹重建
-	// 之后——重建清空了整个请求头，之前注入的 beta flag 会随之丢失。
-	if !passthrough && runtimeUpstreamProtocol(reqCtx) == util.ProtocolAnthropic &&
-		isAnyrouterChannel(cfg) {
-		injectAnthropicBetaFlag(req, "context-1m-2025-08-07")
-	}
 	if !passthrough && isOpenCodeAPIKeyEndpoint(cfg, req.URL.String()) {
 		executionIdentity := ""
 		if reqCtx != nil {
@@ -519,7 +513,9 @@ func (s *Server) buildProxyRequest(
 		}
 		injectOpenCodeHeaders(req, cfg, upstreamProtocol, apiKey, hdr, executionIdentity)
 	}
-	if !passthrough && (isAnthropicClaudeCodeMessagesRequest(cfg, upstreamProtocol, requestPath) || isAnthropicCountTokensRequest(upstreamProtocol, requestPath)) {
+	if !passthrough && (isAnthropicClaudeCodeMessagesRequest(cfg, upstreamProtocol, requestPath) ||
+		isAnthropicCountTokensRequest(upstreamProtocol, requestPath) ||
+		isOpenCodeAPIKeyEndpoint(cfg, req.URL.String())) {
 		// Header rules and the OpenCode wire have the last word on anthropic-beta.
 		// Strip fields gated by absent tokens from the actual wire body, then
 		// refresh any legacy CCH.
@@ -559,11 +555,40 @@ func (s *Server) prepareTranslatedUpstreamBody(
 	wireBodyRulesApplied bool,
 	callerBodyIsAnthropic bool,
 ) ([]byte, string, error) {
-	if cfg.PassthroughEnabled() {
-		// Keep native bytes (or the protocol converter's output). Only explicit
-		// operator body rules apply; do not inject/normalize Claude Code fields.
+	targetURL := ""
+	if target != nil {
+		targetURL = target.String()
+	}
+	if channelPassthrough(cfg, upstreamProtocol, requestPath, targetURL) {
+		// 原样透传：不注入身份、beta 或厂商字段。只保留协议本身要求的处理——
+		// 运维 body 规则、count_tokens 的字段裁剪、协议转换产物的归一化与校验。
 		if !wireBodyRulesApplied {
 			body = applyBodyRules(headers.Get("Content-Type"), body, cfg.BodyRules())
+		}
+		callerBody := sourceBody
+		if len(callerBody) == 0 {
+			callerBody = body
+		}
+		if isAnthropicCountTokensRequest(upstreamProtocol, requestPath) {
+			nativeCaller := callerBodyIsAnthropic && validAnthropicClaudeCLIUserAgent(anthropicHeaderValue(headers, "User-Agent"))
+			var err error
+			body, err = finalizeAnthropicCountTokensBody(body, cfg, target, nativeCaller)
+			return body, "", err
+		}
+		if isAnthropicMessagesRequest(upstreamProtocol, requestPath) {
+			if callerBodyIsAnthropic {
+				if err := validateAnthropicOpus55Request(callerBody, requestModel); err != nil {
+					return nil, "", err
+				}
+			} else {
+				var err error
+				if body, err = normalizeAnthropicMessagesBody(body); err != nil {
+					return nil, "", err
+				}
+			}
+			if target != nil && isXAIUpstreamHost(target.Hostname()) {
+				body = fillXAIAnthropicToolDescriptions(body)
+			}
 		}
 		return body, "", nil
 	}

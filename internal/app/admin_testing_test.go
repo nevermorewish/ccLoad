@@ -1412,7 +1412,8 @@ func TestOAuthDetectionPersistsUsageAndCost(t *testing.T) {
 
 // Verify the final HTTP request, after provider body and header normalization.
 func TestAnthropicChannelTestUsesLightweightClaudeCodeWire(t *testing.T) {
-	for _, oauth := range []bool{false, true} {
+	// API Key 渠道原样透传，不再套 Claude Code CLI 指纹；该 wire 只属于 OAuth。
+	for _, oauth := range []bool{true} {
 		for _, tc := range []struct {
 			name, model, effort string
 			maxTokens           int
@@ -1454,20 +1455,26 @@ func TestAnthropicChannelTestUsesLightweightClaudeCodeWire(t *testing.T) {
 				if !gjson.ValidBytes(body) {
 					t.Fatal("invalid request JSON")
 				}
-				if req.URL.RequestURI() != "/v1/messages?beta=true" {
-					t.Fatalf("request URI=%s", req.URL.RequestURI())
+				wantURI := "/v1/messages"
+				if oauth {
+					wantURI = "/v1/messages?beta=true"
 				}
-				for name, want := range map[string]string{
-					"User-Agent":                  "claude-cli/" + anthropicEffectiveCLIVersion() + " (external, cli)",
-					"X-Stainless-Package-Version": "0.128.0",
-					"X-Stainless-Runtime-Version": "v26.3.0",
-					"X-Stainless-Timeout":         "600",
-					"Accept-Encoding":             "gzip, deflate, br, zstd",
-					"x-claude-code-request-class": "",
-					"x-stainless-helper-method":   "",
-				} {
-					if got := headerValueFold(req.Header, name); got != want {
-						t.Errorf("%s=%q, want %q", name, got, want)
+				if req.URL.RequestURI() != wantURI {
+					t.Fatalf("request URI=%s, want %s", req.URL.RequestURI(), wantURI)
+				}
+				if oauth {
+					for name, want := range map[string]string{
+						"User-Agent":                  "claude-cli/" + anthropicEffectiveCLIVersion() + " (external, cli)",
+						"X-Stainless-Package-Version": "0.128.0",
+						"X-Stainless-Runtime-Version": "v26.3.0",
+						"X-Stainless-Timeout":         "600",
+						"Accept-Encoding":             "gzip, deflate, br, zstd",
+						"x-claude-code-request-class": "",
+						"x-stainless-helper-method":   "",
+					} {
+						if got := headerValueFold(req.Header, name); got != want {
+							t.Errorf("%s=%q, want %q", name, got, want)
+						}
 					}
 				}
 				wantMax := tc.maxTokens

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1599,125 +1598,25 @@ func TestNormalizeAnyrouterAdaptiveThinking(t *testing.T) {
 	})
 }
 
+// TestInjectAnyrouterClaudeCodeFallbackTools 守住 API Key 渠道的透传契约：
+// anyrouter 渠道不再补齐 fallback tools，工具列表原样转发。
 func TestInjectAnyrouterClaudeCodeFallbackTools(t *testing.T) {
 	t.Parallel()
 
 	cfg := anyrouterAnthropicCfg()
-	nativeHeaders := http.Header{
+	headers := http.Header{
 		"User-Agent":     {"claude-cli/" + anthropicCLIVersion + " (external, cli)"},
 		"X-App":          {"cli"},
 		"Anthropic-Beta": {"claude-code-20250219"},
 	}
-	nativeCallerBody := []byte(`{"metadata":{"user_id":"{\"device_id\":\"device\",\"session_id\":\"session\"}"}}`)
-	toolNames := func(body []byte) []string {
-		tools := gjson.GetBytes(body, "tools")
-		if !tools.IsArray() {
-			return nil
+	callerBody := []byte(`{"metadata":{"user_id":"{\"device_id\":\"device\",\"session_id\":\"session\"}"}}`)
+	for _, body := range []string{
+		`{"model":"claude-fable-5-1","tools":[]}`,
+		`{"model":"claude-fable-5-1"}`,
+		`{"model":"claude-fable-5-1","tools":[{"name":"custom"}]}`,
+	} {
+		if got := injectAnyrouterClaudeCodeFallbackTools(cfg, protocol.Anthropic, "/v1/messages", headers, callerBody, []byte(body)); string(got) != body {
+			t.Fatalf("body was rewritten for an API key channel: %s -> %s", body, got)
 		}
-		names := make([]string, 0, jsonMemberCount(tools))
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			names = append(names, tool.Get("name").String())
-			return true
-		})
-		return names
-	}
-
-	tests := []struct {
-		name    string
-		body    string
-		headers http.Header
-		cfg     *model.Config
-		proto   protocol.Protocol
-		path    string
-		want    []string
-	}{
-		{
-			name: "empty tools",
-			body: `{"model":"claude-fable-5-1","tools":[]}`,
-			want: []string{"Edit", "Read", "Write"},
-		},
-		{
-			name: "missing tools",
-			body: `{"model":"claude-fable-5-1"}`,
-			want: []string{"Edit", "Read", "Write"},
-		},
-		{
-			name: "existing tools preserved",
-			body: `{"model":"claude-fable-5-1","tools":[{"name":"custom"}]}`,
-			want: []string{"custom"},
-		},
-		{
-			name: "null tools preserved",
-			body: `{"model":"claude-fable-5-1","tools":null}`,
-			want: nil,
-		},
-		{
-			name:    "non-native headers unchanged",
-			body:    `{"model":"claude-fable-5-1","tools":[]}`,
-			headers: http.Header{"User-Agent": {"curl/8.0"}},
-			want:    []string{},
-		},
-		{
-			name: "regular channel unchanged",
-			body: `{"model":"claude-fable-5-1","tools":[]}`,
-			cfg:  &model.Config{CustomRequestRules: compatibilityRules(&model.CustomRequestRules{Passthrough: new(bool)}), Name: "regular", URLs: model.ChannelURLs{{URL: "https://example.com"}}},
-			want: []string{},
-		},
-		{
-			name:  "non-anthropic unchanged",
-			body:  `{"model":"claude-fable-5-1","tools":[]}`,
-			proto: protocol.OpenAI,
-			want:  []string{},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			headers := tt.headers
-			if headers == nil {
-				headers = nativeHeaders
-			}
-			testCfg := tt.cfg
-			if testCfg == nil {
-				testCfg = cfg
-			}
-			proto := tt.proto
-			if proto == "" {
-				proto = protocol.Anthropic
-			}
-			path := tt.path
-			if path == "" {
-				path = "/v1/messages"
-			}
-			got := injectAnyrouterClaudeCodeFallbackTools(testCfg, proto, path, headers, nativeCallerBody, []byte(tt.body))
-			if names := toolNames(got); !slices.Equal(names, tt.want) {
-				t.Fatalf("tool names = %v, want %v; body = %s", names, tt.want, got)
-			}
-		})
-	}
-
-	first := injectAnyrouterClaudeCodeFallbackTools(cfg, protocol.Anthropic, "/v1/messages", nativeHeaders, nativeCallerBody, []byte(`{"model":"claude-fable-5-1","tools":[]}`))
-	tools := gjson.GetBytes(first, "tools")
-	expectedRequired := map[string][]string{
-		"Edit":  {"file_path", "old_string", "new_string"},
-		"Read":  {"file_path"},
-		"Write": {"file_path", "content"},
-	}
-	for _, tool := range tools.Array() {
-		name := tool.Get("name").String()
-		if tool.Get("input_schema.type").String() != "object" {
-			t.Fatalf("%s input_schema.type = %q, want object", name, tool.Get("input_schema.type").String())
-		}
-		required := make([]string, 0, jsonMemberCount(tool.Get("input_schema.required")))
-		tool.Get("input_schema.required").ForEach(func(_, value gjson.Result) bool {
-			required = append(required, value.String())
-			return true
-		})
-		if !slices.Equal(required, expectedRequired[name]) {
-			t.Fatalf("%s required = %v, want %v", name, required, expectedRequired[name])
-		}
-	}
-	second := injectAnyrouterClaudeCodeFallbackTools(cfg, protocol.Anthropic, "/v1/messages", nativeHeaders, nativeCallerBody, first)
-	if string(second) != string(first) {
-		t.Fatalf("fallback injection is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
 	}
 }

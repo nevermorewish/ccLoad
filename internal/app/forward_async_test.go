@@ -177,11 +177,10 @@ func TestBuildProxyRequest_ExactURLMarkerSkipsEndpointPath(t *testing.T) {
 	}
 }
 
-// TestBuildProxyRequest_RebuildsClaudeCodeWireForAnthropicMessagesUpstream 守住
-// Claude Code CLI 指纹路径的 header 契约：Anthropic Messages 上游的请求头由网关
-// 整体重建，调用方声明的 anthropic-beta 不透传——否则 body 已按 CLI 形态重写，
-// header 却还是调用方的旧能力集，两边必然对不上。
-func TestBuildProxyRequest_RebuildsClaudeCodeWireForAnthropicMessagesUpstream(t *testing.T) {
+// TestBuildProxyRequest_ApiKeyAnthropicKeepsCallerWire 守住 API Key 渠道的透传契约：
+// Anthropic Messages 上游的请求头、查询参数与 body 全部沿用调用方，网关不重建、
+// 不补 CLI beta（补出来的 flag 会被 Bedrock 上游以 invalid beta flag 拒绝）。
+func TestBuildProxyRequest_ApiKeyAnthropicKeepsCallerWire(t *testing.T) {
 	t.Parallel()
 	srv := newInMemoryServer(t)
 
@@ -222,17 +221,16 @@ func TestBuildProxyRequest_RebuildsClaudeCodeWireForAnthropicMessagesUpstream(t 
 	}
 
 	if got := headerValueFold(req.Header, "anthropic-version"); got != "2023-06-01" {
-		t.Fatalf("anthropic-version = %q, want rebuilt Claude Code wire header", got)
+		t.Fatalf("anthropic-version = %q, want the caller value untouched", got)
 	}
-	betas := headerValueFold(req.Header, "anthropic-beta")
-	if strings.Contains(betas, "messages-2023-12-15") || !strings.Contains(betas, "claude-code-20250219") {
-		t.Fatalf("anthropic-beta = %q, want rebuilt Claude Code beta set", betas)
+	if betas := headerValueFold(req.Header, "anthropic-beta"); betas != "messages-2023-12-15" {
+		t.Fatalf("anthropic-beta = %q, want the caller value untouched", betas)
 	}
-	if got := headerValueFold(req.Header, "User-Agent"); got != "claude-cli/"+anthropicCLIVersion+" (external, cli)" {
-		t.Fatalf("User-Agent = %q, want Claude Code CLI fingerprint", got)
+	if got := headerValueFold(req.Header, "User-Agent"); got != "" {
+		t.Fatalf("User-Agent = %q, want no synthesized fingerprint", got)
 	}
-	if got := req.URL.Query().Get("beta"); got != "true" {
-		t.Fatalf("upstream URL = %q, want ?beta=true (real Claude Code 2.1.220+ always sends it, API Key channel included)", req.URL.String())
+	if got := req.URL.Query().Get("beta"); got != "" {
+		t.Fatalf("upstream URL = %q, want no beta query added", req.URL.String())
 	}
 }
 
@@ -302,7 +300,7 @@ func TestBuildProxyRequest_KeepsCustomHeaderRulesOnClaudeCodeWire(t *testing.T) 
 	}
 }
 
-func TestBuildProxyRequest_AnyrouterMergesContext1mIntoClaudeCodeBeta(t *testing.T) {
+func TestBuildProxyRequest_AnyrouterDoesNotInjectBeta(t *testing.T) {
 	t.Parallel()
 	srv := newInMemoryServer(t)
 	cfg := anyrouterAnthropicCfg()
@@ -328,20 +326,10 @@ func TestBuildProxyRequest_AnyrouterMergesContext1mIntoClaudeCodeBeta(t *testing
 		t.Fatalf("buildProxyRequest failed: %v", err)
 	}
 
-	var keys []string
-	var values []string
-	for name, vs := range req.Header {
+	for name := range req.Header {
 		if strings.EqualFold(name, "anthropic-beta") {
-			keys = append(keys, name)
-			values = append(values, vs...)
+			t.Fatalf("anthropic-beta was injected for a caller that sent none: %v", req.Header)
 		}
-	}
-	if len(keys) != 1 {
-		t.Fatalf("anthropic-beta keys = %v, want exactly one map key", keys)
-	}
-	betas := strings.Join(values, ",")
-	if !strings.Contains(betas, "claude-code-20250219") || !strings.Contains(betas, "context-1m-2025-08-07") {
-		t.Fatalf("anthropic-beta = %q, want CLI betas plus context-1m", betas)
 	}
 }
 

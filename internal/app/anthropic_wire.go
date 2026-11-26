@@ -82,6 +82,10 @@ func isAnthropicOAuthMessagesRequest(cfg *model.Config, upstream protocol.Protoc
 // 协议，却有自己的 ZCode 设备指纹契约，两套指纹叠加会互相破坏（ZCode 覆盖
 // metadata.user_id，而 Claude Code 的 1h cache TTL 配不上 ZCode 的 beta 头）。
 func isAnthropicClaudeCodeMessagesRequest(cfg *model.Config, upstream protocol.Protocol, requestPath string) bool {
+	// API Key 渠道一律原样透传：body、URL 与请求头都不重建，也不补 CLI beta。
+	if cfg == nil || cfg.GetAuthType() == model.AuthTypeAPIKey {
+		return false
+	}
 	return isAnthropicMessagesRequest(upstream, requestPath) && !isZAICodingPlanRequest(cfg, upstream, requestPath) &&
 		!isAnthropicPassthroughRequest(cfg, upstream, requestPath)
 }
@@ -2054,36 +2058,6 @@ func applyAnthropicOAuthMimicFingerprint(req *http.Request, body []byte) {
 	applyAnthropicOAuthFingerprint(req, &fingerprint)
 }
 
-// injectAnthropicAPIKeyHeaders 为 API Key 渠道重建 Claude Code CLI 请求头。
-// CLI 能力头与 OAuth 共用，认证头走 applyAnthropicAPIKeyAuth；body 的 CCH 已在最终化边界排除。
-func injectAnthropicAPIKeyHeaders(
-	req *http.Request,
-	cfg *model.Config,
-	apiKey string,
-	body []byte,
-	callerOwnsWire bool,
-	incomingHeaders ...http.Header,
-) {
-	if req == nil {
-		return
-	}
-	incoming := anthropicIncomingHeaders(req, incomingHeaders)
-	if callerOwnsWire {
-		applyAnthropicNativeHeaders(req, incoming)
-		applyAnthropicFirstPartyTransportHeaders(req)
-		applyAnthropicAPIKeyAuth(req, apiKey)
-		return
-	}
-	for name := range req.Header {
-		delete(req.Header, name)
-	}
-	applyAnthropicAPIKeyAuth(req, apiKey)
-	applyAnthropicClaudeCodeHeaders(
-		req, anthropicClaudeCodeMimicBetas(body, false), resolveAnthropicSessionID(body, cfg, apiKey, incoming),
-		anthropicClientVersion(incoming), false,
-	)
-}
-
 func injectAnthropicCountTokensHeadersWithFingerprint(req *http.Request, cfg *model.Config, apiKey string, body []byte, callerOwnsWire bool, fingerprint *anthropicOAuthFingerprint, incoming http.Header) {
 	if cfg != nil && cfg.UsesAnthropicOAuth() {
 		if callerOwnsWire {
@@ -2567,26 +2541,6 @@ func deleteRawHeader(headers http.Header, name string) {
 			delete(headers, existing)
 		}
 	}
-}
-
-// resolveAnthropicSessionID 解析写入 X-Claude-Code-Session-Id 的会话 ID。
-//
-// 优先级：下游显式声明的 header → body 的 metadata.user_id.session_id → 凭证身份
-// 与首条用户消息稳定派生 → 随机。body 这一级不能省：finalizeAnthropicOAuthMessages
-// Body 先把 session_id 写进 metadata.user_id，这里读回来才能保证 header 与 body 同值。
-func resolveAnthropicSessionID(body []byte, cfg *model.Config, apiKey string, headers http.Header) string {
-	if sessionID := anthropicSessionIDFromHeaders(headers); sessionID != "" {
-		return sessionID
-	}
-	if sessionID := anthropicSessionIDFromBody(body); sessionID != "" {
-		return sessionID
-	}
-	if credential := anthropicCredentialForWire(cfg, apiKey); credential != nil && credential.AccountUUID != "" {
-		return anthropicStableSessionID(
-			credential.AccountUUID, anthropicFirstUserText(gjson.GetBytes(body, "messages")),
-		)
-	}
-	return uuid.NewString()
 }
 
 func anthropicSessionIDFromBody(body []byte) string {

@@ -1096,69 +1096,39 @@ func TestProxy_NativeAnthropicAPIKeyRebuildsAndNormalizesWire(t *testing.T) {
 	if got := headerValueFold(upstreamHeaders, "x-api-key"); got != "sk-ant-official" {
 		t.Fatalf("official Anthropic x-api-key=%q", got)
 	}
-	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/"+anthropicCLIVersion+" (external, cli)" {
-		t.Fatalf("User-Agent=%q", got)
+	// API Key 渠道原样透传：请求头与 body 都不重建，客户端发什么上游就收到什么。
+	if got := upstreamHeaders.Get("User-Agent"); got != "third-party-client" {
+		t.Fatalf("User-Agent=%q, want the caller value untouched", got)
 	}
-	betas := headerValueFold(upstreamHeaders, "Anthropic-Beta")
-	for _, required := range []string{
-		"claude-code-20250219", "prompt-caching-scope-2026-01-05",
-		"effort-2025-11-24", "context-management-2025-06-27", "fast-mode-2026-02-01",
-		"cache-diagnosis-2026-04-07",
-	} {
-		if !strings.Contains(betas, required) {
-			t.Fatalf("Anthropic-Beta=%q missing %q", betas, required)
-		}
+	if got := headerValueFold(upstreamHeaders, "Anthropic-Beta"); got != "attacker-beta" {
+		t.Fatalf("Anthropic-Beta=%q, want the caller value untouched", got)
 	}
-	// oauth beta 只属于 OAuth 凭证：真实 CLI 用 API Key 时不发，发了就是破绽。
-	if strings.Contains(betas, "oauth-2025-04-20") {
-		t.Fatalf("Anthropic-Beta=%q declared oauth beta for an API key credential", betas)
+	if got := upstreamHeaders.Get("X-Claude-Code-Session-Id"); got != nativeSessionID {
+		t.Fatalf("X-Claude-Code-Session-Id=%q, want the caller value untouched", got)
 	}
-	if gotOS, gotArch := headerValueFold(upstreamHeaders, "X-Stainless-OS"), headerValueFold(upstreamHeaders, "X-Stainless-Arch"); gotOS != "Linux" || gotArch != "arm64" {
-		t.Fatalf("Stainless platform=%q/%q, want fixed Linux/arm64", gotOS, gotArch)
+	if got := upstreamHeaders.Get("x-client-request-id"); got != "" {
+		t.Fatalf("x-client-request-id=%q, want absent", got)
 	}
-	// 调用方没声明 cache_control.ttl，网关不主动开 1h 窗口，也就不声明对应的 beta。
-	if strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
-		t.Fatalf("Anthropic-Beta=%q declared extended cache TTL for a caller that never asked", betas)
+	// body 仍走既有的 Anthropic 规范化（不改写调用方 system/计费块，只收敛采样参数、
+	// thinking 形态与无效 tool_use 签名）；请求头则完全不动。
+	if got := gjson.GetBytes(upstreamBody, "system.1.text").String(); got != "keep this native prompt" {
+		t.Fatalf("caller system prompt changed: %q", got)
 	}
-	if upstreamHeaders.Get("X-Claude-Code-Session-Id") != nativeSessionID || headerValueFold(upstreamHeaders, "x-client-request-id") == "" ||
-		upstreamHeaders.Get("X-Stainless-Runtime-Version") != "v26.3.0" {
-		t.Fatalf("Claude Code identity headers=%v", upstreamHeaders)
-	}
-	// 下游 UA 不是 claude-cli，网关按 Claude Code CLI 指纹重写 body：system 换成
-	// 三段式 CLI 提示，调用方原本的 system 降级为 messages 前缀而不是被丢弃。
-	if got := gjson.GetBytes(upstreamBody, "system.1.text").String(); got != anthropicClaudeCodeIdentityPrompt {
-		t.Fatalf("CLI identity prompt=%q body=%s", got, upstreamBody)
-	}
-	if got := gjson.GetBytes(upstreamBody, "messages.0.content").String(); !strings.Contains(got, "keep this native prompt") {
-		t.Fatalf("caller system prompt was dropped: %s", upstreamBody)
-	}
-	// 新生成的 CLI billing block 跟随 sub2api 当前模拟路径，不写 CCH。
-	if got := gjson.GetBytes(upstreamBody, "system.0.text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header:") ||
-		strings.Contains(got, " cch=") {
-		t.Fatalf("API-key mimic billing contains CCH: %q", got)
+	if got := gjson.GetBytes(upstreamBody, "system.0.text").String(); got !=
+		"x-anthropic-billing-header: cc_version=2.1.220.abc; cc_entrypoint=cli; cch=00000;" {
+		t.Fatalf("billing block was rewritten: %q", got)
 	}
 	if gjson.GetBytes(upstreamBody, "temperature").Exists() || gjson.GetBytes(upstreamBody, "top_p").Exists() ||
 		gjson.GetBytes(upstreamBody, "top_k").Exists() {
 		t.Fatalf("sampling fields survived: %s", upstreamBody)
 	}
 	if gjson.GetBytes(upstreamBody, "thinking.type").String() != "adaptive" ||
-		gjson.GetBytes(upstreamBody, "thinking.budget_tokens").Exists() ||
-		gjson.GetBytes(upstreamBody, "output_config.effort").String() != "medium" {
+		gjson.GetBytes(upstreamBody, "thinking.budget_tokens").Exists() {
 		t.Fatalf("thinking was not normalized: %s", upstreamBody)
 	}
-	if gjson.GetBytes(upstreamBody, "messages.3.content.0.signature").Exists() ||
-		gjson.GetBytes(upstreamBody, "messages.3.content.0.type").String() != "tool_use" {
+	if gjson.GetBytes(upstreamBody, "messages.1.content.0.signature").Exists() ||
+		gjson.GetBytes(upstreamBody, "messages.1.content.0.type").String() != "tool_use" {
 		t.Fatalf("tool history provenance was not sanitized: %s", upstreamBody)
-	}
-	// 断点落在 system 尾段与最后一条可缓存消息上；调用方没要 1h，两处都是默认 5m
-	// 窗口（无 ttl 字段），与 header 里缺席的 extended-cache-ttl beta 同源。
-	if !gjson.GetBytes(upstreamBody, "system.2.cache_control").Exists() ||
-		gjson.GetBytes(upstreamBody, "system.2.cache_control.ttl").Exists() {
-		t.Fatalf("system cache breakpoint=%s", upstreamBody)
-	}
-	if !gjson.GetBytes(upstreamBody, "messages.4.content.0.cache_control").Exists() ||
-		gjson.GetBytes(upstreamBody, "messages.4.content.0.cache_control.ttl").Exists() {
-		t.Fatalf("rolling cache breakpoint=%s", upstreamBody)
 	}
 }
 

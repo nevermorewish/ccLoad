@@ -2813,35 +2813,6 @@ func TestAnthropicOAuthFinalizerReplacesForgedBillingPrefix(t *testing.T) {
 	}
 }
 
-func TestAnthropicClaudeCodeWireUsesIncomingClientVersion(t *testing.T) {
-	t.Parallel()
-	const clientVersion = "9.9.9"
-	headers := http.Header{
-		"User-Agent": {"claude-cli/" + clientVersion + " (external, cli)"},
-	}
-	cfg := &model.Config{Name: "anthropic-api-key"}
-	body, err := finalizeAnthropicClaudeCodeMessagesBody([]byte(`{
-		"model":"claude-sonnet-4-6",
-		"messages":[{"role":"user","content":"hello"}]
-	}`), cfg, "sk-ant-key", headers, anthropicOfficialTestURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := gjson.GetBytes(body, "system.0.text").String(); !strings.Contains(got, "cc_version="+clientVersion+".") {
-		t.Fatalf("billing version = %q", got)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, anthropicOfficialTestURL.String(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	injectAnthropicAPIKeyHeaders(req, cfg, "sk-ant-key", body, false, headers)
-	if got, want := headerValueFold(req.Header, "User-Agent"),
-		"claude-cli/"+clientVersion+" (external, cli)"; got != want {
-		t.Fatalf("User-Agent = %q, want %q", got, want)
-	}
-}
-
 // Claude Code 2.1.283 实测：stream:true 的 /v1/messages 不带 x-stainless-helper-method。
 func TestAnthropicClaudeCodeMimicHeadersOmitStreamHelper(t *testing.T) {
 	t.Parallel()
@@ -2850,9 +2821,6 @@ func TestAnthropicClaudeCodeMimicHeadersOmitStreamHelper(t *testing.T) {
 		name   string
 		inject func(*http.Request)
 	}{
-		{name: "api-key", inject: func(req *http.Request) {
-			injectAnthropicAPIKeyHeaders(req, &model.Config{Name: "anthropic-api-key"}, "sk-ant-key", body, false)
-		}},
 		{name: "oauth", inject: func(req *http.Request) {
 			injectAnthropicOAuthHeadersWithFingerprint(req, &model.Config{AuthType: model.AuthTypeAnthropicOAuth}, "oauth-access", body, false, nil)
 		}},
@@ -3586,84 +3554,42 @@ func TestAnthropicMimicBillingOmitsCCH(t *testing.T) {
 		t.Fatal(err)
 	}
 	oauthCfg := &model.Config{AuthType: model.AuthTypeAnthropicOAuth, OAuthCredential: credentialJSON}
-	apiKeyCfg := &model.Config{Name: "anthropic-api-key"}
 	callerHeaders := http.Header{"User-Agent": []string{"third-party-client"}}
 
 	oauthBody, err := finalizeAnthropicClaudeCodeMessagesBody([]byte(requestBody), oauthCfg, "", callerHeaders, anthropicOfficialTestURL)
 	if err != nil {
 		t.Fatalf("OAuth finalize: %v", err)
 	}
-	apiKeyBody, err := finalizeAnthropicClaudeCodeMessagesBody([]byte(requestBody), apiKeyCfg, "sk-ant-key", callerHeaders, anthropicOfficialTestURL)
-	if err != nil {
-		t.Fatalf("API key finalize: %v", err)
-	}
-
-	// 身份值必然不同（两套凭证），其余 body 结构必须完全一致。
-	for _, path := range []string{"system.1.text", "system.2.text", "messages.0.content", "thinking.type",
-		"context_management.edits.0.type", "system.2.cache_control"} {
-		oauthValue := gjson.GetBytes(oauthBody, path).String()
-		if apiKeyValue := gjson.GetBytes(apiKeyBody, path).String(); oauthValue != apiKeyValue {
-			t.Fatalf("%s: OAuth=%q API key=%q", path, oauthValue, apiKeyValue)
-		}
-	}
-	if gjson.GetBytes(apiKeyBody, "temperature").Exists() ||
-		!strings.HasPrefix(gjson.GetBytes(apiKeyBody, "system.0.text").String(), "x-anthropic-billing-header:") {
-		t.Fatalf("API key body did not adopt the CLI wire shape: %s", apiKeyBody)
-	}
-	oauthBilling := gjson.GetBytes(oauthBody, "system.0.text").String()
-	apiKeyBilling := gjson.GetBytes(apiKeyBody, "system.0.text").String()
-	if strings.Contains(oauthBilling, " cch=") {
+	if oauthBilling := gjson.GetBytes(oauthBody, "system.0.text").String(); strings.Contains(oauthBilling, " cch=") {
 		t.Fatalf("OAuth mimic billing contains CCH: %q", oauthBilling)
-	}
-	if strings.Contains(apiKeyBilling, " cch=") {
-		t.Fatalf("API-key mimic billing contains CCH: %q", apiKeyBilling)
-	}
-	// 同一份请求发往第三方网关时，billing 必须保持无 cch 的稳定形态。
-	thirdPartyBody, err := finalizeAnthropicClaudeCodeMessagesBody(
-		[]byte(requestBody), apiKeyCfg, "sk-ant-key", callerHeaders, anthropicThirdPartyTestURL)
-	if err != nil {
-		t.Fatalf("third-party finalize: %v", err)
-	}
-	if got := gjson.GetBytes(thirdPartyBody, "system.0.text").String(); strings.Contains(got, "cch=") {
-		t.Fatalf("API-key billing on a third-party gateway must stay unsigned: %q", got)
 	}
 	oauthRequest, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(string(oauthBody)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	apiKeyRequest, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(string(apiKeyBody)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	injectAnthropicOAuthHeadersWithFingerprint(oauthRequest, oauthCfg, "oauth-access", oauthBody, false, nil, callerHeaders)
-	injectAnthropicAPIKeyHeaders(apiKeyRequest, apiKeyCfg, "sk-ant-key", apiKeyBody, false, callerHeaders)
-
-	if headerValueFold(apiKeyRequest.Header, "x-api-key") != "sk-ant-key" ||
-		headerValueFold(apiKeyRequest.Header, "authorization") != "" {
-		t.Fatalf("API key auth headers = %v", apiKeyRequest.Header)
-	}
 	if headerValueFold(oauthRequest.Header, "authorization") != "Bearer oauth-access" ||
 		headerValueFold(oauthRequest.Header, "x-api-key") != "" {
 		t.Fatalf("OAuth auth headers = %v", oauthRequest.Header)
-	}
-	// 两条路径共享基本协议头；OAuth 的 Stainless/beta 使用 sub2api 模拟 profile。
-	for _, name := range []string{"User-Agent", "anthropic-version", "x-app",
-		"X-Stainless-Package-Version", "X-Stainless-Timeout"} {
-		oauthValue := headerValueFold(oauthRequest.Header, name)
-		apiKeyValue := headerValueFold(apiKeyRequest.Header, name)
-		if oauthValue == "" || oauthValue != apiKeyValue {
-			t.Fatalf("%s: OAuth=%q API key=%q", name, oauthValue, apiKeyValue)
-		}
-	}
-	for _, name := range []string{"X-Claude-Code-Session-Id", "x-client-request-id"} {
-		if headerValueFold(apiKeyRequest.Header, name) == "" {
-			t.Fatalf("API key %s is empty: %v", name, apiKeyRequest.Header)
-		}
 	}
 	if headerValueFold(oauthRequest.Header, "X-Claude-Code-Session-Id") != "" ||
 		headerValueFold(oauthRequest.Header, "X-Stainless-Runtime-Version") != anthropicStainlessRuntimeVersion ||
 		!strings.Contains(headerValueFold(oauthRequest.Header, "Anthropic-Beta"), "extended-cache-ttl-2025-04-11") {
 		t.Fatalf("OAuth mimic headers = %v", oauthRequest.Header)
+	}
+}
+
+// TestAnthropicAPIKeyChannelsPassThroughHeaders 守住 API Key 渠道的透传契约：
+// 网关不得为 Anthropic Messages 生成或改写任何客户端没发的请求头（首当其冲是
+// anthropic-beta）。曾因按模型合成 CLI beta，把 Bedrock 上游打成 400 invalid beta flag。
+func TestAnthropicAPIKeyChannelsPassThroughHeaders(t *testing.T) {
+	t.Parallel()
+	cfg := &model.Config{Name: "anthropic-api-key"}
+	if isAnthropicClaudeCodeMessagesRequest(cfg, protocol.Anthropic, "/v1/messages") {
+		t.Fatal("API key channel must not take the Claude Code wire")
+	}
+	if isAnthropicClaudeCodeMessagesRequest(cfg, protocol.Anthropic, "/v1/messages/count_tokens") {
+		t.Fatal("API key channel must not take the Claude Code wire for count_tokens")
 	}
 }
 
@@ -3865,7 +3791,7 @@ func TestZAICodingPlanSkipsClaudeCodeFingerprint(t *testing.T) {
 		cfg  *model.Config
 		want bool
 	}{
-		{name: "API key channel", cfg: &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, Name: "anthropic"}, want: true},
+		{name: "API key channel", cfg: &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, Name: "anthropic"}, want: false},
 		{name: "Anthropic OAuth channel", cfg: &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, AuthType: model.AuthTypeAnthropicOAuth}, want: true},
 		{name: "Z.ai Coding Plan channel", cfg: &model.Config{CustomRequestRules: &model.CustomRequestRules{Passthrough: new(bool)}, AuthType: model.AuthTypeZAIOAuth}},
 	}
@@ -3926,7 +3852,9 @@ func TestAnthropicClaudeCodeRetryReplaysUnsignedMimicWire(t *testing.T) {
 	}
 }
 
-func TestPrepareTranslatedUpstreamBodyInjectsAnyrouterFallbackTools(t *testing.T) {
+// TestPrepareTranslatedUpstreamBodyKeepsAnyrouterTools 守住 API Key 渠道的透传契约：
+// anyrouter 渠道不再补齐 fallback tools。
+func TestPrepareTranslatedUpstreamBodyKeepsAnyrouterTools(t *testing.T) {
 	t.Parallel()
 
 	const body = `{"model":"claude-fable-5-1","messages":[{"role":"user","content":"title"}],"metadata":{"user_id":"{\"device_id\":\"device\",\"session_id\":\"session\"}"},"tools":[]}`
@@ -3944,14 +3872,8 @@ func TestPrepareTranslatedUpstreamBodyInjectsAnyrouterFallbackTools(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools := gjson.GetBytes(got, "tools")
-	if !tools.IsArray() || jsonMemberCount(tools) != 3 {
-		t.Fatalf("tools = %s, want three fallback tools", tools.Raw)
-	}
-	for index, want := range []string{"Edit", "Read", "Write"} {
-		if name := gjson.GetBytes(got, fmt.Sprintf("tools.%d.name", index)).String(); name != want {
-			t.Fatalf("tools.%d.name = %q, want %q; body = %s", index, name, want, got)
-		}
+	if tools := gjson.GetBytes(got, "tools"); !tools.IsArray() || jsonMemberCount(tools) != 0 {
+		t.Fatalf("tools = %s, want the caller value untouched", tools.Raw)
 	}
 }
 

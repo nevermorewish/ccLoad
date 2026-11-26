@@ -2449,7 +2449,7 @@ func (s *Server) newTestUpstreamRequest(
 		callerBody = requestPlan.requestBody
 	}
 	requestProtocol := protocol.Protocol(requestPlan.upstreamProtocol)
-	passthrough := cfgForBuild.PassthroughEnabled()
+	passthrough := channelPassthrough(cfgForBuild, requestProtocol, requestPlan.endpointPath, requestPlan.fullURL)
 	callerWire := classifyAnthropicRequestCallerWire(callerBody, sourceHeaders, requestProtocol,
 		requestPlan.endpointPath, requestPlan.clientProtocol == string(protocol.Anthropic))
 	callerOwnsAnthropicWire := callerWire.ownsWire()
@@ -2500,10 +2500,11 @@ func (s *Server) newTestUpstreamRequest(
 	} else if !passthrough && isZAICodingPlanRequest(cfgForBuild, requestProtocol, requestPlan.endpointPath) {
 		injectZAICodingPlanHeaders(req, cfgForBuild, requestPlan.apiKey, requestPlan.requestBody, sourceHeaders)
 		wireRebuilt = true
-	} else if isAnthropicClaudeCodeMessagesRequest(cfgForBuild, requestProtocol, requestPlan.endpointPath) && !isOpenCodeAPIKeyEndpoint(cfgForBuild, req.URL.String()) {
-		injectAnthropicAPIKeyHeaders(req, cfgForBuild, requestPlan.apiKey, requestPlan.requestBody,
-			callerOwnsAnthropicWire, sourceHeaders)
-		wireRebuilt = true
+	}
+	// Anthropic API Key 渠道只补认证头，其余请求头保持测试请求的原样；
+	// 透传分支已经注入过，这里只覆盖关闭透传的路径。
+	if !cfgForBuild.UsesOAuth() && !passthrough && requestProtocol == protocol.Anthropic {
+		injectAPIKeyHeaders(req, requestPlan.apiKey, requestPlan.upstreamProtocol)
 	}
 	if requestPlan.anthropicMappedSessionID != "" &&
 		anthropicHeaderValue(sourceHeaders, "X-Claude-Code-Session-Id") != "" &&
@@ -2523,10 +2524,6 @@ func (s *Server) newTestUpstreamRequest(
 				applyAnthropicOAuthMimicFingerprint(req, requestPlan.requestBody)
 			}
 		}
-	}
-	// anyrouter 渠道：确保 anthropic-beta 包含 context-1m，与代理链路步骤 6.2 对齐。
-	if !passthrough && requestProtocol == protocol.Anthropic && isAnyrouterChannel(cfgForBuild) {
-		injectAnthropicBetaFlag(req, "context-1m-2025-08-07")
 	}
 	if !passthrough && isOpenCodeAPIKeyEndpoint(cfgForBuild, req.URL.String()) {
 		executionIdentity := ""
