@@ -50,7 +50,7 @@ func (s *Server) tryDesignatedChannel(ctx context.Context, sourceID, targetID in
 	ctx = context.WithValue(ctx, terminalChannelAttemptKey{}, true)
 	ctx = withChannelPoolRoute(ctx, &channelPoolRoute{pools: []int{cfg.ChannelPool}})
 	var eligible []*model.Config
-	if label == "non-stream" {
+	if label == "non-stream" || label == "logprobs" {
 		eligible, err = s.filterCooldownChannelsStrict(ctx, []*model.Config{cfg}, req.originalModel, string(req.clientProtocol))
 	} else {
 		eligible, err = s.filterCooldownChannels(ctx, []*model.Config{cfg}, req.originalModel, string(req.clientProtocol))

@@ -14,6 +14,10 @@ export type RouteRule = {
   token_tiers: TokenTier[]
   /** 思考档位档位，优先于 token_tiers；未配置时行为不变。 */
   thinking_tiers?: ThinkingTier[]
+  /** 请求含 logprobs 时分流到的渠道组，优先于思考与 Token 档位；与 logprobs_channel_id 互斥。 */
+  logprobs_pool?: number
+  /** 请求含 logprobs 时直接使用的指定渠道；与 logprobs_pool 互斥，且优先于 non_stream_channel_id。 */
+  logprobs_channel_id?: number
   overflow: QueueOverflow[]
   sticky: StickyMode
   strict: boolean
@@ -38,6 +42,7 @@ export type Simulation = {
   /** 命中的思考档位下标，-1 表示未命中；thinking_effort 为空表示请求未声明档位。 */
   thinking_tier: number
   thinking_effort: string
+  logprobs?: boolean
   input_tokens: number
   reason: string
   pools: Array<{ pool: number; name: string; inflight: number }>
@@ -45,6 +50,7 @@ export type Simulation = {
   first_byte_timeout_channel_id?: number
   first_byte_timeout_fail_fast?: boolean
   non_stream_channel_id?: number
+  logprobs_channel_id?: number
 }
 
 /** 编辑草稿：Token 与队列保持输入原文（支持 8k / 50k 写法），保存时统一换算校验。 */
@@ -67,6 +73,8 @@ export type RuleDraft = {
   firstByteTimeoutChannel: string
   firstByteTimeoutFailFast: boolean
   nonStreamChannel: string
+  /** 空串=未指定；pool:0..2=分流到渠道组；正整数=直接使用指定渠道。 */
+  logprobsTarget: string
 }
 
 /** 与后端 maxChannelRouteFirstByteTimeoutSeconds 一致。 */
@@ -79,7 +87,7 @@ export const STICKY_MODES: Array<{ value: StickyMode; label: string; hint: strin
 ]
 
 export const ROUTE_REASONS: Record<string, string> = {
-  default: '默认渠道组', thinking_tier: '思考档位', token_tier: '输入 Token 档位', overflow: '队列溢出', sticky: '会话粘性',
+  default: '默认渠道组', logprobs: 'Logprobs 分流', thinking_tier: '思考档位', token_tier: '输入 Token 档位', overflow: '队列溢出', sticky: '会话粘性',
 }
 
 /** 思考档位选项，与后端 channelRouteThinkingEfforts 一致；空串表示请求未声明档位。 */
@@ -149,7 +157,7 @@ export function describeTier(tier: TokenTier): string {
 }
 
 export function emptyRuleDraft(): RuleDraft {
-  return { key: nextKey(), id: '', name: '', enabled: true, models: [], defaultPool: 0, tiers: [], thinkingTiers: [], overflow: [], sticky: 'tier', strict: false, firstByteTimeout: '', firstByteTimeoutChannel: '', firstByteTimeoutFailFast: false, nonStreamChannel: '' }
+  return { key: nextKey(), id: '', name: '', enabled: true, models: [], defaultPool: 0, tiers: [], thinkingTiers: [], overflow: [], sticky: 'tier', strict: false, firstByteTimeout: '', firstByteTimeoutChannel: '', firstByteTimeoutFailFast: false, nonStreamChannel: '', logprobsTarget: '' }
 }
 
 /** 示例：kimi-k3 输入 < 8k 走渠道1、≥ 50k 走渠道2，渠道1 进行中达到 100 时溢出到渠道2，同档位会话粘性。 */
@@ -171,6 +179,9 @@ export function ruleToDraft(rule: RouteRule): RuleDraft {
     overflow: (rule.overflow ?? []).map((item) => ({ pool: Number(item.pool ?? 0), maxQueue: String(item.max_queue ?? ''), target: Number(item.target_pool ?? 0) })),
     sticky, strict: Boolean(rule.strict),
     nonStreamChannel: rule.non_stream_channel_id ? String(rule.non_stream_channel_id) : '',
+    logprobsTarget: rule.logprobs_channel_id
+      ? String(rule.logprobs_channel_id)
+      : (rule.logprobs_pool !== undefined && rule.logprobs_pool !== null ? `pool:${rule.logprobs_pool}` : ''),
     firstByteTimeoutChannel: rule.first_byte_timeout_channel_id ? String(rule.first_byte_timeout_channel_id) : '',
     firstByteTimeoutFailFast: Boolean(rule.first_byte_timeout_fail_fast),
     firstByteTimeout: Number(rule.first_byte_timeout_seconds) > 0 ? String(rule.first_byte_timeout_seconds) : '',
@@ -229,6 +240,24 @@ export function draftsToConfig(drafts: RuleDraft[]): { config?: RouteConfig; err
     if (draft.firstByteTimeoutFailFast && target > 0) return { error: `${label}：超时直接返回 503 与指定超时渠道不能同时设置` }
     const nonStreamTarget = parseSecondsInput(draft.nonStreamChannel ?? '')
     if (nonStreamTarget === null) return { error: `${label}：非流式请求必须指定有效渠道` }
+    const rawLogprobs = (draft.logprobsTarget ?? '').trim()
+    let logprobsPool: number | undefined
+    let logprobsChannel: number | undefined
+    if (rawLogprobs) {
+      if (rawLogprobs.startsWith('pool:')) {
+        const pool = parseSecondsInput(rawLogprobs.slice('pool:'.length))
+        if (pool === null || !CHANNEL_POOLS.some((item) => item.value === pool)) {
+          return { error: `${label}：Logprobs 请求必须选择有效渠道组或渠道` }
+        }
+        logprobsPool = pool
+      } else {
+        const channelID = parseSecondsInput(rawLogprobs)
+        if (channelID === null || channelID <= 0) {
+          return { error: `${label}：Logprobs 请求必须选择有效渠道组或渠道` }
+        }
+        logprobsChannel = channelID
+      }
+    }
     const thinkingTiers: ThinkingTier[] = []
     for (const [tierIndex, tier] of draft.thinkingTiers.entries()) {
       if (!tier.efforts.length) return { error: `${label}：第 ${tierIndex + 1} 个思考档位至少选择一个档位` }
@@ -236,6 +265,8 @@ export function draftsToConfig(drafts: RuleDraft[]): { config?: RouteConfig; err
     }
     rules.push({
       ...(nonStreamTarget > 0 ? { non_stream_channel_id: nonStreamTarget } : {}),
+      ...(logprobsPool !== undefined ? { logprobs_pool: logprobsPool } : {}),
+      ...(logprobsChannel !== undefined ? { logprobs_channel_id: logprobsChannel } : {}),
       ...(target > 0 ? { first_byte_timeout_channel_id: target } : {}),
       ...(draft.firstByteTimeoutFailFast ? { first_byte_timeout_fail_fast: true } : {}),
       ...(thinkingTiers.length ? { thinking_tiers: thinkingTiers } : {}),
@@ -249,9 +280,12 @@ export function draftsToConfig(drafts: RuleDraft[]): { config?: RouteConfig; err
 /** 规则摘要：一行说明分流效果，列表折叠时也能看出规则意图。 */
 export function summarizeRule(rule: RouteRule): string {
   const parts: string[] = []
+  if (rule.logprobs_pool !== undefined && rule.logprobs_pool !== null) {
+    parts.push(`Logprobs → ${channelPoolLabel(rule.logprobs_pool)}`)
+  }
   for (const tier of rule.thinking_tiers ?? []) parts.push(`思考 ${describeEfforts(tier.efforts)} → ${channelPoolLabel(tier.pool)}`)
   for (const tier of rule.token_tiers) parts.push(`${describeTier(tier)} → ${channelPoolLabel(tier.pool)}`)
-  const fallback = rule.thinking_tiers?.length || rule.token_tiers.length ? '其余' : '全部'
+  const fallback = (rule.logprobs_pool !== undefined && rule.logprobs_pool !== null) || rule.thinking_tiers?.length || rule.token_tiers.length ? '其余' : '全部'
   parts.push(`${fallback} → ${channelPoolLabel(rule.default_pool)}`)
   for (const item of rule.overflow) parts.push(`${channelPoolLabel(item.pool)} 进行中 ≥ ${item.max_queue} 时优先 ${channelPoolLabel(item.target_pool)}`)
   if (rule.first_byte_timeout_seconds > 0) {
@@ -260,6 +294,7 @@ export function summarizeRule(rule: RouteRule): string {
       : rule.first_byte_timeout_channel_id ? `首字超过 ${rule.first_byte_timeout_seconds} 秒转到渠道 #${rule.first_byte_timeout_channel_id}，返回最终结果` : `首字超过 ${rule.first_byte_timeout_seconds} 秒切换渠道`)
   }
   if (rule.non_stream_channel_id) parts.push(`非流式请求直接使用渠道 #${rule.non_stream_channel_id}，返回最终结果`)
+  if (rule.logprobs_channel_id) parts.push(`Logprobs 请求直接使用渠道 #${rule.logprobs_channel_id}，返回最终结果`)
   return parts.join('；')
 }
 

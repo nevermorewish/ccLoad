@@ -137,6 +137,18 @@ function RuleCard({ draft, index, total, inflight, knownModels, channels, onChan
     </div>
 
     <div className="route-field">
+      <span className="route-label">Logprobs</span>
+      <div className="cell-stack">
+        <SearchableSelect ariaLabel={`${label} Logprobs 路由目标`} className="combobox-inline" value={draft.logprobsTarget} options={[
+          { value: '', label: '按原路由规则（未指定）' },
+          ...POOL_OPTIONS.map((pool) => ({ value: `pool:${pool.value}`, label: `渠道组：${pool.label}` })),
+          ...channels.map((channel) => ({ value: String(channel.id), label: `#${channel.id} ${channel.name}${channel.enabled ? '' : '（已停用）'}` })),
+        ]} onChange={(value) => onChange({ logprobsTarget: value })} />
+        <span className="table-note">请求包含 logprobs（如 Chat Completions logprobs=true、Completions logprobs&gt;0、Responses include 含 message.output_text.logprobs）时，可优先分流到指定渠道组（保留组内轮询与故障切换，优先于思考/Token 档位并隔离粘性），或直接使用指定渠道（只尝试一次，优先于非流式指定渠道）。</span>
+      </div>
+    </div>
+
+    <div className="route-field">
       <span className="route-label">非流式请求</span>
       <div className="cell-stack">
         <SearchableSelect ariaLabel={`${label} 非流式指定渠道`} className="combobox-inline" value={draft.nonStreamChannel} options={[{ value: '', label: '按原路由规则（未指定）' }, ...channels.map((channel) => ({ value: String(channel.id), label: `#${channel.id} ${channel.name}${channel.enabled ? '' : '（已停用）'}` }))]} onChange={(value) => onChange({ nonStreamChannel: value })} />
@@ -170,7 +182,7 @@ export function ChannelRoutesPage() {
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
-  const [simulation, setSimulation] = useState({ model: '', tokens: '' })
+  const [simulation, setSimulation] = useState({ model: '', tokens: '', logprobs: false })
   const [simulated, setSimulated] = useState<Simulation | null>(null)
   const [simulateError, setSimulateError] = useState('')
 
@@ -230,7 +242,7 @@ export function ChannelRoutesPage() {
     const tokens = parseTokenInput(simulation.tokens)
     if (!simulation.model.trim()) { setSimulateError('请填写模型'); return }
     if (tokens === null) { setSimulateError('输入 Token 格式无效（示例：9000、60k）'); return }
-    try { setSimulated(await postJSON<Simulation>('/admin/channel-routes/simulate', { model: simulation.model.trim(), input_tokens: tokens })) }
+    try { setSimulated(await postJSON<Simulation>('/admin/channel-routes/simulate', { model: simulation.model.trim(), input_tokens: tokens, ...(simulation.logprobs ? { logprobs: true } : {}) })) }
     catch (cause) { setSimulateError(errorText(cause, '模拟失败')) }
   }
 
@@ -271,12 +283,14 @@ export function ChannelRoutesPage() {
       <div className="toolbar">
         <SearchableSelect ariaLabel="模拟模型" allowCustomInput value={simulation.model} options={knownModels.map((name) => ({ value: name, label: name }))} placeholder="模型，如 kimi-k3" onChange={(value) => setSimulation((current) => ({ ...current, model: value }))} />
         <input className="input" style={{ width: 240 }} value={simulation.tokens} placeholder="输入 Token，如 9000 或 60k" aria-label="模拟输入 Token" onChange={(event) => setSimulation((current) => ({ ...current, tokens: event.target.value }))} onKeyDown={(event) => { if (event.key === 'Enter') void simulate() }} />
+        <label className="muted"><input type="checkbox" aria-label="模拟 Logprobs 请求" checked={simulation.logprobs} onChange={(event) => setSimulation((current) => ({ ...current, logprobs: event.target.checked }))} /> Logprobs</label>
         <button className="btn btn-primary" onClick={() => void simulate()}>模拟</button>
       </div>
       {simulateError && <p className="error-text" role="alert">{simulateError}</p>}
       {simulated && <div className="cell-stack">
-        <span>{simulated.matched ? `命中规则「${simulated.rule_name || simulated.rule_id}」` : '未命中规则（默认顺序）'} · 依据：{ROUTE_REASONS[simulated.reason] ?? simulated.reason}{simulated.tier >= 0 ? `（档位 ${simulated.tier + 1}）` : ''} · 输入 Token {simulated.input_tokens.toLocaleString()} · 首字超时：{simulated.first_byte_timeout_seconds > 0 ? `${simulated.first_byte_timeout_seconds} 秒后${simulated.first_byte_timeout_fail_fast ? '直接返回 503' : simulated.first_byte_timeout_channel_id ? `转到渠道 #${simulated.first_byte_timeout_channel_id}，返回最终结果` : '按候选顺序切换'}` : '沿用系统设置'}</span>
-        {simulated.non_stream_channel_id ? <span>非流式请求：直接使用渠道 #{simulated.non_stream_channel_id}，返回最终结果；下方渠道组顺序用于其他请求。</span> : null}
+        <span>{simulated.matched ? `命中规则「${simulated.rule_name || simulated.rule_id}」` : '未命中规则（默认顺序）'} · 依据：{ROUTE_REASONS[simulated.reason] ?? simulated.reason}{simulated.tier >= 0 ? `（档位 ${simulated.tier + 1}）` : ''} · 输入 Token {simulated.input_tokens.toLocaleString()}{simulated.logprobs ? ' · Logprobs' : ''} · 首字超时：{simulated.first_byte_timeout_seconds > 0 ? `${simulated.first_byte_timeout_seconds} 秒后${simulated.first_byte_timeout_fail_fast ? '直接返回 503' : simulated.first_byte_timeout_channel_id ? `转到渠道 #${simulated.first_byte_timeout_channel_id}，返回最终结果` : '按候选顺序切换'}` : '沿用系统设置'}</span>
+        {simulated.logprobs && simulated.logprobs_channel_id ? <span>Logprobs 请求：直接使用渠道 #{simulated.logprobs_channel_id}，返回最终结果；下方渠道组顺序用于其他请求。</span> : null}
+        {!(simulated.logprobs && simulated.logprobs_channel_id) && simulated.non_stream_channel_id ? <span>非流式请求：直接使用渠道 #{simulated.non_stream_channel_id}，返回最终结果；下方渠道组顺序用于其他请求。</span> : null}
         <span className="route-order">{simulated.pools.map((pool, order) => <span key={pool.pool} className={`badge ${order === 0 ? 'badge-good' : 'badge-muted'}`}>{order + 1}. {pool.name}（进行中 {pool.inflight}）</span>)}</span>
         {dirty && <span className="warn-text">有未保存的修改，模拟结果基于已保存的规则。</span>}
       </div>}

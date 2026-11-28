@@ -102,6 +102,15 @@ func TestParseChannelRouteConfigNormalizes(t *testing.T) {
 		"thinking tier pool": func(r *ChannelRouteRule) {
 			r.ThinkingTiers = []ChannelRouteThinkingTier{{Efforts: []string{"low"}, Pool: 9}}
 		},
+		"invalid logprobs pool": func(r *ChannelRouteRule) {
+			pool := 9
+			r.LogprobsPool = &pool
+		},
+		"negative logprobs channel": func(r *ChannelRouteRule) { r.LogprobsChannelID = -1 },
+		"logprobs pool with channel": func(r *ChannelRouteRule) {
+			pool := 2
+			r.LogprobsPool, r.LogprobsChannelID = &pool, 50
+		},
 	}
 	for name, mutate := range cases {
 		rule := valid
@@ -901,5 +910,67 @@ func TestResponsesWebsocketTurnsFollowChannelRoute(t *testing.T) {
 			t.Fatalf("websocket turn reservations leaked: %v", env.server.channelPoolQueues.snapshot())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRequestHasLogprobsAndPoolRouting(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{}`, false},
+		{`{"logprobs":false,"top_logprobs":2}`, false},
+		{`{"logprobs":null}`, false},
+		{`{"logprobs":0}`, false},
+		{`{"logprobs":true}`, true},
+		{`{"logprobs":true,"top_logprobs":5}`, true},
+		{`{"logprobs":3}`, true},
+		{`{"include":["message.output_text.logprobs"]}`, true},
+		{`{"include":["reasoning.encrypted_content"]}`, false},
+		{`{"generationConfig":{"responseLogprobs":true}}`, true},
+	} {
+		if got := requestHasLogprobs([]byte(tc.body)); got != tc.want {
+			t.Errorf("requestHasLogprobs(%s)=%v want %v", tc.body, got, tc.want)
+		}
+	}
+
+	server := newInMemoryServer(t)
+	logprobsPool := 2
+	rule := kimiRouteRule()
+	rule.Sticky = channelRouteStickySession
+	rule.Strict = true
+	rule.LogprobsPool = &logprobsPool
+	rule.ThinkingTiers = []ChannelRouteThinkingTier{{Efforts: []string{"low"}, Pool: 1}}
+	useChannelRoutes(t, server, rule)
+
+	decide := func(logprobs bool, effort string) *channelPoolRoute {
+		return server.decideChannelPoolRoute(channelPoolRouteInput{
+			model: "kimi-k3", logprobs: logprobs, thinkingEffort: effort, inputTokens: 100, inputTokensKnown: true,
+			session: func() string { return "session-lp" }, now: time.Now(),
+		})
+	}
+
+	normal := decide(false, "low")
+	if !slices.Equal(normal.pools, []int{1}) || normal.reason != channelRouteReasonThinkingTier {
+		t.Fatalf("normal route=%+v, want pool 1 via thinking tier", normal)
+	}
+	server.bindChannelPoolAffinity(normal, 1)
+
+	// Logprobs must bypass non-logprobs session affinity and precede thinking/token tiers.
+	lp := decide(true, "low")
+	if !slices.Equal(lp.pools, []int{2}) || lp.reason != channelRouteReasonLogprobs {
+		t.Fatalf("logprobs route=%+v, want pool 2 via logprobs", lp)
+	}
+	server.bindChannelPoolAffinity(lp, 2)
+
+	// A follow-up request without logprobs must not stay pinned to the logprobs pool.
+	after := decide(false, "low")
+	if !slices.Equal(after.pools, []int{1}) || after.reason == channelRouteReasonSticky {
+		t.Fatalf("post-logprobs route=%+v, want re-route back to pool 1", after)
+	}
+
+	status, sim := simulateChannelRoute(t, server, map[string]any{"model": "kimi-k3", "body": map[string]any{"logprobs": true}})
+	if status != 200 || sim.Reason != channelRouteReasonLogprobs || !sim.Logprobs || len(sim.Pools) != 1 || sim.Pools[0].Pool != 2 {
+		t.Fatalf("simulation=%+v status=%d", sim, status)
 	}
 }

@@ -607,16 +607,33 @@ func (s *Server) executeResponsesWebsocketTurn(
 	// 渠道路由按完整 transcript 估算输入 Token；会话身份与 HTTP Codex 入口相同（Session-Id）。
 	sessionKey := memoizeSessionKey(func() string { return codexSessionAffinityKey(tokenHashString, c.Request.Header) })
 	reqChannelFilter := extractRequestedChannelFilter(c.Request)
+	hasLogprobs := requestHasLogprobs(requestBody)
 	var poolRoute *channelPoolRoute
 	if channelPoolRoutingApplies(http.MethodPost, protocol.RequestFamilyResponses, protocol.Codex, modelName, reqChannelFilter, false) {
-		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: modelName, body: requestBody, thinkingEffort: thinkingEffort, session: sessionKey, now: time.Now()})
+		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: modelName, body: requestBody, thinkingEffort: thinkingEffort, logprobs: hasLogprobs, session: sessionKey, now: time.Now()})
 		defer poolRoute.releaseReservation()
 		ctx = withChannelPoolRoute(ctx, poolRoute)
 	}
 
-	candidates, err := s.selectCandidatesByModelAndClientProtocol(ctx, modelName, string(protocol.Codex))
-	if err == nil {
-		candidates = s.appendAntigravityCreditsCandidates(ctx, candidates, modelName, string(protocol.Codex), requestBody)
+	var (
+		candidates []*model.Config
+		err        error
+	)
+	if poolRoute != nil && hasLogprobs && poolRoute.logprobsChannelID > 0 {
+		cfg, cfgErr := s.store.GetConfig(ctx, poolRoute.logprobsChannelID)
+		if cfgErr != nil || cfg == nil || !cfg.Enabled || cfg.IsSystemOne() || channelRequiresProtocolBridge(cfg) || !s.configSupportsModelWithFuzzyMatch(cfg, modelName) {
+			return responsesWebsocketTurnResult{}, fmt.Errorf("logprobs target channel %d is unavailable for this model", poolRoute.logprobsChannelID)
+		}
+		targetCtx := withChannelPoolRoute(ctx, &channelPoolRoute{pools: []int{cfg.ChannelPool}})
+		candidates, err = s.filterCooldownChannelsStrict(targetCtx, []*model.Config{cfg}, modelName, string(protocol.Codex))
+		if err == nil && len(candidates) > 0 {
+			poolRoute.moveReservation(cfg.ChannelPool)
+		}
+	} else {
+		candidates, err = s.selectCandidatesByModelAndClientProtocol(ctx, modelName, string(protocol.Codex))
+		if err == nil {
+			candidates = s.appendAntigravityCreditsCandidates(ctx, candidates, modelName, string(protocol.Codex), requestBody)
+		}
 	}
 	if err != nil {
 		return responsesWebsocketTurnResult{}, fmt.Errorf("select upstream candidates: %w", err)

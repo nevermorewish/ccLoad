@@ -531,6 +531,7 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 	// 先把后缀写成客户端协议字段；选定渠道后会再按实际上游模型能力收敛等级。
 	all = applyThinkingSuffix(all, clientProtocol, incoming.requestedModel)
 	thinkingEffort := thinkingEffortFromRequest(incoming.requestedModel, all)
+	hasLogprobs := requestHasLogprobs(all)
 
 	tokenHashStr := ""
 	if v, ok := c.Get("token_hash"); ok {
@@ -595,24 +596,29 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 		strings.TrimSpace(gjson.GetBytes(all, "previous_response_id").String()) != ""
 	var poolRoute *channelPoolRoute
 	if channelPoolRoutingApplies(requestMethod, requestFamily, clientProtocol, originalModel, reqChannelFilter, continuesResponse) {
-		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: originalModel, body: all, thinkingEffort: thinkingEffort, session: sessionKey, now: time.Now()})
+		poolRoute = s.routeChannelPools(channelPoolRouteInput{model: originalModel, body: all, thinkingEffort: thinkingEffort, logprobs: hasLogprobs, session: sessionKey, now: time.Now()})
 		defer poolRoute.releaseReservation()
 		ctx = withChannelPoolRoute(ctx, poolRoute)
 	}
 
-	nonStreamTarget := int64(0)
-	if poolRoute != nil && !isStreaming {
-		nonStreamTarget = poolRoute.nonStreamChannelID
+	designatedTarget := int64(0)
+	designatedLabel := ""
+	if poolRoute != nil {
+		if hasLogprobs && poolRoute.logprobsChannelID > 0 {
+			designatedTarget, designatedLabel = poolRoute.logprobsChannelID, "logprobs"
+		} else if !isStreaming && poolRoute.nonStreamChannelID > 0 {
+			designatedTarget, designatedLabel = poolRoute.nonStreamChannelID, "non-stream"
+		}
 	}
 	var cands []*model.Config
-	if nonStreamTarget > 0 {
+	if designatedTarget > 0 {
 		// Eligibility is checked in tryDesignatedChannel, including token scope.
 		// A placeholder preserves the normal request/logging setup if the target disappears.
-		cands = []*model.Config{{ID: nonStreamTarget}}
+		cands = []*model.Config{{ID: designatedTarget}}
 	} else {
 		cands, err = s.selectRouteCandidates(ctx, c, originalModel, string(clientProtocol))
 	}
-	if nonStreamTarget == 0 && err == nil && requestMethod == http.MethodPost && requestFamily != protocol.RequestFamilyAlphaSearch {
+	if designatedTarget == 0 && err == nil && requestMethod == http.MethodPost && requestFamily != protocol.RequestFamilyAlphaSearch {
 		cands = s.appendAntigravityCreditsCandidates(ctx, cands, originalModel, string(clientProtocol), all)
 	}
 	if err != nil {
@@ -770,8 +776,8 @@ func (s *Server) HandleProxyRequest(c *gin.Context) {
 
 	var lastResult *proxyResult
 	var succeeded bool
-	if nonStreamTarget > 0 {
-		lastResult, succeeded = s.tryDesignatedChannel(ctx, 0, nonStreamTarget, "non-stream", reqCtx, c.Writer)
+	if designatedTarget > 0 {
+		lastResult, succeeded = s.tryDesignatedChannel(ctx, 0, designatedTarget, designatedLabel, reqCtx, c.Writer)
 	} else {
 		lastResult, succeeded = s.runProxyAttemptLoop(ctx, cands, reqCtx, c.Writer)
 	}

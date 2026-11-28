@@ -49,6 +49,7 @@ const (
 	channelRouteStickySession = "session"
 
 	channelRouteReasonDefault      = "default"
+	channelRouteReasonLogprobs     = "logprobs"
 	channelRouteReasonTokenTier    = "token_tier"
 	channelRouteReasonThinkingTier = "thinking_tier"
 	channelRouteReasonOverflow     = "overflow"
@@ -112,6 +113,8 @@ func (t ChannelRouteThinkingTier) matches(effort string) bool {
 // 结束本次请求；冷却仍按首字节超时（598）记模型级，后续请求照常跳过该渠道。
 // 与 FirstByteTimeoutChannelID 互斥：一个要立刻失败，一个要转最终渠道。
 // NonStreamChannelID>0 时客户端非流式请求直接使用指定渠道，成功或错误均作为最终结果。
+// LogprobsPool 非 nil 时客户端请求要求返回 logprobs 的调用优先分流到该渠道组（优先于思考与 Token 档位）；
+// LogprobsChannelID>0 时此类请求直接使用指定渠道（与 LogprobsPool 互斥，且优先于 NonStreamChannelID）。
 // ThinkingTiers 按请求的思考档位（reasoning_effort / thinking.effort / thinkingLevel 等，
 // 或模型名后缀）决定渠道组，优先于 Token 档位：思考档位是客户端对本次请求的显式选择，
 // 而输入 Token 只是估算。未配置或都不命中时退回 Token 档位与 DefaultPool。
@@ -123,6 +126,8 @@ type ChannelRouteRule struct {
 	DefaultPool               int                        `json:"default_pool"`
 	TokenTiers                []ChannelRouteTokenTier    `json:"token_tiers"`
 	ThinkingTiers             []ChannelRouteThinkingTier `json:"thinking_tiers,omitempty"`
+	LogprobsPool              *int                       `json:"logprobs_pool,omitempty"`
+	LogprobsChannelID         int64                      `json:"logprobs_channel_id,omitempty"`
 	Overflow                  []ChannelRouteOverflow     `json:"overflow"`
 	Sticky                    string                     `json:"sticky"`
 	Strict                    bool                       `json:"strict"`
@@ -321,6 +326,19 @@ func normalizeChannelRouteRule(rule ChannelRouteRule) (ChannelRouteRule, error) 
 	if rule.NonStreamChannelID < 0 {
 		return ChannelRouteRule{}, fmt.Errorf("non_stream_channel_id must be >= 0")
 	}
+	if rule.LogprobsPool != nil {
+		if !model.ValidChannelPool(*rule.LogprobsPool) {
+			return ChannelRouteRule{}, fmt.Errorf("logprobs_pool must be between %d and %d", model.ChannelPoolMain, model.ChannelPoolCount-1)
+		}
+		pool := *rule.LogprobsPool
+		rule.LogprobsPool = &pool
+	}
+	if rule.LogprobsChannelID < 0 {
+		return ChannelRouteRule{}, fmt.Errorf("logprobs_channel_id must be >= 0")
+	}
+	if rule.LogprobsPool != nil && rule.LogprobsChannelID > 0 {
+		return ChannelRouteRule{}, fmt.Errorf("logprobs_pool cannot be combined with logprobs_channel_id")
+	}
 	if rule.FirstByteTimeoutChannelID < 0 || (rule.FirstByteTimeoutChannelID > 0 && rule.FirstByteTimeoutSeconds == 0) {
 		return ChannelRouteRule{}, fmt.Errorf("first_byte_timeout_channel_id requires a positive timeout and channel ID")
 	}
@@ -398,6 +416,17 @@ func cloneChannelRouteConfig(config ChannelRouteConfig) ChannelRouteConfig {
 	for i, rule := range config.Rules {
 		rule.Models = slices.Clone(rule.Models)
 		rule.TokenTiers = append([]ChannelRouteTokenTier{}, rule.TokenTiers...)
+		if len(rule.ThinkingTiers) > 0 {
+			thinkingTiers := make([]ChannelRouteThinkingTier, len(rule.ThinkingTiers))
+			for j, tier := range rule.ThinkingTiers {
+				thinkingTiers[j] = ChannelRouteThinkingTier{Efforts: slices.Clone(tier.Efforts), Pool: tier.Pool}
+			}
+			rule.ThinkingTiers = thinkingTiers
+		}
+		if rule.LogprobsPool != nil {
+			pool := *rule.LogprobsPool
+			rule.LogprobsPool = &pool
+		}
 		rule.Overflow = append([]ChannelRouteOverflow{}, rule.Overflow...)
 		rules[i] = rule
 	}
@@ -500,8 +529,14 @@ func (s *Server) commitChannelRouteConfig(ctx context.Context, config ChannelRou
 }
 
 func channelRouteRuleEqual(a, b ChannelRouteRule) bool {
+	equalPoolPtr := (a.LogprobsPool == nil && b.LogprobsPool == nil) ||
+		(a.LogprobsPool != nil && b.LogprobsPool != nil && *a.LogprobsPool == *b.LogprobsPool)
+	equalThinkingTiers := slices.EqualFunc(a.ThinkingTiers, b.ThinkingTiers, func(x, y ChannelRouteThinkingTier) bool {
+		return x.Pool == y.Pool && slices.Equal(x.Efforts, y.Efforts)
+	})
 	return a.ID == b.ID && a.Name == b.Name && a.Enabled == b.Enabled && slices.Equal(a.Models, b.Models) &&
-		a.DefaultPool == b.DefaultPool && slices.Equal(a.TokenTiers, b.TokenTiers) && slices.Equal(a.Overflow, b.Overflow) &&
+		a.DefaultPool == b.DefaultPool && slices.Equal(a.TokenTiers, b.TokenTiers) && equalThinkingTiers &&
+		equalPoolPtr && a.LogprobsChannelID == b.LogprobsChannelID && slices.Equal(a.Overflow, b.Overflow) &&
 		a.Sticky == b.Sticky && a.Strict == b.Strict && a.FirstByteTimeoutSeconds == b.FirstByteTimeoutSeconds && a.FirstByteTimeoutChannelID == b.FirstByteTimeoutChannelID && a.FirstByteTimeoutFailFast == b.FirstByteTimeoutFailFast && a.NonStreamChannelID == b.NonStreamChannelID
 }
 
@@ -528,15 +563,19 @@ type channelPoolRoute struct {
 	// 供管理端模拟回显；空串表示请求未声明档位。
 	thinkingTier   int
 	thinkingEffort string
-	inputTokens    int // 估算输入 Token；-1 表示规则未配置档位、未估算
-	reason         string
-	stickyKey      channelPoolAffinityKey
+	logprobs       bool
+	// logprobsMatched 标记请求是否因规则的 LogprobsPool 命中分流，用于隔离粘性。
+	logprobsMatched bool
+	inputTokens     int // 估算输入 Token；-1 表示规则未配置档位、未估算
+	reason          string
+	stickyKey       channelPoolAffinityKey
 	// firstByteTimeout 是命中规则配置的首字超时，每次渠道尝试生效；0 表示沿用系统设置。
 	firstByteTimeout          time.Duration
 	firstByteTimeoutChannelID int64
 	// firstByteTimeoutFailFast 时首字超时直接以 503 结束请求，不切换渠道也不再重试。
 	firstByteTimeoutFailFast bool
 	nonStreamChannelID       int64
+	logprobsChannelID        int64
 
 	mu           sync.Mutex
 	queues       *channelPoolQueues
@@ -550,6 +589,8 @@ type channelPoolRouteInput struct {
 	// thinkingEffort 是本次请求归一化后的思考档位（thinkingEffortFromRequest 的结果）；
 	// 空串表示请求未声明档位。只在规则配置了思考档位时参与决策。
 	thinkingEffort string
+	// logprobs 报告本次请求是否要求返回 logprobs。
+	logprobs bool
 	// session 惰性返回会话粘性键（令牌+客户端会话 ID），只在命中规则启用会话粘性时调用；
 	// nil 或空串表示无会话身份。
 	session func() string
@@ -748,26 +789,32 @@ func (s *Server) routeChannelPools(in channelPoolRouteInput) *channelPoolRoute {
 }
 
 // decideChannelPoolRoute 计算渠道组顺序，不占用队列名额（管理端模拟复用）。
-// 顺序：思考档位（未命中退回 Token 档位）→ Token 档位（未命中用默认组）→ 会话粘性 →
-// 队列溢出 → 非严格模式追加其余组。
+// 顺序：Logprobs 渠道组 → 思考档位（未命中退回 Token 档位）→ Token 档位（未命中用默认组）→
+// 会话粘性 → 队列溢出 → 非严格模式追加其余组。
 func (s *Server) decideChannelPoolRoute(in channelPoolRouteInput) *channelPoolRoute {
 	rule := s.channelRoutes.Load().match(in.model)
 	if rule == nil {
-		return defaultChannelPoolRoute()
+		route := defaultChannelPoolRoute()
+		route.logprobs = in.logprobs
+		return route
 	}
 	route := &channelPoolRoute{
-		ruleID: rule.ID, ruleName: rule.Name, tier: -1, thinkingTier: -1, inputTokens: -1, reason: channelRouteReasonDefault,
+		ruleID: rule.ID, ruleName: rule.Name, tier: -1, thinkingTier: -1, logprobs: in.logprobs, inputTokens: -1, reason: channelRouteReasonDefault,
 		firstByteTimeout:          time.Duration(rule.FirstByteTimeoutSeconds) * time.Second,
 		firstByteTimeoutChannelID: rule.FirstByteTimeoutChannelID,
 		firstByteTimeoutFailFast:  rule.FirstByteTimeoutFailFast,
 		nonStreamChannelID:        rule.NonStreamChannelID,
+		logprobsChannelID:         rule.LogprobsChannelID,
 	}
 
 	base := rule.DefaultPool
+	if rule.LogprobsPool != nil && in.logprobs {
+		base, route.logprobsMatched, route.reason = *rule.LogprobsPool, true, channelRouteReasonLogprobs
+	}
 	// 思考档位先于 Token 档位：它是客户端对本次请求的显式选择，而输入 Token 只是估算。
 	// 规则未配置档位、或档位都不命中时退回 Token 档位。
 	effort := in.thinkingEffort
-	if len(rule.ThinkingTiers) > 0 {
+	if !route.logprobsMatched && len(rule.ThinkingTiers) > 0 {
 		route.thinkingEffort = effort
 		for i, tier := range rule.ThinkingTiers {
 			if tier.matches(effort) {
@@ -776,7 +823,7 @@ func (s *Server) decideChannelPoolRoute(in channelPoolRouteInput) *channelPoolRo
 			}
 		}
 	}
-	if route.thinkingTier < 0 && len(rule.TokenTiers) > 0 {
+	if !route.logprobsMatched && route.thinkingTier < 0 && len(rule.TokenTiers) > 0 {
 		tokens := in.inputTokens
 		if !in.inputTokensKnown {
 			tokens = estimateRouteInputTokens(in.body)
@@ -805,8 +852,9 @@ func (s *Server) decideChannelPoolRoute(in channelPoolRouteInput) *channelPoolRo
 				now = time.Now()
 			}
 			if bound, ok := s.channelPoolAffinity.lookup(route.stickyKey, now); ok && model.ValidChannelPool(bound.pool) &&
+				(rule.LogprobsPool == nil || bound.logprobs == route.logprobsMatched) &&
 				(rule.Sticky == channelRouteStickySession || (bound.tier == route.tier && bound.thinkingTier == route.thinkingTier)) {
-				// 粘性组优先；它不可用时退回本次按思考/Token 档位计算出的组。
+				// 粘性组优先；它不可用时退回本次按 Logprobs/思考/Token 档位计算出的组。
 				appendPool(bound.pool)
 				appendPool(base)
 				route.reason = channelRouteReasonSticky
@@ -856,7 +904,7 @@ func (s *Server) bindChannelPoolAffinity(route *channelPoolRoute, pool int) {
 	if s == nil || route == nil || route.stickyKey.ruleID == "" {
 		return
 	}
-	s.channelPoolAffinity.bind(route.stickyKey, channelPoolAffinityTarget{pool: pool, tier: route.tier, thinkingTier: route.thinkingTier}, time.Now())
+	s.channelPoolAffinity.bind(route.stickyKey, channelPoolAffinityTarget{pool: pool, tier: route.tier, thinkingTier: route.thinkingTier, logprobs: route.logprobsMatched}, time.Now())
 }
 
 // ============================================================================
@@ -928,6 +976,9 @@ type channelPoolAffinityTarget struct {
 	// thinkingTier 是绑定时命中的思考档位下标；-1 表示当时未命中思考档位。
 	// 规则配置了思考档位时，tier 粘性要求两档都相同，否则请求换了思考档位仍会被拉回旧组。
 	thinkingTier int
+	// logprobs 记录绑定时是否命中了规则的 LogprobsPool：开启或关闭 logprobs 时均不跨类复用粘性，
+	// 避免普通会话被钉在昂贵的 logprobs 组，或 logprobs 请求被钉回不支持 logprobs 的组。
+	logprobs bool
 }
 
 type channelPoolAffinityEntry struct {
@@ -1068,4 +1119,35 @@ func looksLikeBinaryPayload(text string) bool {
 		}
 	}
 	return true
+}
+
+// requestHasLogprobs 报告客户端请求体是否要求返回 token 对数概率：
+// 覆盖 Chat Completions（logprobs=true）、Completions（logprobs>0）、
+// Responses（include 含 message.output_text.logprobs）与 Gemini（generationConfig.responseLogprobs=true）。
+// 显式 false、0、null 或未声明均返回 false。
+func requestHasLogprobs(body []byte) bool {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return false
+	}
+	logprobs := gjson.GetBytes(body, "logprobs")
+	if logprobs.Type == gjson.True || (logprobs.Type == gjson.Number && logprobs.Num > 0) {
+		return true
+	}
+	if gjson.GetBytes(body, "generationConfig.responseLogprobs").Type == gjson.True ||
+		gjson.GetBytes(body, "generation_config.response_logprobs").Type == gjson.True {
+		return true
+	}
+	include := gjson.GetBytes(body, "include")
+	if include.IsArray() {
+		matched := false
+		include.ForEach(func(_, item gjson.Result) bool {
+			if item.Type == gjson.String && strings.EqualFold(strings.TrimSpace(item.Str), "message.output_text.logprobs") {
+				matched = true
+				return false
+			}
+			return true
+		})
+		return matched
+	}
+	return false
 }

@@ -60,6 +60,7 @@ type channelRouteSimulation struct {
 	// （空串表示请求未声明档位）。
 	ThinkingTier   int                          `json:"thinking_tier"`
 	ThinkingEffort string                       `json:"thinking_effort"`
+	Logprobs       bool                         `json:"logprobs,omitempty"`
 	InputTokens    int                          `json:"input_tokens"`
 	Reason         string                       `json:"reason"`
 	Pools          []channelRouteSimulationPool `json:"pools"`
@@ -69,6 +70,7 @@ type channelRouteSimulation struct {
 	FirstByteTimeoutChannelID int64 `json:"first_byte_timeout_channel_id,omitempty"`
 	FirstByteTimeoutFailFast  bool  `json:"first_byte_timeout_fail_fast,omitempty"`
 	NonStreamChannelID        int64 `json:"non_stream_channel_id,omitempty"`
+	LogprobsChannelID         int64 `json:"logprobs_channel_id,omitempty"`
 }
 
 // HandleGetChannelRoutes 返回渠道路由规则、各渠道组概况与实时队列。
@@ -117,6 +119,7 @@ func (s *Server) HandleUpdateChannelRoutes(c *gin.Context) {
 		}{
 			{rule.FirstByteTimeoutChannelID, "first byte timeout"},
 			{rule.NonStreamChannelID, "non-stream"},
+			{rule.LogprobsChannelID, "logprobs"},
 		} {
 			if target.id == 0 {
 				continue
@@ -150,6 +153,8 @@ func (s *Server) HandleSimulateChannelRoute(c *gin.Context) {
 		Body        json.RawMessage `json:"body"`
 		// ThinkingEffort 显式指定思考档位；省略时按 body 解析，与真实请求一致。
 		ThinkingEffort string `json:"thinking_effort"`
+		// Logprobs 显式指定是否请求 logprobs；省略时按 body 解析。
+		Logprobs *bool `json:"logprobs"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		RespondErrorMsg(c, http.StatusBadRequest, "invalid request: "+err.Error())
@@ -177,6 +182,11 @@ func (s *Server) HandleSimulateChannelRoute(c *gin.Context) {
 	if in.thinkingEffort == "" {
 		in.thinkingEffort = extractThinkingEffortFromJSON(in.body)
 	}
+	if req.Logprobs != nil {
+		in.logprobs = *req.Logprobs
+	} else {
+		in.logprobs = requestHasLogprobs(in.body)
+	}
 	route := s.decideChannelPoolRoute(in)
 	// 规则未配置 Token 档位时决策不估算，这里仍展示输入 Token 便于核对。
 	inputTokens := route.inputTokens
@@ -189,13 +199,14 @@ func (s *Server) HandleSimulateChannelRoute(c *gin.Context) {
 	result := channelRouteSimulation{
 		Model: routingModel, Matched: route.ruleID != "", RuleID: route.ruleID, RuleName: route.ruleName,
 		// ThinkingEffort 回显解析到的档位，即使规则没配置思考档位也照常显示，便于核对解析结果。
-		Tier: route.tier, ThinkingTier: route.thinkingTier, ThinkingEffort: in.thinkingEffort,
+		Tier: route.tier, ThinkingTier: route.thinkingTier, ThinkingEffort: in.thinkingEffort, Logprobs: in.logprobs,
 		InputTokens: inputTokens, Reason: route.reason,
 		Pools:                     make([]channelRouteSimulationPool, 0, len(route.pools)),
 		FirstByteTimeoutSeconds:   int(route.firstByteTimeout / time.Second),
 		FirstByteTimeoutChannelID: route.firstByteTimeoutChannelID,
 		FirstByteTimeoutFailFast:  route.firstByteTimeoutFailFast,
 		NonStreamChannelID:        route.nonStreamChannelID,
+		LogprobsChannelID:         route.logprobsChannelID,
 	}
 	for _, pool := range route.pools {
 		result.Pools = append(result.Pools, channelRouteSimulationPool{

@@ -149,3 +149,30 @@ test('thinking tiers route by effort and round-trip', () => {
   assert.match(routes.summarizeRule(rule), /思考 未声明档位 \/ low → 渠道1/);
   assert.match(routes.summarizeRule(rule), /思考 max \/ 任意档位 → 渠道2/);
 });
+
+test('logprobs routing supports both channel pools and designated channels', () => {
+  const poolDraft = { ...routes.emptyRuleDraft(), models: ['kimi-k3.1-pro'], logprobsTarget: 'pool:2' };
+  const poolRule = routes.draftsToConfig([poolDraft]).config.rules[0];
+  assert.equal(poolRule.logprobs_pool, 2);
+  assert.equal(poolRule.logprobs_channel_id, undefined);
+  assert.equal(routes.ruleToDraft(poolRule).logprobsTarget, 'pool:2');
+  assert.match(routes.summarizeRule(poolRule), /Logprobs → 渠道2；其余 → 主渠道/);
+
+  const poolZeroDraft = { ...routes.emptyRuleDraft(), models: ['kimi-k3.1-pro'], defaultPool: 1, logprobsTarget: 'pool:0' };
+  const poolZeroRule = routes.draftsToConfig([poolZeroDraft]).config.rules[0];
+  assert.equal(poolZeroRule.logprobs_pool, 0);
+  assert.equal(routes.ruleToDraft(poolZeroRule).logprobsTarget, 'pool:0');
+  assert.match(routes.summarizeRule(poolZeroRule), /Logprobs → 主渠道；其余 → 渠道1/);
+
+  const channelDraft = { ...routes.emptyRuleDraft(), models: ['kimi-k3.1-pro'], logprobsTarget: '50' };
+  const channelRule = routes.draftsToConfig([channelDraft]).config.rules[0];
+  assert.equal(channelRule.logprobs_channel_id, 50);
+  assert.equal(channelRule.logprobs_pool, undefined);
+  assert.equal(routes.ruleToDraft(channelRule).logprobsTarget, '50');
+  assert.match(routes.summarizeRule(channelRule), /Logprobs 请求直接使用渠道 #50/);
+
+  assert.equal(routes.draftsToConfig([{ ...routes.emptyRuleDraft(), models: ['m'] }]).config.rules[0].logprobs_pool, undefined);
+  assert.equal(routes.draftsToConfig([{ ...routes.emptyRuleDraft(), models: ['m'] }]).config.rules[0].logprobs_channel_id, undefined);
+  assert.match(routes.draftsToConfig([{ ...poolDraft, logprobsTarget: 'pool:9' }]).error, /Logprobs/);
+  assert.match(routes.draftsToConfig([{ ...poolDraft, logprobsTarget: '0' }]).error, /Logprobs/);
+});

@@ -151,3 +151,74 @@ func TestAdminNonStreamDesignatedChannel(t *testing.T) {
 		t.Fatalf("disabled status=%d", status)
 	}
 }
+
+func TestLogprobsDesignatedChannelAndPrecedence(t *testing.T) {
+	var primaryCalls, nonStreamCalls, logprobsCalls atomic.Int32
+	primary := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"primary\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer primary.Close()
+	nonStream := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		nonStreamCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"ns","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"ns"},"finish_reason":"stop"}]}`)
+	}))
+	defer nonStream.Close()
+	logprobsTarget := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logprobsCalls.Add(1)
+		payload, _ := io.ReadAll(r.Body)
+		if len(payload) > 0 && payload[0] == '{' && r.Header.Get("Accept") == "text/event-stream" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"lp\"},\"logprobs\":{\"content\":[]},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"lp","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"lp"},"logprobs":{"content":[]},"finish_reason":"stop"}]}`)
+	}))
+	defer logprobsTarget.Close()
+
+	env := setupProxyTestEnv(t, []testChannel{
+		{name: "primary", models: "gpt-test", priority: 100},
+		{name: "nonstream", models: "gpt-test", priority: 90, channelPool: 1},
+		{name: "logprobs", models: "gpt-test", priority: 80, channelPool: 2},
+	}, map[int]string{0: primary.URL, 1: nonStream.URL, 2: logprobsTarget.URL})
+
+	useChannelRoutes(t, env.server, ChannelRouteRule{
+		ID: "lp-rule", Enabled: true, Models: []string{"gpt-test"}, Strict: true,
+		NonStreamChannelID: 2, LogprobsChannelID: 3,
+	})
+
+	// Non-stream with logprobs=true must prefer LogprobsChannelID (3) over NonStreamChannelID (2).
+	resp := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
+		"model": "gpt-test", "stream": false, "logprobs": true, "messages": []map[string]string{{"role": "user", "content": "hi"}},
+	}, nil)
+	if resp.Code != 200 || logprobsCalls.Load() != 1 || nonStreamCalls.Load() != 0 || primaryCalls.Load() != 0 {
+		t.Fatalf("non-stream logprobs: code=%d lp=%d ns=%d primary=%d body=%s", resp.Code, logprobsCalls.Load(), nonStreamCalls.Load(), primaryCalls.Load(), resp.Body.String())
+	}
+
+	// Stream with logprobs=true must also route to LogprobsChannelID (3).
+	resp = doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
+		"model": "gpt-test", "stream": true, "logprobs": true, "messages": []map[string]string{{"role": "user", "content": "hi"}},
+	}, map[string]string{"Accept": "text/event-stream"})
+	if resp.Code != 200 || logprobsCalls.Load() != 2 || primaryCalls.Load() != 0 {
+		t.Fatalf("stream logprobs: code=%d lp=%d primary=%d body=%s", resp.Code, logprobsCalls.Load(), primaryCalls.Load(), resp.Body.String())
+	}
+
+	// Non-stream with logprobs=false falls back to NonStreamChannelID (2).
+	resp = doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
+		"model": "gpt-test", "stream": false, "logprobs": false, "messages": []map[string]string{{"role": "user", "content": "hi"}},
+	}, nil)
+	if resp.Code != 200 || nonStreamCalls.Load() != 1 || logprobsCalls.Load() != 2 {
+		t.Fatalf("non-stream logprobs=false: code=%d ns=%d lp=%d", resp.Code, nonStreamCalls.Load(), logprobsCalls.Load())
+	}
+
+	// Stream without logprobs uses primary channel (1).
+	resp = doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
+		"model": "gpt-test", "stream": true, "messages": []map[string]string{{"role": "user", "content": "hi"}},
+	}, nil)
+	if resp.Code != 200 || primaryCalls.Load() != 1 {
+		t.Fatalf("stream without logprobs: code=%d primary=%d", resp.Code, primaryCalls.Load())
+	}
+}
