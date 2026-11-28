@@ -371,3 +371,55 @@ func TestForceUpstreamStreamJSONFirstByte(t *testing.T) {
 		}
 	})
 }
+
+func TestForceUpstreamStreamPreservesChatLogprobs(t *testing.T) {
+	env := setupProxyTestEnv(
+		t,
+		[]testChannel{{
+			name:                  "forced-logprobs",
+			upstreamProtocol:      "anthropic",
+			protocolTransformMode: model.ProtocolTransformModeAuto,
+			models:                "kimi-k3.1-pro",
+			apiKey:                "test-key",
+			customRequestRules:    &model.CustomRequestRules{ForceUpstreamStream: true},
+		}},
+		map[int]string{0: "https://upstream.example.com"},
+	)
+	sseBody := strings.Join([]string{
+		`data: {"id":"chatcmpl-lp","object":"chat.completion.chunk","created":1700000000,"model":"kimi-k3.1-pro","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}]}`,
+		``,
+		`data: {"id":"chatcmpl-lp","object":"chat.completion.chunk","created":1700000000,"model":"kimi-k3.1-pro","choices":[{"index":0,"delta":{"reasoning_content":"Think"},"logprobs":{"content":[{"token":"Think","logprob":-0.12,"bytes":[84,104,105,110,107],"top_logprobs":[{"token":"Think","logprob":-0.12,"bytes":[84,104,105,110,107]}]}]},"finish_reason":null}]}`,
+		``,
+		`data: {"id":"chatcmpl-lp","object":"chat.completion.chunk","created":1700000000,"model":"kimi-k3.1-pro","choices":[{"index":0,"delta":{"content":"A"},"logprobs":{"content":[{"token":"A","logprob":-0.01,"bytes":[65],"top_logprobs":[{"token":"A","logprob":-0.01,"bytes":[65]}]}]},"finish_reason":"stop"}]}`,
+		``,
+		`data: {"id":"chatcmpl-lp","object":"chat.completion.chunk","created":1700000000,"model":"kimi-k3.1-pro","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	env.server.client = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(sseBody)),
+		}, nil
+	})}
+
+	response := doProxyRequest(t, env.engine, "/v1/chat/completions", map[string]any{
+		"model":        "kimi-k3.1-pro",
+		"stream":       false,
+		"logprobs":     true,
+		"top_logprobs": 3,
+		"messages":     []any{map[string]any{"role": "user", "content": "只回答字母 A。"}},
+	}, nil)
+	if response.Code != 200 {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	raw := response.Body.Bytes()
+	if got := gjson.GetBytes(raw, "choices.0.logprobs.content.#").Int(); got != 2 {
+		t.Fatalf("expected 2 logprobs items, got %d in %s", got, raw)
+	}
+	if got := gjson.GetBytes(raw, "choices.0.logprobs.content.1.token").String(); got != "A" {
+		t.Fatalf("expected second logprobs token A, got %q in %s", got, raw)
+	}
+}

@@ -231,6 +231,9 @@ type codeBuddyChoice struct {
 	role, finish       string
 	content, reasoning strings.Builder
 	tools              map[int]*codeBuddyToolCall
+	hasLogprobs        bool
+	logprobsContent    []json.RawMessage
+	logprobsRefusal    []json.RawMessage
 }
 
 // collectCodeBuddyCompletion shares the application's bounded SSE reader and
@@ -280,9 +283,10 @@ func collectChatCompletion(ctx context.Context, reader io.Reader, onEvent func(*
 			Created int64           `json:"created"`
 			Usage   json.RawMessage `json:"usage"`
 			Choices []struct {
-				Index  int    `json:"index"`
-				Finish string `json:"finish_reason"`
-				Delta  struct {
+				Index    int             `json:"index"`
+				Finish   string          `json:"finish_reason"`
+				Logprobs json.RawMessage `json:"logprobs"`
+				Delta    struct {
 					Role      string              `json:"role"`
 					Content   string              `json:"content"`
 					Reasoning string              `json:"reasoning_content"`
@@ -318,6 +322,21 @@ func collectChatCompletion(ctx context.Context, reader io.Reader, onEvent func(*
 			choice.reasoning.WriteString(part.Delta.Reasoning)
 			if part.Finish != "" {
 				choice.finish = part.Finish
+			}
+			if len(part.Logprobs) > 0 && string(part.Logprobs) != "null" {
+				var lp struct {
+					Content []json.RawMessage `json:"content"`
+					Refusal []json.RawMessage `json:"refusal"`
+				}
+				if json.Unmarshal(part.Logprobs, &lp) == nil {
+					choice.hasLogprobs = true
+					for _, item := range lp.Content {
+						choice.logprobsContent = append(choice.logprobsContent, bytes.Clone(item))
+					}
+					for _, item := range lp.Refusal {
+						choice.logprobsRefusal = append(choice.logprobsRefusal, bytes.Clone(item))
+					}
+				}
 			}
 			for _, delta := range part.Delta.ToolCalls {
 				call := choice.tools[delta.Index]
@@ -377,7 +396,19 @@ func collectChatCompletion(ctx context.Context, reader io.Reader, onEvent func(*
 		if len(calls) > 0 {
 			message["tool_calls"] = calls
 		}
-		output = append(output, map[string]any{"index": index, "message": message, "finish_reason": choice.finish})
+		choiceObj := map[string]any{"index": index, "message": message, "finish_reason": choice.finish}
+		if choice.hasLogprobs {
+			contentItems := choice.logprobsContent
+			if contentItems == nil {
+				contentItems = []json.RawMessage{}
+			}
+			lpObj := map[string]any{"content": contentItems}
+			if len(choice.logprobsRefusal) > 0 {
+				lpObj["refusal"] = choice.logprobsRefusal
+			}
+			choiceObj["logprobs"] = lpObj
+		}
+		output = append(output, choiceObj)
 	}
 	result := map[string]any{"id": id, "object": "chat.completion", "created": created, "model": responseModel, "choices": output}
 	if len(usage) > 0 {
